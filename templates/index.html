@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Kfir's Intelliscan</title>
+<style>
+/* ── Reset & Variables ─────────────────────────────────────── */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0d1117;--surface:#161b22;--border:#30363d;--accent:#58a6ff;
+  --text:#c9d1d9;--muted:#8b949e;--green:#7ee787;--red:#f85149;
+  --radius:8px;--shadow:0 4px 12px rgba(0,0,0,.4);
+  --transition:150ms ease;
+}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:0.01ms!important;transition-duration:0.01ms!important}}
+body{font-family:system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);height:100vh;display:flex;overflow:hidden}
+button,input,select{font-family:inherit}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+/* ── Sidebar ───────────────────────────────────────────────── */
+#sb{background:var(--surface);border-right:1px solid var(--border);display:flex;flex-direction:column;transition:width var(--transition);width:280px;flex-shrink:0;z-index:10;overflow:hidden}
+#sb.collapsed{width:48px}
+#sb-header{display:flex;align-items:center;gap:8px;padding:12px;border-bottom:1px solid var(--border);justify-content:center}
+#sb-header h2{color:var(--accent);font-size:14px;white-space:nowrap;overflow:hidden}
+#sb.collapsed #sb-header h2,#sb.collapsed .sb-label,#sb.collapsed .panel-btn span,#sb.collapsed #user-name,#sb.collapsed #auth-btn span,#sb.collapsed #userbar{display:none}
+#sb.collapsed #tabs{visibility:hidden}
+#hamburger{background:none;border:none;color:var(--muted);cursor:pointer;font-size:18px;padding:2px 4px;line-height:1;flex-shrink:0}
+#hamburger:hover{color:var(--accent)}
+
+#tabs{flex:1;overflow-y:auto;padding:4px 8px;display:flex;flex-direction:column;gap:2px}
+.tab{display:flex;align-items:center;gap:6px;padding:8px 10px;border-radius:var(--radius);cursor:pointer;font-size:13px;transition:background var(--transition);position:relative}
+.tab:hover{background:rgba(88,166,255,.08)}
+.tab.active{background:var(--accent);color:#fff}
+.tab .name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tab .close{opacity:0;margin-left:auto;font-size:14px;line-height:1;padding:0 2px;border-radius:3px}
+.tab:hover .close{opacity:.6}
+.tab .close:hover{opacity:1;background:rgba(255,255,255,.15)}
+.tab .status{font-size:10px;flex-shrink:0}
+.tab.active .status{color:inherit}
+
+#new-project-btn{display:flex;align-items:center;gap:6px;padding:8px 10px;border-radius:var(--radius);cursor:pointer;font-size:12px;color:var(--muted);border:1px dashed var(--border);margin:4px 0}
+#new-project-btn:hover{border-color:var(--accent);color:var(--accent)}
+
+.panel-list{padding:8px;border-top:1px solid var(--border);display:flex;flex-direction:column;gap:2px}
+.panel-btn{display:flex;align-items:center;gap:8px;padding:8px 12px;background:none;border:none;color:var(--text);cursor:pointer;font-size:13px;text-align:left;border-radius:var(--radius);transition:background var(--transition)}
+.panel-btn:hover{background:rgba(88,166,255,.06)}
+.panel-btn.active{background:var(--accent);color:#fff}
+.panel-btn .icon{font-size:14px;width:20px;text-align:center}
+
+#userbar{padding:10px 12px;border-top:1px solid var(--border);display:flex;align-items:center;gap:6px}
+#auth-btn{flex:1;background:var(--surface);border:1px solid var(--border);color:var(--text);padding:5px 10px;border-radius:var(--radius);cursor:pointer;font-size:11px;text-align:center;transition:all var(--transition)}
+#auth-btn:hover{border-color:var(--accent)}
+#auth-btn.logged-in{background:var(--bg);border-color:var(--accent);color:var(--accent)}
+#auth-btn .logout-hint{display:none;position:absolute;bottom:120%;left:50%;transform:translateX(-50%);background:var(--surface);border:1px solid var(--border);padding:2px 8px;border-radius:3px;font-size:10px;white-space:nowrap;color:var(--red)}
+#auth-btn.logged-in:hover .logout-hint{display:block}
+
+/* ── Main ──────────────────────────────────────────────────── */
+#main{flex:1;display:flex;flex-direction:column;overflow:hidden}
+.tab-panel{display:none;flex:1;overflow-y:auto;flex-direction:column}
+.tab-panel.active{display:flex}
+
+/* ── Chat ──────────────────────────────────────────────────── */
+#chat{flex:1;overflow-y:auto;padding:20px;display:flex;flex-direction:column;gap:12px}
+#input-area{padding:14px 16px;border-top:1px solid var(--border);display:flex;gap:8px;background:var(--surface);position:sticky;bottom:0}
+#input-area input{flex:1;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:10px 14px;color:var(--text);font-size:14px;outline:none;transition:border-color var(--transition)}
+#input-area input:focus{border-color:var(--accent)}
+#input-area button{background:#238636;border:none;color:#fff;padding:10px 20px;border-radius:var(--radius);cursor:pointer;font-size:14px;font-weight:600;transition:background var(--transition)}
+#input-area button:hover{background:#2ea043}
+#input-area button:disabled{opacity:.5}
+.quick-btns{display:flex;flex-wrap:wrap;gap:6px;padding:0 16px 12px}
+.quick-btns button{background:var(--surface);border:1px solid var(--border);color:var(--text);padding:5px 10px;border-radius:var(--radius);cursor:pointer;font-size:12px;transition:all var(--transition)}
+.quick-btns button:hover{border-color:var(--accent);color:var(--accent)}
+
+/* ── Messages ──────────────────────────────────────────────── */
+.msg{max-width:90%;padding:10px 14px;border-radius:var(--radius);font-size:14px;line-height:1.5;animation:fadeIn .2s ease}
+.msg.user{align-self:flex-end;background:#1f6feb;color:#fff}
+.msg.bot{align-self:flex-start;background:var(--surface);border:1px solid var(--border)}
+.msg .tag{font-size:11px;color:var(--muted);margin-bottom:4px;text-transform:uppercase}
+.msg .llm{background:rgba(88,166,255,.08);border-left:3px solid var(--accent);padding:8px 12px;margin-top:8px;border-radius:4px;font-size:13px;line-height:1.6}
+
+/* ── Bento Grid results ────────────────────────────────────── */
+.bento{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:10px;margin-top:4px}
+.bento-card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px;transition:all var(--transition)}
+.bento-card:hover{border-color:var(--accent);box-shadow:var(--shadow);transform:translateY(-1px)}
+.bento-card .card-title{font-weight:600;font-size:14px;color:var(--text);margin-bottom:4px;word-break:break-all}
+.bento-card .card-meta{font-size:11px;color:var(--muted)}
+.bento-card .card-sig{color:var(--green);font-size:12px;margin-top:4px;font-family:monospace;word-break:break-all}
+.bento-card .card-edge{color:#d2a8ff;font-size:12px;word-break:break-all}
+.bento-card .card-risk{color:#f0883e;font-weight:600}
+.bento-card .card-purpose{color:var(--muted);font-size:12px;margin-top:4px;line-height:1.4}
+
+.rb{margin-top:10px}
+.rb h4{color:var(--accent);font-size:12px;margin:6px 0 4px;text-transform:uppercase;letter-spacing:.5px}
+.spin{display:inline-block;width:16px;height:16px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:sp .6s linear infinite;margin-right:6px;vertical-align:middle}
+@keyframes sp{to{transform:rotate(360deg)}}
+@keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
+
+/* ── Panels ────────────────────────────────────────────────── */
+.panel-content{padding:24px 32px;max-width:900px}
+.panel-content h3{color:var(--accent);font-size:18px;margin-bottom:16px}
+.panel-content p{line-height:1.7;margin-bottom:12px;font-size:14px}
+.panel-content code{background:var(--surface);padding:2px 6px;border-radius:3px;font-size:13px;color:var(--green)}
+.panel-content pre{background:var(--surface);padding:14px;border-radius:var(--radius);margin:12px 0;font-size:13px;overflow-x:auto}
+.drop-zone{border:2px dashed var(--border);border-radius:var(--radius);padding:30px;text-align:center;margin:12px 0;cursor:pointer;transition:border-color var(--transition)}
+.drop-zone:hover,.drop-zone.dragover{border-color:var(--accent)}
+.drop-zone p{color:var(--muted);font-size:14px}
+.drop-zone strong{color:var(--accent)}
+.upload-result{margin-top:8px;font-size:13px}
+.upload-result .ok{color:var(--green)}.upload-result .wait{color:var(--muted)}
+.form-group{margin:12px 0}
+.form-group label{display:block;font-size:13px;color:var(--muted);margin-bottom:4px}
+.form-group input{width:100%;background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:8px 12px;color:var(--text);font-size:14px;outline:none;transition:border-color var(--transition)}
+.form-group input:focus{border-color:var(--accent)}
+.btn{background:#238636;border:none;color:#fff;padding:8px 16px;border-radius:var(--radius);cursor:pointer;font-size:13px;font-weight:600;display:inline-block;text-decoration:none;margin:4px 4px 4px 0;transition:all var(--transition)}
+.btn:hover{background:#2ea043}
+.btn:active{transform:scale(.97)}
+.btn-outline{background:none;border:1px solid var(--border);color:var(--text)}
+.btn-outline:hover{border-color:var(--accent);color:var(--accent)}
+.btn-danger{background:#da3633}.btn-danger:hover{background:#f85149}
+.step{margin:16px 0;padding:12px 16px;background:var(--surface);border-radius:var(--radius);border-left:3px solid var(--accent)}
+.step h4{color:var(--accent);font-size:14px;margin-bottom:6px}
+.step p{font-size:13px;margin:4px 0}
+.sep{border-top:1px solid var(--border);margin:12px 0}
+
+/* ── Modal ─────────────────────────────────────────────────── */
+.modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:100;align-items:center;justify-content:center}
+.modal-overlay.active{display:flex}
+.modal{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:24px;width:500px;max-width:90vw;box-shadow:var(--shadow)}
+.modal h3{color:var(--accent);font-size:16px;margin-bottom:16px}
+.modal .actions{display:flex;gap:8px;justify-content:flex-end;margin-top:16px}
+.modal .status-msg{font-size:13px;margin-top:8px;padding:8px;border-radius:var(--radius)}
+
+/* ── Empty state ───────────────────────────────────────────── */
+.empty-state{text-align:center;padding:60px 20px;color:var(--muted)}
+.empty-state h3{color:var(--text);font-size:18px;margin-bottom:8px}
+.empty-state p{font-size:14px;margin-bottom:16px}
+
+/* ── Responsive ────────────────────────────────────────────── */
+@media(max-width:768px){ #sb{width:100%;position:absolute;height:100%} #sb.collapsed{width:48px}}
+@media(max-width:1024px){.panel-content{padding:16px}}
+
+/* ── ID watermark ──────────────────────────────────────────── */
+#id-watermark{position:absolute;bottom:4px;right:16px;color:#21262d;font-size:10px;z-index:0;pointer-events:none}
+</style>
+</head>
+<body>
+<!-- ── Modal ──────────────────────────────────────────────── -->
+<div class="modal-overlay" id="modal-overlay">
+  <div class="modal" id="modal">
+    <h3 id="modal-title">Add a Project</h3>
+    <div class="form-group">
+      <label>Bitbucket URL</label>
+      <input type="text" id="modal-git-url" placeholder="https://bitbucket.internal/team/project.git">
+    </div>
+    <div class="form-group">
+      <label>Project name</label>
+      <input type="text" id="modal-name" placeholder="auto-detected from URL">
+    </div>
+    <div id="modal-status" class="status-msg" style="display:none"></div>
+    <div class="actions">
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button class="btn" id="modal-submit" onclick="cloneProject()">Clone & Build</button>
+    </div>
+    <div class="sep"></div>
+    <p style="font-size:13px;color:var(--muted);margin-bottom:8px">Or upload graph files manually</p>
+    <div style="display:flex;gap:8px">
+      <button class="btn btn-outline" onclick="document.getElementById('modal-file-graphify').click()">Upload .json</button>
+      <input type="file" id="modal-file-graphify" accept=".json" style="display:none" onchange="uploadModalFile(this,'graphify')">
+      <button class="btn btn-outline" onclick="document.getElementById('modal-file-crg').click()">Upload .db</button>
+      <input type="file" id="modal-file-crg" accept=".db,.sqlite" style="display:none" onchange="uploadModalFile(this,'crg')">
+    </div>
+    <div id="modal-upload-status" style="font-size:12px;color:var(--muted);margin-top:8px"></div>
+  </div>
+</div>
+
+<!-- ── Sidebar ─────────────────────────────────────────────── -->
+<div id="sb">
+  <div id="sb-header">
+    <button id="hamburger" onclick="toggleSidebar()" aria-label="Toggle sidebar">&#9776;</button>
+    <h2>Kfir's Intelliscan</h2>
+  </div>
+  <div id="tabs"></div>
+  <button id="new-project-btn" class="sb-label" onclick="openModal()">+ New Project</button>
+  <div class="panel-list">
+    <button class="panel-btn active" data-panel="chat" onclick="switchPanel('chat')"><span class="icon">&#128172;</span><span>Chat</span></button>
+    <button class="panel-btn" data-panel="upload" onclick="switchPanel('upload')"><span class="icon">&#128194;</span><span>Upload</span></button>
+    <button class="panel-btn" data-panel="llm" onclick="switchPanel('llm')"><span class="icon">&#9881;</span><span>LLM Settings</span></button>
+    <button class="panel-btn" data-panel="guide" onclick="switchPanel('guide')"><span class="icon">&#128218;</span><span>How to + MCP</span></button>
+  </div>
+  <div id="userbar">
+    <button id="auth-btn" onclick="login()">Login</button>
+  </div>
+</div>
+
+<!-- ── Main ────────────────────────────────────────────────── -->
+<div id="main">
+  <div class="tab-panel active" id="panel-chat" style="position:relative">
+    <div id="chat"><div class="empty-state"><h3>No project selected</h3><p>Add a project from Bitbucket or upload a graph to get started.</p><button class="btn" onclick="openModal()">+ New Project</button></div></div>
+    <div id="input-area" style="display:none">
+      <input id="msg-input" placeholder="Ask about this project..." onkeydown="if(event.key==='Enter')send()">
+      <button id="send-btn" onclick="send()">Send</button>
+    </div>
+    <div class="quick-btns">
+      <button onclick="ask('Architecture overview')">Architecture</button>
+      <button onclick="ask('Who calls the auth module?')">Callers</button>
+      <button onclick="ask('Impact if I change the API layer?')">Impact</button>
+      <button onclick="ask('Show test coverage')">Tests</button>
+      <button id="mcp-config-btn" onclick="downloadMcpConfig()" style="display:none;margin-left:auto;background:var(--surface);border:1px solid var(--accent);color:var(--accent)" title="Get MCP config for Claude Code">Get .mcp.json</button>
+    </div>
+    <div id="id-watermark">s9246452</div>
+  </div>
+
+  <div class="tab-panel" id="panel-upload">
+    <div class="panel-content">
+      <h3>Upload Graph Files</h3>
+      <p>Upload graph files for the selected project. Also available when adding a new project.</p>
+      <div class="drop-zone" onclick="document.getElementById('file-graphify').click()">
+        <p><strong>graphify - graph.json</strong></p>
+        <input type="file" id="file-graphify" accept=".json" style="display:none" onchange="handleUploadFile(this,'graphify')">
+      </div>
+      <div class="upload-result" id="status-graphify"><span class="wait">Drop file or click</span></div>
+      <div class="drop-zone" onclick="document.getElementById('file-crg').click()">
+        <p><strong>code-review-graph - graph.db</strong></p>
+        <input type="file" id="file-crg" accept=".db,.sqlite" style="display:none" onchange="handleUploadFile(this,'crg')">
+      </div>
+      <div class="upload-result" id="status-crg"><span class="wait">Drop file or click</span></div>
+      <button class="btn btn-danger" onclick="clearUploads()" style="margin-top:12px">Clear Uploads</button>
+    </div>
+  </div>
+
+  <div class="tab-panel" id="panel-llm">
+    <div class="panel-content">
+      <h3>LLM Configuration</h3>
+      <p>Your credentials stay in your browser (localStorage). Sent through the pod relay to avoid CORS.</p>
+      <div class="form-group"><label>LLM URL</label><input type="text" id="llm-url" placeholder="http://llm.internal/v1/chat/completions"></div>
+      <div class="form-group"><label>API Token</label><input type="password" id="llm-token" placeholder="sk-..."></div>
+      <div class="form-group"><label><input type="checkbox" id="llm-use-relay" checked> Use pod relay</label></div>
+      <button class="btn" onclick="saveLLM()">Save</button>
+      <button class="btn btn-outline" onclick="testLLM()">Test</button>
+      <div id="llm-test-result" style="margin-top:8px;font-size:13px"></div>
+    </div>
+  </div>
+
+  <div class="tab-panel" id="panel-guide">
+    <div class="panel-content">
+      <h3>How to Generate Graph Files</h3>
+      <div class="step"><h4>1. Download graph-builder</h4><p>Windows EXE. No Python, no pip needed.</p><a class="btn" href="/download/graph-builder" download>Download graph-builder.exe</a></div>
+      <div class="step"><h4>2. Run on your project</h4><pre>graph-builder.exe C:\path\to\your\project</pre><p>Creates <code>graphify-out/graph.json</code> + <code>.code-review-graph/graph.db</code></p></div>
+      <div class="step"><h4>3. Upload or Clone</h4><p>Either upload in the Upload tab, or add a Bitbucket project (<code>+ New Project</code> in sidebar).</p></div>
+      <div class="sep"></div>
+      <h3>MCP Server for Claude Code</h3>
+      <div class="step"><h4>Standalone (local)</h4><p>Download and run locally. Graph stays on your machine.</p><a class="btn" href="/download/mcp-server" download>Download mcp_server_standalone.py</a>
+        <p style="font-size:12px;color:var(--muted);margin-top:6px">Run: <code>python mcp_server_standalone.py --crg-db .code-review-graph/graph.db --graphify graphify-out/graph.json</code></p></div>
+      <div class="step"><h4>Online (pod)</h4><p>Upload your graph + download <code>.mcp.json</code> with your private token. Place in project root.</p>
+        <div style="margin:6px 0">
+          <input type="file" id="mcp-file-crg" accept=".db,.sqlite" style="display:none" onchange="uploadMCPFile(this,'crg')"><button class="btn btn-outline" onclick="document.getElementById('mcp-file-crg').click()">Upload .db</button>
+          <input type="file" id="mcp-file-graphify" accept=".json" style="display:none" onchange="uploadMCPFile(this,'graphify')"><button class="btn btn-outline" onclick="document.getElementById('mcp-file-graphify').click()">Upload .json</button>
+          <button class="btn" id="mcp-dl-config" style="display:none" onclick="window.location='/download/mcp-config'">Download .mcp.json</button>
+          <button class="btn btn-outline btn-danger" onclick="fetch('/mcp/clear',{method:'POST'}).then(()=>{document.getElementById('mcp-upload-status').innerHTML='';document.getElementById('mcp-dl-config').style.display='none'})">Clear</button>
+        </div>
+        <div id="mcp-upload-status" style="font-size:12px;color:var(--muted)"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="/static/sql-wasm.js"></script>
+<script>
+// ── State ────────────────────────────────────────────────────
+let SQL=null, activePid=null, activePanel='chat', sidebarCollapsed=false;
+let useLLM=false, llmUrl='', llmToken='', llmUseRelay=true;
+initSqlJs({locateFile:f=>'/static/'+f}).then(s=>{SQL=s;loadLLM();authUI();refreshProjects();});
+
+// ── Sidebar ──────────────────────────────────────────────────
+function toggleSidebar(){sidebarCollapsed=!sidebarCollapsed;document.getElementById('sb').classList.toggle('collapsed',sidebarCollapsed)}
+function switchPanel(name){
+  activePanel=name;
+  document.querySelectorAll('.panel-btn').forEach(b=>b.classList.toggle('active',b.dataset.panel===name));
+  document.querySelectorAll('.tab-panel').forEach(p=>p.classList.toggle('active',p.id==='panel-'+name));
+}
+
+// ── Auth ─────────────────────────────────────────────────────
+function authUI(){
+  fetch('/auth/me').then(r=>r.json()).then(d=>{
+    const btn=document.getElementById('auth-btn');
+    if(d.authenticated){btn.innerHTML=d.user.name+'<span class="logout-hint">Logout</span>';btn.onclick=logout;btn.classList.add('logged-in')}
+    else{btn.textContent='Login';btn.onclick=login;btn.classList.remove('logged-in')}
+  });
+}
+function login(){window.location='/auth/login'}
+function logout(){window.location='/auth/logout'}
+
+// ── Projects ─────────────────────────────────────────────────
+function refreshProjects(){
+  fetch('/projects').then(r=>r.json()).then(projects=>{
+    const tabs=document.getElementById('tabs');
+    tabs.innerHTML=projects.map(p=>`<div class="tab${p.id===activePid?' active':''}" onclick="selectProject(${p.id})">
+      <span class="status">${statusIcon(p.status)}</span><span class="name">${esc(p.name)}</span><span class="close" onclick="event.stopPropagation();deleteProject(${p.id})">&times;</span></div>`).join('');
+    if(!activePid&&projects.length) selectProject(projects[0].id);
+    if(!projects.length) showEmptyChat();
+  });
+}
+function statusIcon(s){return{ready:'&#10003;',cloning:'&#9203;',building:'&#128295;',error:'&#10060;',pending_upload:'&#128194;'}[s]||'&#9679;';}
+function selectProject(pid){
+  activePid=pid;loadGraphForActive();refreshProjects();
+  fetch('/status?project_id='+pid).then(r=>r.json()).then(s=>{
+    const proj=s.project||{};
+    document.getElementById('chat').innerHTML=`<div class="msg bot">Project: <strong>${esc(proj.name||'?')}</strong>. ${proj.nodes||0} nodes, ${proj.edges||0} edges. Ask me anything.</div>`;
+    document.getElementById('input-area').style.display='flex';
+    document.getElementById('mcp-config-btn').style.display=proj.status==='ready'?'inline-block':'none';
+    pollBuildStatus(pid);
+  });
+}
+function downloadMcpConfig(){
+  if(!activePid)return;
+  fetch('/projects/'+activePid+'/mcp-token').then(r=>r.json()).then(j=>{
+    if(j.config){
+      const blob=new Blob([JSON.stringify(j.config,null,2)],{type:'application/json'});
+      const a=document.createElement('a');a.href=URL.createObjectURL(blob);
+      a.download='.mcp.json';a.click();
+    }
+  }).catch(e=>alert('Failed: '+e.message));
+}
+function pollBuildStatus(pid){
+  fetch('/projects/'+pid+'/status').then(r=>r.json()).then(s=>{
+    if(s.status==='ready'||s.status==='error'){refreshProjects();return}
+    if(s.status==='cloning'||s.status==='building') setTimeout(()=>pollBuildStatus(pid),2000);
+  });
+}
+function deleteProject(pid){
+  if(!confirm('Remove this project?'))return;
+  fetch('/projects/'+pid,{method:'DELETE'}).then(()=>{if(activePid===pid)activePid=null;refreshProjects()});
+}
+
+// ── Modal ────────────────────────────────────────────────────
+let modalPid=null;
+function openModal(){document.getElementById('modal-overlay').classList.add('active');document.getElementById('modal-git-url').focus()}
+function closeModal(){document.getElementById('modal-overlay').classList.remove('active');document.getElementById('modal-status').style.display='none'}
+function cloneProject(){
+  const url=document.getElementById('modal-git-url').value.trim();
+  const name=document.getElementById('modal-name').value.trim();
+  if(!url){alert('Enter a Bitbucket URL');return}
+  const status=document.getElementById('modal-status');
+  status.style.display='block';status.innerHTML='<span class="spin"></span>Cloning...';status.style.background='rgba(88,166,255,.08)';
+  document.getElementById('modal-submit').disabled=true;
+  fetch('/projects/clone',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({git_url:url,name:name||undefined})})
+    .then(r=>r.json()).then(p=>{
+      if(p.status==='error'){status.innerHTML='Error: '+esc(p.error||'unknown');status.style.background='rgba(248,81,73,.1)';status.style.color='var(--red)'}
+      else{status.innerHTML='Ready! '+p.nodes+' nodes, '+p.edges+' edges.';status.style.background='rgba(126,231,135,.08)';status.style.color='var(--green)';selectProject(p.id);closeModal()}
+      document.getElementById('modal-submit').disabled=false;
+    }).catch(e=>{status.innerHTML='Error: '+e.message;document.getElementById('modal-submit').disabled=false});
+}
+async function uploadModalFile(input,type){
+  const file=input.files[0];if(!file)return;
+  const el=document.getElementById('modal-upload-status');
+  el.innerHTML='<span class="spin"></span> Uploading...';
+  if(!modalPid){
+    const r=await fetch('/projects/clone',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({git_url:'',name:file.name,type:'upload'})});
+    const p=await r.json(); modalPid=p.id;
+  }
+  const fd=new FormData();fd.append('graph_file',file);fd.append('type',type);
+  const r=await fetch('/projects/'+modalPid+'/upload-data',{method:'POST',body:fd});
+  const j=await r.json();
+  el.innerHTML=`<span style="color:var(--green)">${j.nodes||0} nodes, ${j.edges||0} edges</span>`;
+  if(j.status==='ready') { selectProject(modalPid); closeModal(); }
+}
+
+// ── Upload tab ───────────────────────────────────────────────
+async function handleUploadFile(input,type){
+  if(!activePid){alert('Select or create a project first');return}
+  const file=input.files[0];if(!file)return;
+  const statusEl=document.getElementById('status-'+type);
+  try{
+    if(type==='graphify'){const text=await file.text();const data=JSON.parse(text);await saveToIDB('graphify-'+activePid,data);statusEl.innerHTML=`<span class="ok">${data.nodes?.length||0} nodes, ${data.links?.length||0} edges</span>`}
+    else{if(!SQL)return;const buf=await file.arrayBuffer();await saveToIDB('crg-'+activePid,new Uint8Array(buf));statusEl.innerHTML=`<span class="ok">Uploaded (${(file.size/1024).toFixed(0)}KB)</span>`}
+    loadGraphForActive();
+  }catch(e){statusEl.innerHTML=`<span style="color:var(--red)">${e.message}</span>`}
+}
+function clearUploads(){['graphify','crg'].forEach(t=>{deleteIDB(t+'-'+activePid);document.getElementById('status-'+t).innerHTML='<span class="wait">Drop file or click</span>'});activeGraphData=null;activeCRGDb=null}
+
+// ── IndexedDB ────────────────────────────────────────────────
+let IDB=null;
+function openIDB(){return new Promise((res,rej)=>{const r=indexedDB.open('kfirs-intelliscan',1);r.onupgradeneeded=()=>{r.result.createObjectStore('graphs')};r.onsuccess=()=>{IDB=r.result;res()};r.onerror=()=>rej(r.error)})}
+function saveToIDB(k,d){return new Promise((res,rej)=>{const t=IDB.transaction('graphs','readwrite'),s=t.objectStore('graphs');s.put(d,k);t.oncomplete=res;t.onerror=rej})}
+function getFromIDB(k){return new Promise((res)=>{const t=IDB.transaction('graphs','readonly'),s=t.objectStore('graphs');s.get(k).onsuccess=e=>res(e.target.result)})}
+function deleteIDB(k){openIDB().then(()=>{const t=IDB.transaction('graphs','readwrite');t.objectStore('graphs').delete(k)})}
+
+// ── Graph engine (per project) ───────────────────────────────
+let activeGraphData=null, activeCRGDb=null;
+async function loadGraphForActive(){
+  if(!activePid)return;
+  if(!IDB) await openIDB();
+  const localGf = await getFromIDB('graphify-'+activePid);
+  const localCrg = await getFromIDB('crg-'+activePid);
+  if(localGf || localCrg) {
+    activeGraphData = localGf || null;
+    if(localCrg && SQL) {
+      let buf = localCrg;
+      try {
+        if(buf instanceof Uint8Array) {}
+        else if(buf && buf.buffer instanceof ArrayBuffer) buf = new Uint8Array(buf.buffer);
+        else buf = new Uint8Array(Object.values(buf||{}));
+        activeCRGDb = new SQL.Database(buf);
+      } catch(e) { console.warn('CRG load:', e); }
+    }
+    return;
+  }
+  try {
+    const r = await fetch('/projects/'+activePid+'/graph-data');
+    if(!r.ok) return;
+    const d = await r.json();
+    if(d.graphify){ activeGraphData = d.graphify; await saveToIDB('graphify-'+activePid, d.graphify); }
+    if(d.has_crg_db && SQL) {
+      const cr = await fetch('/projects/'+activePid+'/crg-db');
+      if(cr.ok) {
+        const arr = new Uint8Array(await cr.arrayBuffer());
+        await saveToIDB('crg-'+activePid, arr);
+        try { activeCRGDb = new SQL.Database(arr); } catch(e) { console.warn('CRG init:', e); }
+      }
+    }
+  } catch(e) { console.log('server graph fetch:', e); }
+}
+function crgQuery(sql,params=[]){
+  if(!activeCRGDb)return[];
+  try{const stmt=activeCRGDb.prepare(sql);if(params.length)stmt.bind(params);const rows=[];while(stmt.step())rows.push(stmt.getAsObject());stmt.free();return rows}catch(e){return[]}
+}
+function searchNodes(query,limit=15){
+  let results=[];
+  if(activeCRGDb){try{results=crgQuery("SELECT n.kind,n.name,n.qualified_name,n.file_path,n.line_start,n.signature FROM nodes_fts f JOIN nodes n ON n.qualified_name=f.qualified_name WHERE nodes_fts MATCH ? ORDER BY rank LIMIT ?",[query,limit])}catch(e){results=crgQuery("SELECT kind,name,qualified_name,file_path,line_start,signature FROM nodes WHERE name LIKE ? OR qualified_name LIKE ? LIMIT ?",[`%${query}%`,`%${query}%`,limit])}}
+  if(activeGraphData){const q=query.toLowerCase();for(const n of(activeGraphData.nodes||[])){if((n.label||'').toLowerCase().includes(q)||(n.source_file||'').toLowerCase().includes(q))results.push({kind:n.file_type||'?',name:n.label||'',file_path:n.source_file||'',source:'graphify'});if(results.length>=limit)break}}
+  return results.slice(0,limit)
+}
+function getCallers(target,limit=30){if(!activeCRGDb)return[];return crgQuery("SELECT kind,source_qualified,target_qualified,file_path,line FROM edges WHERE target_qualified LIKE ? LIMIT ?",[`%${target}%`,limit])}
+function getCallees(target,limit=30){if(!activeCRGDb)return[];return crgQuery("SELECT kind,source_qualified,target_qualified,file_path,line FROM edges WHERE source_qualified LIKE ? LIMIT ?",[`%${target}%`,limit])}
+function getImpact(target){const matched=searchNodes(target,5);const qnames=matched.filter(m=>m.qualified_name).map(m=>m.qualified_name);let deps=[],flows=[];if(qnames.length&&activeCRGDb){deps=crgQuery(`SELECT kind,source_qualified,file_path,line FROM edges WHERE target_qualified IN (${qnames.map(()=>'?').join(',')}) AND kind IN ('CALLS','IMPORTS') LIMIT 50`,qnames);flows=crgQuery("SELECT DISTINCT f.name,f.criticality FROM flows f JOIN flow_memberships fm ON fm.flow_id=f.id JOIN nodes n ON n.id=fm.node_id WHERE n.qualified_name LIKE ? LIMIT 10",[`%${target}%`])}return{matched,dependents:deps,flows}}
+function getArchitecture(){const r={};if(activeCRGDb){r.communities=crgQuery("SELECT community_id,name,purpose,risk,size,dominant_language FROM community_summaries ORDER BY size DESC");r.flows=crgQuery("SELECT name,criticality,node_count,depth FROM flows ORDER BY criticality DESC LIMIT 15");r.kinds=crgQuery("SELECT kind,COUNT(*) as count FROM nodes GROUP BY kind ORDER BY count DESC")}if(activeGraphData){const kinds={};for(const n of(activeGraphData.nodes||[])){const k=n.file_type||'?';kinds[k]=(kinds[k]||0)+1}r.kinds=(r.kinds||[]).concat(Object.entries(kinds).map(([k,v])=>({kind:k,count:v})))}return r}
+function getTests(target){if(!activeCRGDb)return[];return crgQuery("SELECT name,file_path,line_start FROM nodes WHERE is_test=1 AND (name LIKE ? OR file_path LIKE ?) LIMIT 20",[`%${target}%`,`%${target}%`])}
+
+// ── Intent ───────────────────────────────────────────────────
+const INTENTS=[[/architecture|structure|overview|how is.*organized|how.*structured/i,'architecture',null],[/who calls|what calls|who uses|what uses|who imports|depends on\s+(.+?)(\?|$)/i,'callers',1],[/what does (.+?)(?:call|use|import|depend on)(\?|$)/i,'callees',1],[/impact|blast radius|what breaks|what is affected|what would break|affect.*(?:changing|modifying|deleting|change)\s+(.+?)(\?|$)/i,'impact',1],[/test|coverage.*(?:for|of)\s+(.+?)(\?|$)/i,'tests',1],[/how (?:is|does|do) (.+?)(?:work|used|called|defined|implemented)(\?|$)/i,'how_works',1],[/what is|where is\s+(.+?)(\?|$)/i,'what_is',1]];
+function detect(msg){for(const[re,intent,grp]of INTENTS){const m=msg.match(re);if(m)return{intent,target:grp?(m[grp]||'').trim().replace(/\?$/,''):null}}return{intent:'search',target:msg.trim().replace(/\?$/,'')}}
+
+// ── Chat ─────────────────────────────────────────────────────
+function ask(msg){document.getElementById('msg-input').value=msg;send()}
+function showEmptyChat(){document.getElementById('chat').innerHTML='<div class="empty-state"><h3>No project selected</h3><p>Add a project from Bitbucket or upload a graph.</p><button class="btn" onclick="openModal()">+ New Project</button></div>';document.getElementById('input-area').style.display='none'}
+async function send(){
+  const inp=document.getElementById('msg-input'),msg=inp.value.trim();
+  if(!msg)return;if(!activePid){showEmptyChat();return}
+  inp.value='';inp.disabled=true;document.getElementById('send-btn').disabled=true;
+  addMsg(msg,'user');
+  addMsg('<span class="spin"></span>Thinking...','bot','thinking');
+  const{intent,target}=detect(msg);
+  let result={};
+  switch(intent){case'architecture':result=getArchitecture();break;case'what_is':result={matches:searchNodes(target||msg)};break;case'how_works':result={node:searchNodes(target||msg,5),callers:getCallers(target||msg,15),callees:getCallees(target||msg,15),flows:crgQuery("SELECT name,criticality FROM flows WHERE name LIKE ? LIMIT 10",[`%${target||msg}%`])};break;case'callers':result={matched:searchNodes(target||msg,5),callers:getCallers(target||msg,40)};break;case'callees':result={callees:getCallees(target||msg,40)};break;case'impact':result=getImpact(target||msg);break;case'tests':result={tests:getTests(target||msg)};break;default:result={matches:searchNodes(msg,20)}}
+  let llmAnswer=null;
+  if(useLLM&&llmUrl)llmAnswer=await summarize(msg,result);
+  document.getElementById('thinking')?.remove();
+  addMsg(fmt({intent,target,result,llm_answer:llmAnswer}),'bot');
+  inp.disabled=false;document.getElementById('send-btn').disabled=false;inp.focus();
+}
+async function summarize(question,data){
+  const body=JSON.stringify({url:llmUrl,token:llmToken,payload:{messages:[{role:'system',content:'Codebase assistant. Answer concisely. Use bullet points. Never invent.'},{role:'user',content:`Question: ${question}\nData: ${JSON.stringify(data)}\nAnswer:`}],max_tokens:400,temperature:.1}});
+  try{const r=await fetch(llmUseRelay?'/llm/relay':llmUrl,{method:'POST',headers:{'Content-Type':'application/json',Authorization:llmUseRelay?'':'Bearer '+llmToken},body});const j=await r.json();const c=llmUseRelay?JSON.parse(j.body||'{}'):j;return c.choices?.[0]?.message?.content||c.response||c.content||''}catch(e){return null}
+}
+
+// ── Bento Grid rendering ─────────────────────────────────────
+function addMsg(html,cls,id){const d=document.createElement('div');d.className='msg '+cls;if(id)d.id=id;d.innerHTML=html;document.getElementById('chat').appendChild(d);d.scrollIntoView({behavior:'smooth'})}
+function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+function bento(title,items,tpl){
+  if(!items||!items.length)return'';
+  let h=`<div class="rb"><h4>${title} (${items.length})</h4><div class="bento">`;
+  items.slice(0,24).forEach(x=>h+=`<div class="bento-card">${tpl(x)}</div>`);
+  if(items.length>24)h+=`<div style="color:var(--muted);font-size:11px;grid-column:1/-1">&hellip;and ${items.length-24} more</div>`;
+  return h+'</div></div>'
+}
+function fmt(d){
+  let h='';
+  if(d.intent)h+=`<div class="tag">${d.intent}</div>`;
+  if(d.llm_answer)h+=`<div class="llm">${esc(d.llm_answer).replace(/\n/g,'<br>')}</div>`;
+  const r=d.result||{};
+  h+=bento('Matches',r.matches||r.matched||r.node,x=>`<div class="card-title">${esc(x.name)}</div><div class="card-meta">${esc(x.kind)} &middot; ${esc(x.file_path||'')}${x.line_start?':'+x.line_start:''}</div>${x.signature?`<div class="card-sig">${esc(x.signature)}</div>`:''}${x.purpose?`<div class="card-purpose">${esc(x.purpose)}</div>`:''}`);
+  h+=bento('Callers',r.callers,x=>`<div class="card-edge">${esc(x.source_qualified)}</div><div class="card-meta">${esc(x.file_path||'')}${x.line?':'+x.line:''}</div>`);
+  h+=bento('Callees',r.callees,x=>`<div class="card-edge">${esc(x.target_qualified)}</div>`);
+  h+=bento('Dependents (blast radius)',r.dependents,x=>`<div class="card-edge">${esc(x.source_qualified)}</div><div class="card-meta">${esc(x.kind)} &middot; ${esc(x.file_path||'')}${x.line?':'+x.line:''}</div>`);
+  h+=bento('Tests',r.tests,x=>`<div class="card-title">${esc(x.name)}</div><div class="card-meta">${esc(x.file_path||'')}${x.line_start?':'+x.line_start:''}</div>`);
+  h+=bento('Communities',r.communities,x=>`<div class="card-title">[${x.community_id||'?'}] ${esc(x.name)}</div><div class="card-meta">size=${x.size||0} lang=${esc(x.dominant_language||x.language||'?')} risk=${esc(x.risk||'?')}</div>${x.purpose?`<div class="card-purpose">${esc(x.purpose)}</div>`:''}`);
+  h+=bento('Flows',r.flows,x=>`<div class="card-title">${esc(x.name)}</div><div class="card-meta"><span class="card-risk">crit=${Number(x.criticality||0).toFixed(2)}</span> nodes=${x.node_count||0} depth=${x.depth||0}</div>`);
+  if(r.kinds){h+='<div class="rb"><h4>Kinds</h4><div class="bento">';r.kinds.forEach(x=>h+=`<div class="bento-card"><div class="card-title">${esc(x.kind||x._id)}</div><div class="card-meta">${x.count}</div></div>`);h+='</div></div>'}
+  return h||'No results. Try rephrasing.'
+}
+
+// ── LLM config ───────────────────────────────────────────────
+function loadLLM(){llmUrl=localStorage.getItem('llm-url')||'';llmToken=localStorage.getItem('llm-token')||'';useLLM=localStorage.getItem('llm-enabled')==='1';llmUseRelay=localStorage.getItem('llm-relay')!=='0';try{document.getElementById('llm-url').value=llmUrl;document.getElementById('llm-token').value=llmToken;document.getElementById('llm-use-relay').checked=llmUseRelay}catch(e){}}
+function saveLLM(){llmUrl=document.getElementById('llm-url').value.trim();llmToken=document.getElementById('llm-token').value.trim();llmUseRelay=document.getElementById('llm-use-relay').checked;useLLM=!!llmUrl;localStorage.setItem('llm-url',llmUrl);localStorage.setItem('llm-token',llmToken);localStorage.setItem('llm-enabled',useLLM?'1':'0');localStorage.setItem('llm-relay',llmUseRelay?'1':'0');document.getElementById('llm-test-result').innerHTML='<span style="color:var(--green)">Saved</span>'}
+async function testLLM(){saveLLM();const el=document.getElementById('llm-test-result');el.innerHTML='<span class="spin"></span> Testing...';try{const r=await fetch('/llm/relay',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:llmUrl,token:llmToken,payload:{messages:[{role:'user',content:'Say "connected" and nothing else.'}],max_tokens:20,temperature:0}})});const j=await r.json();const c=JSON.parse(j.body||'{}');el.innerHTML=`<span style="color:var(--green)">Connected: ${esc(c.choices?.[0]?.message?.content||c.response||'?')}</span>`}catch(e){el.innerHTML=`<span style="color:var(--red)">${e.message}</span>`}}
+
+// ── Online MCP upload ────────────────────────────────────────
+async function uploadMCPFile(input,type){const file=input.files[0];if(!file)return;const fd=new FormData();fd.append('graph_file',file);fd.append('type',type);try{const r=await fetch('/mcp/upload',{method:'POST',body:fd});const j=await r.json();const el=document.getElementById('mcp-upload-status');el.innerHTML=j.token?`<span style="color:var(--green)">Uploaded ${type}. Token: <code>${j.token}</code></span>`:`<span style="color:var(--green)">OK</span>`;if(j.token)document.getElementById('mcp-dl-config').style.display=''}catch(e){document.getElementById('mcp-upload-status').innerHTML=`<span style="color:var(--red)">${e.message}</span>`}}
+
+// ── Init ─────────────────────────────────────────────────────
+openIDB();
+</script>
+</body>
+</html>
