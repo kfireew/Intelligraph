@@ -1,0 +1,114 @@
+@import "tailwindcss";
+
+@theme {
+  --color-accent: #8b5cf6;
+  --color-accent-light: #a78bfa;
+  --color-magenta: #d946ef;
+  --color-magenta-light: #e879f9;
+  --color-bg: #000000;
+  --color-bg-alt: #0a0a0a;
+  --color-surface: rgba(255, 255, 255, 0.03);
+  --color-surface-hover: rgba(255, 255, 255, 0.06);
+  --color-border: rgba(255, 255, 255, 0.08);
+  --color-border-accent: rgba(139, 92, 246, 0.25);
+  --color-text: #ffffff;
+  --color-text-secondary: #fafafa;
+  --color-muted: #a1a1aa;
+  --color-muted-subtle: #71717a;
+  --color-green: #34d399;
+  --color-red: #f87171;
+  --color-orange: #fb923c;
+  --color-cyan: #22d3ee;
+  --color-glass-bg: rgba(10, 10, 10, 0.85);
+  --color-glass-border: rgba(255, 255, 255, 0.06);
+  --font-sans: "Space Grotesk", "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
+}
+
+body {
+  @apply bg-bg text-text font-sans h-screen overflow-hidden;
+  background: radial-gradient(ellipse at 50% 0%, rgba(139, 92, 246, 0.06), transparent 70%), var(--color-bg);
+}
+
+.glass {
+  background: rgba(10, 10, 10, 0.3);
+  border: 1px solid var(--color-glass-border);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+
+.glass-bubble {
+  background: rgba(10, 10, 10, 0.85);
+  border: 1px solid var(--color-glass-border);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+
+.gradient-text {
+  background: linear-gradient(135deg, var(--color-accent), var(--color-magenta));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.gradient-border {
+  border-image: linear-gradient(135deg, var(--color-accent), var(--color-magenta)) 1;
+}
+
+/* Markdown rendered content */
+.message-body pre {
+  @apply my-3 p-3 overflow-x-auto rounded-lg;
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  white-space: pre;
+}
+
+.message-body pre code {
+  @apply block text-sm;
+  min-width: max-content;
+  white-space: pre;
+}
+
+.message-body :not(pre) > code {
+  @apply px-1.5 py-0.5 rounded-md text-sm;
+  background: rgba(139, 92, 246, 0.12);
+  color: var(--color-accent-light);
+}
+
+/* ReactFlow overrides for dark theme */
+.react-flow__background {
+  background: transparent !important;
+}
+
+.react-flow__controls button {
+  background: var(--color-glass-bg) !important;
+  border: 1px solid var(--color-glass-border) !important;
+  color: var(--color-muted) !important;
+  fill: var(--color-muted) !important;
+}
+
+.react-flow__minimap {
+  background: rgba(0, 0, 0, 0.3) !important;
+  border: 1px solid var(--color-glass-border) !important;
+}
+
+.react-flow__attribution {
+  display: none !important;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.12);
+}

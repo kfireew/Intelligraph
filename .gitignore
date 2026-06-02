@@ -4,3 +4,15 @@ downloads/graph-builder.exe
 .env
 *.tmp
 
+.code-review-graph/
+node_modules/
+__pycache__/
+*.pyc
+dist/
+build/
+graphify-out/
+downloads/
+wheels/
+static/
+templates/
+*.spec
