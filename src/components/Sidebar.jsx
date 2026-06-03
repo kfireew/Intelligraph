@@ -117,7 +117,7 @@ export function Sidebar({
                   <span className="flex-1 truncate font-medium">{p.name}</span>
                 )}
                 <button
-                  className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:text-red hover:bg-red/10 transition-all flex-shrink-0"
+                  className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:text-red hover:bg-red/10 transition-all flex-shrink-0 cursor-pointer"
                   onClick={(e) => { e.stopPropagation(); onDelete(p.id); }}
                 >
                   <X size={11} />

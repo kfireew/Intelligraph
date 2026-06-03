@@ -8,6 +8,7 @@ Usage: python app.py [--port 5050]
 import json
 import os
 import secrets
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -31,7 +32,58 @@ app = Flask(__name__, template_folder=TEMPLATES,
             static_folder=STATIC, static_url_path="/static")
 TEMP_DIR = os.environ.get("INTELLISCAN_TEMP", os.path.join(tempfile.gettempdir(), "intelliscan"))
 os.makedirs(TEMP_DIR, exist_ok=True)
-app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(32))
+# ── SQLite persistence (optional) ──
+INTELLISCAN_DB = os.environ.get("INTELLISCAN_DB", os.path.join(TEMP_DIR, "intelliscan.db"))
+
+def _get_db():
+    """Return SQLite connection. In-memory when INTELLISCAN_DB not set."""
+    if INTELLISCAN_DB:
+        os.makedirs(os.path.dirname(INTELLISCAN_DB) or ".", exist_ok=True)
+        conn = sqlite3.connect(INTELLISCAN_DB)
+    else:
+        conn = sqlite3.connect(":memory:", check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("CREATE TABLE IF NOT EXISTS projects (id INTEGER, user_key TEXT, data TEXT, PRIMARY KEY(user_key, id))")
+    conn.execute("CREATE TABLE IF NOT EXISTS chats (id TEXT PRIMARY KEY, user_key TEXT, project_id INTEGER, role TEXT, content TEXT, created_at TEXT)")
+    conn.execute("CREATE TABLE IF NOT EXISTS uploads (user_key TEXT, project_id INTEGER, type TEXT, data TEXT, UNIQUE(user_key, project_id, type))")
+    return conn
+
+_db = None  # lazy init
+
+def _db_conn():
+    global _db
+    if _db is None:
+        _db = _get_db()
+    return _db
+
+def _save_project(pid, proj):
+    """Persist project to SQLite."""
+    try:
+        conn = _db_conn()
+        safe = {k: v for k, v in proj.items() if k not in ("_G", "graphify_data", "crg_db_path", "repo_dir", "graph_html_path")}
+        safe["_has_graphify"] = bool(proj.get("graphify_data"))
+        safe["_has_crg"] = bool(proj.get("crg_db_path"))
+        safe["_has_html"] = bool(proj.get("graph_html_path"))
+        conn.execute("INSERT OR REPLACE INTO projects(id, user_key, data) VALUES(?, ?, ?)",
+                     (pid, _user_key(), json.dumps(safe)))
+        conn.commit()
+    except Exception as e:
+        app.logger.warning("DB save failed: %s", e)
+
+def _load_projects():
+    """Load projects from SQLite on startup."""
+    try:
+        conn = _db_conn()
+        rows = conn.execute("SELECT id, data FROM projects WHERE user_key = ?", (_user_key(),)).fetchall()
+        for row in rows:
+            data = json.loads(row["data"])
+            if row["id"] not in _projects():
+                _projects()[row["id"]] = data
+    except Exception as e:
+        app.logger.warning("DB load failed: %s", e)
+
+app.secret_key = os.environ.get("SECRET_KEY", "intelliscan-dev-key-do-not-use-in-production")
 
 OIDC_ISSUER = os.environ.get("OIDC_ISSUER", "")
 OIDC_CLIENT_ID = os.environ.get("OIDC_CLIENT_ID", "")
@@ -49,8 +101,13 @@ def _user_key():
     """Stable identifier for the current user across the session."""
     u = get_user()
     if u and u.get("source") == "oidc":
-        return session.get("oidc_sub", u["name"])
-    return session.get("_anon_key") or _init_anon()
+        uk = session.get("oidc_sub", u["name"])
+    else:
+        uk = session.get("_anon_key") or _init_anon()
+    # Load persisted projects on first access for this user
+    if uk not in _PROJECTS:
+        _load_projects()
+    return uk
 
 
 def _init_anon():
@@ -510,15 +567,11 @@ def _name_from_url(url):
 
 @app.route("/projects", methods=["GET"])
 def list_projects():
-    return jsonify([
-        {"id": pid, "name": p["name"], "status": p.get("status", "unknown"),
-         "git_url": p.get("git_url", ""), "nodes": p.get("nodes", 0),
-         "edges": p.get("edges", 0),
-         "has_graphify": bool(p.get("graphify_data")),
-         "has_crg": bool(p.get("crg_db_path") and os.path.exists(p.get("crg_db_path", "")))}
-        for pid, p in sorted(_projects().items())
-    ])
-
+    return jsonify([{"id": pid, "name": p.get("name"), "status": p.get("status"),
+                    "nodes": p.get("nodes", 0), "edges": p.get("edges", 0),
+                    "has_graphify": bool(p.get("graphify_data")),
+                    "has_crg": bool(p.get("crg_db_path") and os.path.exists(p.get("crg_db_path", "")))}
+                   for pid, p in _projects().items()])
 
 @app.route("/projects/clone", methods=["POST"])
 def clone_project():
@@ -536,10 +589,13 @@ def clone_project():
 
     if clone_type in ("bitbucket", "git") and git_url:
         proj["status"] = "cloning"
+        proj["crg_nodes"] = 0
         _projects()[pid] = proj
 
         try:
-            repo_dir = f"{TEMP_DIR}/intelliscan-clone-{_user_key()}-{pid}"
+            repo_dir = tempfile.mkdtemp(prefix=f"intelliscan-clone-{_user_key()}-{pid}-", dir=TEMP_DIR)
+            if os.path.exists(repo_dir):
+                shutil.rmtree(repo_dir, ignore_errors=True)
             os.makedirs(repo_dir, exist_ok=True)
 
             # Any git URL — GitHub, Bitbucket, GitLab
@@ -555,6 +611,7 @@ def clone_project():
             if r.returncode != 0:
                 _projects().pop(pid, None)  # don't persist failed clones
                 return jsonify({"error": r.stderr[:500]}), 500
+            _save_project(pid, proj)  # persist immediately on clone success
 
             r = subprocess.run(["graphify", "update", "."], cwd=repo_dir,
                               capture_output=True, text=True, timeout=120)
@@ -585,10 +642,33 @@ def clone_project():
                 ce = conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
                 conn.close()
                 proj["nodes"] = max(proj["nodes"], cn)
+                proj["crg_nodes"] = cn
                 proj["edges"] = max(proj["edges"], ce)
+            else:
+                app.logger.warning("CRG build failed (rc=%d): %s", r.returncode, r.stderr[:300])
+
+            # Generate graph.html from graphify_data
+            if proj.get("graphify_data"):
+                try:
+                    import graphify
+                    import graphify.export as gf_export
+                    G = graphify.build_from_json(proj["graphify_data"])
+                    if G and G.number_of_nodes() > 0:
+                        comms = {}
+                        for nid, ndata in G.nodes(data=True):
+                            cid = ndata.get("community", 0)
+                            if cid not in comms:
+                                comms[cid] = []
+                            comms[cid].append(nid)
+                        html_path = f"{TEMP_DIR}/intelliscan-gf-html-{_user_key()}-{pid}-{int(time.time())}.html"
+                        gf_export.to_html(G, comms, html_path)
+                        proj["graph_html_path"] = html_path
+                except Exception as e:
+                    app.logger.warning("graph.html generation failed: %s", e, exc_info=True)
 
             proj["status"] = "ready"
             proj["repo_dir"] = repo_dir
+            _save_project(pid, proj)
 
         except Exception as e:
             proj["status"] = "error"
@@ -606,7 +686,7 @@ def clone_project():
 def rename_project(pid):
     proj = _projects().get(pid)
     if not proj:
-        return jsonify({"error": "not found"}), 404
+        return jsonify({"id": pid, "name": ""}), 200
     data = request.get_json(force=True)
     name = data.get("name", "").strip()
     if not name:
@@ -621,6 +701,7 @@ def delete_project(pid):
     if proj and proj.get("repo_dir"):
         import shutil
         shutil.rmtree(proj["repo_dir"], ignore_errors=True)
+    conn = _db_conn(); conn.execute("DELETE FROM projects WHERE id=? AND user_key=?", (pid, _user_key())); conn.commit()
     return jsonify({"status": "deleted"})
 
 
@@ -628,7 +709,7 @@ def delete_project(pid):
 def project_status(pid):
     proj = _projects().get(pid)
     if not proj:
-        return jsonify({"error": "not found"}), 404
+        return jsonify({"status": "not_found", "error": ""}), 200
     return jsonify({"id": pid, "status": proj["status"], "name": proj["name"],
                     "nodes": proj.get("nodes", 0), "edges": proj.get("edges", 0),
                     "error": proj.get("error", "")})
@@ -638,7 +719,7 @@ def project_status(pid):
 def project_graph_data(pid):
     proj = _projects().get(pid)
     if not proj:
-        return jsonify({"error": "not found"}), 404
+        return jsonify({"graphify": None, "nodes": 0, "edges": 0}), 200
     result = {"id": pid, "name": proj["name"], "status": proj.get("status"),
               "nodes": proj.get("nodes", 0), "edges": proj.get("edges", 0)}
     if "graphify_data" in proj and proj["graphify_data"]:
@@ -654,7 +735,7 @@ def project_graph_data(pid):
 def project_crg_db(pid):
     proj = _projects().get(pid)
     if not proj:
-        return jsonify({"error": "not found"}), 404
+        return Response(b"", mimetype="application/octet-stream"), 200
     crg_path = proj.get("crg_db_path")
     if not crg_path or not os.path.exists(crg_path):
         return jsonify({"error": "no CRG DB available"}), 404
@@ -669,7 +750,7 @@ def project_graph_html(pid):
     Works for cloned repos (reads graphify-out/graph.html) AND uploads (generates HTML from graphify_data JSON)."""
     proj = _projects().get(pid)
     if not proj:
-        return jsonify({"error": "not found"}), 404
+        return """<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{background:rgba(0,0,0,0.8);color:#c9d1d9;font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}p{text-align:center}</style></head><body><p>Project deleted or not found.<br>Select another project from the sidebar.</p></body></html>""", 200
 
     html = None
     repo_dir = proj.get("repo_dir")
@@ -706,9 +787,12 @@ def project_graph_html(pid):
                     comms[cid].append(nid)
                 tmp_path = f"{TEMP_DIR}/intelliscan-gf-html-{_user_key()}-{pid}.html"
                 gf_export.to_html(G, comms, tmp_path)
-                proj["graph_html_path"] = tmp_path
-                with open(tmp_path, "r", encoding="utf-8") as f:
-                    html = f.read()
+                if os.path.exists(tmp_path):
+                    proj["graph_html_path"] = tmp_path
+                    with open(tmp_path, "r", encoding="utf-8") as f:
+                        html = f.read()
+                else:
+                    app.logger.warning("Generated graph HTML not found at %s", tmp_path)
         except Exception as e:
             return f"""<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{{background:#0d1117;color:#c9d1d9;font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}}p{{text-align:center;max-width:400px;line-height:1.5}}code{{background:#21262d;padding:2px 6px;border-radius:4px;font-size:12px}}</style></head><body><p>Failed to generate graph HTML.<br><code>{str(e)[:200]}</code><br><br>Upload a pre-built <code>graph.html</code> instead.</p></body></html>""", 500
 
@@ -720,19 +804,46 @@ def project_graph_html(pid):
 <style id="intelliscan-theme">
 /* ── IntelliScan theme overrides ── */
 body {
-    background: transparent !important;
+    background: rgba(0,0,0,0.85) !important;
     color: #c9d1d9 !important;
     font-family: 'Space Grotesk', 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif !important;
     font-size: 13px !important;
 }
-#graph canvas {
-    background: transparent !important;
+#graph { position: relative !important; }
+#graph canvas, #graph svg, #graph > div {
+    background: rgba(0,0,0,0.8) !important;
 }
 #sidebar {
-    background: rgba(22,27,34,0.97) !important;
-    border-left: 1px solid #21262d !important;
-    width: 300px !important;
+    background: rgba(10,10,10,0.95) !important;
+    border-left: 1px solid rgba(255,255,255,0.06) !important;
+    width: 280px !important;
+    min-width: 280px !important;
     font-family: 'Space Grotesk', 'DM Sans', sans-serif !important;
+    position: relative !important;
+    overflow: hidden !important;
+}
+#intelliscan-sidebar-toggle {
+    position: absolute !important;
+    top: 8px !important;
+    right: 8px !important;
+    z-index: 200 !important;
+    width: 28px !important;
+    height: 28px !important;
+    border-radius: 6px !important;
+    border: 1px solid rgba(255,255,255,0.06) !important;
+    background: rgba(10,10,10,0.85) !important;
+    color: #8b949e !important;
+    cursor: pointer !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    font-size: 18px !important;
+    padding: 0 !important;
+    user-select: none !important;
+}
+#intelliscan-sidebar-toggle:hover {
+    background: rgba(255,255,255,0.06) !important;
+    color: #c9d1d9 !important;
 }
 #sidebar h3 { color: #8b949e !important; font-family: 'Space Grotesk', 'DM Sans', sans-serif !important; }
 #sidebar .neighbor-link { border-left-color: #30363d !important; }
@@ -756,16 +867,65 @@ body {
 #stats { color: #8b949e !important; border-top: 1px solid #21262d !important; font-family: 'Space Grotesk', 'DM Sans', sans-serif !important; }
 .legend-count { color: #8b949e !important; }
 </style>
-"""
 
-    # Inject override CSS before </head>
-    html = html.replace("</head>", THEME_OVERRIDES + "\n</head>")
+<script>
+(function() {
+  if (window.__intelliscanSidebar) return;
+  window.__intelliscanSidebar = true;
+  document.addEventListener('DOMContentLoaded', function() {
+    var sb = document.getElementById('sidebar');
+    if (!sb) return;
+
+    // Create toggle button inside #graph
+    var btn = document.createElement('button');
+    btn.id = 'intelliscan-sidebar-toggle';
+    btn.textContent = '\u00D7';
+    btn.title = 'Close sidebar';
+
+    var graphDiv = document.getElementById('graph');
+    (graphDiv || document.body).appendChild(btn);
+
+    var closed = false;
+    btn.addEventListener('click', function() {
+      closed = !closed;
+      if (closed) {
+        sb.style.display = 'none';
+        btn.textContent = '\u2630';
+        btn.title = 'Open sidebar';
+      } else {
+        sb.style.display = '';
+        btn.textContent = '\u00D7';
+        btn.title = 'Close sidebar';
+      }
+    });
+
+// Graph theme: force background after vis.js renders
+    // Theme: force IntelliScan backgrounds (runs once after DOM ready)
+    requestAnimationFrame(function() {
+      document.body.style.setProperty("background", "radial-gradient(ellipse at 50% 0%, rgba(139,92,246,0.06), transparent 70%), rgba(0,0,0,0.85)", "important");
+      var g = document.getElementById("graph");
+      if (g) g.style.setProperty("background", "rgba(0,0,0,0.8)", "important");
+      var c = document.querySelector("#graph canvas") || document.querySelector("#graph > div");
+      if (c) c.style.setProperty("background", "rgba(0,0,0,0.8)", "important");
+    });
+  });
+})();
+</script>
+"""
+    # Inject IntelliScan dark theme CSS overrides
+    # Find last </style> and inject overrides after it
+    last_style = html.rfind('</style>')
+    if last_style > 0:
+        html = html[:last_style + 8] + THEME_OVERRIDES + html[last_style + 8:]
+    else:
+        html = html.replace('</head>', THEME_OVERRIDES + '\n</head>')
 
     # Add Google Fonts link for Space Grotesk + DM Sans
     FONTS = '<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=DM+Sans:opsz@9..40&family=Space+Grotesk:wght@400;500;600&display=swap" rel="stylesheet">'
     html = html.replace("<head>", "<head>\n" + FONTS)
 
-    return html, 200, {"Content-Type": "text/html; charset=utf-8"}
+    return html, 200, {"Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache, no-store, must-revalidate"}
+
 
 
 @app.route("/projects/<int:pid>/upload-data", methods=["POST"])
@@ -797,7 +957,7 @@ def project_upload_data(pid):
                         if cid not in comms:
                             comms[cid] = []
                         comms[cid].append(nid)
-                    html_path = f"{TEMP_DIR}/intelliscan-gf-html-{_user_key()}-{pid}.html"
+                    html_path = f"{TEMP_DIR}/intelliscan-gf-html-{_user_key()}-{pid}-{int(time.time())}.html"
                     gf_export.to_html(G, comms, html_path)
                     proj["graph_html_path"] = html_path
             except Exception as e:
@@ -829,6 +989,7 @@ def project_upload_data(pid):
     if proj.get("status") == "pending_upload":
         if proj.get("crg_db_path") or proj.get("graphify_data"):
             proj["status"] = "ready"
+    _save_project(pid, proj)
     return jsonify({"id": pid, "status": proj["status"],
                     "nodes": proj.get("nodes", 0), "edges": proj.get("edges", 0)})
 
@@ -837,7 +998,7 @@ def project_upload_data(pid):
 def project_mcp_token(pid):
     proj = _projects().get(pid)
     if not proj:
-        return jsonify({"error": "not found"}), 404
+        return jsonify({"token": ""}), 200
     if proj.get("status") != "ready":
         return jsonify({"error": "project not ready"}), 400
     token = secrets.token_urlsafe(16)
@@ -876,7 +1037,7 @@ def _get_graphify_path(proj):
 def project_graphify_query(pid):
     proj = _projects().get(pid)
     if not proj:
-        return jsonify({"error": "not found"}), 404
+        return jsonify({"result": ""}), 200
     G = proj.get("_G")
     if not G:
         return jsonify({"error": "no graph data available for this project"}), 400
@@ -898,7 +1059,7 @@ def project_graphify_query(pid):
 def project_graphify_explain(pid):
     proj = _projects().get(pid)
     if not proj:
-        return jsonify({"error": "not found"}), 404
+        return jsonify({"result": ""}), 200
     G = proj.get("_G")
     if not G:
         return jsonify({"error": "no graph data available for this project"}), 400
@@ -949,7 +1110,7 @@ def project_graphify_explain(pid):
 def project_graphify_path(pid):
     proj = _projects().get(pid)
     if not proj:
-        return jsonify({"error": "not found"}), 404
+        return jsonify({"result": ""}), 200
     G = proj.get("_G")
     if not G:
         return jsonify({"error": "no graph data available for this project"}), 400
@@ -996,12 +1157,11 @@ def project_graphify_path(pid):
     except Exception as e:
         return jsonify({"error": str(e)[:500]}), 500
 
-
 @app.route("/projects/<int:pid>/graphify-affected", methods=["POST"])
 def project_graphify_affected(pid):
     proj = _projects().get(pid)
     if not proj:
-        return jsonify({"error": "not found"}), 404
+        return jsonify({"result": ""}), 200
     G = proj.get("_G")
     if not G:
         return jsonify({"error": "no graph data available for this project"}), 400
@@ -1019,12 +1179,11 @@ def project_graphify_affected(pid):
     except Exception as e:
         return jsonify({"error": str(e)[:500]}), 500
 
-
 @app.route("/projects/<int:pid>/code-chunks", methods=["POST"])
 def project_code_chunks(pid):
     proj = _projects().get(pid)
     if not proj:
-        return jsonify({"error": "not found"}), 404
+        return jsonify({"chunks": []}), 200
 
     data = request.get_json(silent=True) or {}
     file_paths = data.get("file_paths") or []
@@ -1063,6 +1222,152 @@ def project_code_chunks(pid):
     return jsonify({"chunks": chunks})
 
 
+@app.route("/projects/<int:pid>/chat-context", methods=["POST"])
+def project_chat_context(pid):
+    """Return pre-assembled Hackathon-format context for LLM chat."""
+    proj = _projects().get(pid)
+    if not proj:
+        return jsonify({"context": ""}), 200
+
+
+    data = request.get_json(force=True) or {}
+    prompt = data.get("prompt", "")[:200]
+
+    graphify_data = proj.get("graphify_data")
+    if not graphify_data:
+        return jsonify({"context": ""}), 200
+    app.logger.info("chat-context pid=%s graphify_nodes=%s", pid, len(graphify_data.get("nodes", [])))
+
+    parts = []
+    parts.append("You are an expert code analyst. Answer the user's question using only the provided code context. Be precise and cite file paths.")
+
+    # Codebase structure overview
+    all_files = sorted(set(n.get("source_file", "") for n in graphify_data.get("nodes", []) if n.get("source_file")))
+    if all_files:
+        structure = "## Codebase Structure\n"
+        for f in all_files[:20]:
+            structure += f"- `{f}`\n"
+        parts.append(structure)
+
+    # Stage 1: graphify BFS traversal
+    G = proj.get("_G")
+    if not G:
+        try:
+            import graphify
+            G = graphify.build_from_json(graphify_data)
+            proj["_G"] = G
+        except Exception as e:
+            app.logger.warning("build G failed: %s", e)
+
+    if G and G.number_of_nodes() > 0 and prompt:
+        try:
+            from graphify.serve import _query_graph_text
+            bfs_text = _query_graph_text(G, prompt, mode="bfs", depth=2, token_budget=2000)
+            if bfs_text and bfs_text != "No matching nodes found.":
+                parts.append(f"## Architecture Context\n{bfs_text}")
+        except Exception as e:
+            app.logger.warning("graphify BFS failed: %s", e)
+
+    # Stage 2: CRG SQLite LIKE substring search
+    crg_db = proj.get("crg_db_path")
+    crg_matches = []
+    if crg_db and os.path.exists(crg_db) and prompt:
+        try:
+            import sqlite3
+            conn = sqlite3.connect(f"file:{crg_db}?mode=ro", uri=True)
+            terms = [t for t in re.findall(r"[A-Za-z_][A-Za-z0-9_]*", prompt) if len(t) > 2][:5]
+            for term in terms:
+                rows = conn.execute(
+                    "SELECT DISTINCT name, kind, file_path, line_start FROM nodes WHERE kind != 'File' AND name LIKE ? LIMIT 3",
+                    (f"%{term}%",)
+                ).fetchall()
+                for row in rows:
+                    crg_matches.append({"name": row[0], "kind": row[1], "file_path": row[2], "line_start": row[3]})
+            conn.close()
+            if crg_matches:
+                crg_text = "## Matching Functions\n"
+                seen = set()
+                for m in crg_matches[:15]:
+                    key = f"{m['name']}:{m['file_path']}"
+                    if key not in seen:
+                        seen.add(key)
+                        crg_text += f"- `{m['name']}` ({m['kind']}) — {m['file_path']}:{m['line_start']}\n"
+                parts.append(crg_text)
+        except Exception as e:
+            app.logger.warning("CRG search failed: %s", e)
+
+    # Stage 3: Direct node content search
+    if prompt:
+        query_lower = prompt.lower()
+        node_hits = []
+        nodes = graphify_data.get("nodes", [])
+        for n in nodes:
+            label = (n.get("label", "") or n.get("id", "")).lower()
+            content = (n.get("content") or n.get("text") or "").lower()[:500]
+            source = (n.get("source_file", "") or "").lower()
+            score = 0
+            for word in query_lower.split():
+                if len(word) > 2 and word in label:
+                    score += 3
+                if len(word) > 2 and word in source:
+                    score += 2
+                if len(word) > 2 and word in content:
+                    score += 1
+            if score > 0:
+                node_hits.append((score, n))
+        node_hits.sort(key=lambda x: x[0], reverse=True)
+        if node_hits:
+            content_text = "## Relevant Code\n"
+            seen_f = set()
+            for _, n in node_hits[:8]:
+                fpath = n.get("source_file", "") or ""
+                label = n.get("label", n.get("id", ""))
+                if fpath not in seen_f:
+                    seen_f.add(fpath)
+                    code = (n.get("content") or n.get("text") or "")[:2000]
+                    lang = fpath.split(".")[-1] if fpath else ""
+                    content_text += f"### {fpath} — `{label}`\n```{lang}\n{code}\n```\n"
+            parts.append(content_text)
+
+    # User query
+    if prompt:
+        parts.append(f"## User Query\n{prompt}")
+
+    # Inject actual file content when results are thin -- use graph-identified files
+    repo_dir = proj.get("repo_dir")
+    if repo_dir and len(parts) <= 3:
+        key_files = []
+        # Collect files from graph-identified sources (structure list + node matches)
+        if crg_matches:
+            for m in crg_matches[:5]:
+                fp = m.get("file_path", "")
+                if fp and fp not in key_files:
+                    key_files.append(fp)
+        if "node_hits" in dir() and node_hits:
+            for _, n in node_hits[:5]:
+                fp = n.get("source_file", "")
+                if fp and fp not in key_files:
+                    key_files.append(fp)
+        if not key_files:
+            key_files = all_files[:3]
+        if key_files:
+            fc_text = "## File Contents\n"
+            for f in key_files[:5]:
+                fp = os.path.join(repo_dir, f)
+                if os.path.exists(fp):
+                    try:
+                        with open(fp, encoding="utf-8", errors="replace") as fh:
+                            fc = fh.read()[:3000]
+                        lang = f.split(".")[-1] if "." in f else ""
+                        fc_text += f"### {f}\n```{lang}\n{fc}\n```\n"
+                    except Exception:
+                        pass
+            if "### " in fc_text:
+                parts.append(fc_text)
+
+    context = "\n\n".join(parts)
+    return jsonify({"context": context})
+
 @app.route("/projects/<int:pid>/file-content", methods=["GET"])
 def project_file_content(pid):
     proj = _projects().get(pid)
@@ -1088,17 +1393,14 @@ def project_file_content(pid):
     try:
         start = request.args.get("start", 1, type=int)
         end = request.args.get("end", 0, type=int)
-        with open(full, "r", encoding="utf-8", errors="replace") as f:
-            lines = f.readlines()
-        if end <= 0 or end > len(lines):
-            end = len(lines)
-        content = "".join(lines[start - 1:end])
-        return jsonify({"path": safe, "content": content, "start": start, "end": end, "total_lines": len(lines)})
+        with open(full, "r", encoding="utf-8", errors="replace") as f_input:
+            file_lines = f_input.readlines()
+        if end <= 0 or end > len(file_lines):
+            end = len(file_lines)
+        content = "".join(file_lines[start - 1:end])
+        return jsonify({"path": safe, "content": content, "start": start, "end": end, "total_lines": len(file_lines)})
     except Exception as e:
         return jsonify({"error": str(e)[:500]}), 500
-
-
-# ── UI ───────────────────────────────────────────────────────────
 
 @app.route("/")
 def index():

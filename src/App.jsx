@@ -55,6 +55,11 @@ export default function App() {
     if (projects.activePid) upload.refreshStatus(projects.activePid);
   }, [projects.activePid]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Clear upload labels when no project is active (e.g. after delete)
+  useEffect(() => {
+    if (!projects.activePid) upload.clearUploads();
+  }, [projects.activePid]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // Refresh upload status when graph loads (after clone or upload completes)
   useEffect(() => {
     if (graph.status === "ready" && projects.activePid) {
@@ -72,7 +77,7 @@ export default function App() {
   const handleClone = useCallback(async ({ gitUrl, name }) => {
     setCloneLoading(true);
     try {
-      await projects.cloneProject({ gitUrl, name });
+      return await projects.cloneProject({ gitUrl, name });
     } finally {
       setCloneLoading(false);
     }
@@ -115,7 +120,7 @@ export default function App() {
         onNewProject={() => setShowCloneModal(true)}
         onSwitchPanel={setActivePanel}
         onRename={projects.renameProject}
-        onDelete={projects.deleteProject}
+        onDelete={async (pid) => { await projects.deleteProject(pid); upload.clearUploads(); }}
       />
 
       {/* Main content area */}
@@ -132,6 +137,11 @@ export default function App() {
             >
               <ChatPanel
                 messages={chat.messages}
+                conversations={chat.conversations}
+                activeConvId={chat.activeConvId}
+                newConversation={chat.newConversation}
+                deleteConversation={chat.deleteConversation}
+                switchConversation={chat.switchConversation}
                 status={chat.status}
                 streamingContent={chat.streamingContent}
                 onSend={chat.sendMessage}
@@ -217,8 +227,6 @@ export default function App() {
           <GraphPanel
             activePid={projects.activePid}
             crgDb={graph.crgDb}
-            selectedNode={graph.selectedNode}
-            onSelectNode={graph.selectNode}
           />
         </div>
       </div>

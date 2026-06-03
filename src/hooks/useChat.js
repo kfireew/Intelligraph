@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import { detectIntent } from "../utils/intentDetector";
 import { llmService } from "../services/llmService";
 import { graphifyService } from "../services/graphifyService";
@@ -135,31 +135,181 @@ async function buildRichContext(prompt, intent, graphData, crgQueries, activePid
     }
   }
 
+
+  // 6. Server context (ChromaDB/lexical — always fresh)
+  if (activePid) {
+    try {
+      const resp = await fetch(`/projects/${activePid}/chat-context`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt }),
+      });
+      if (resp.ok) {
+        const data = await resp.json();
+        if (data.context) {
+          sections.push(data.context);
+          totalChars += data.context.length;
+        }
+      }
+    } catch (e) {
+      console.warn("server context fallback failed:", e);
+    }
+  }
   return sections.join("\n") || "(no data available)";
 }
 
+// ── LocalStorage persistence for conversations ──
+
+const STORAGE_PREFIX = "intelliscan-chat-";
+
+function loadConversations(pid) {
+  if (!pid) return [];
+  try {
+    const raw = localStorage.getItem(STORAGE_PREFIX + pid);
+    return raw ? JSON.parse(raw) : [];
+  } catch { return []; }
+}
+
+function saveConversations(pid, conversations) {
+  if (!pid) return;
+  try {
+    localStorage.setItem(STORAGE_PREFIX + pid, JSON.stringify(conversations.slice(-20)));
+  } catch { /* quota exceeded, ignore */ }
+}
+
+// ── Helpers ──
+
+function generateId() {
+  return Date.now().toString(36) + Math.random().toString(36).slice(2);
+}
+
+function autoTitle(text) {
+  const t = text.trim().replace(/^["']|["']$/g, "");
+  return t.length > 50 ? t.slice(0, 47) + "\u2026" : t;
+}
+
+// ── useChat hook ──
+
 export function useChat({ graphData, crgDbRef, searchNodes, callers, callees, impact, architecture, tests, activePid, llmUrl, llmToken, model }) {
-  const [messages, setMessages] = useState([]);
+  const [conversations, setConversations] = useState([]);
+  const [activeConvId, setActiveConvId] = useState(null);
   const [status, setStatus] = useState("idle");
   const [streamingContent, setStreamingContent] = useState("");
   const [pathWarnings, setPathWarnings] = useState(null);
   const abortRef = useRef(null);
+  const prevPidRef = useRef(activePid);
 
-  const addMessage = useCallback((msg) => {
-    setMessages((prev) => [...prev, { ...msg, id: `${Date.now()}-${Math.random().toString(36).slice(2)}`, createdAt: new Date().toISOString() }]);
+  // ── Derived: active conversation + messages ──
+
+  const activeConv = useMemo(
+    () => conversations.find((c) => c.id === activeConvId) || null,
+    [conversations, activeConvId],
+  );
+  const messages = useMemo(
+    () => (activeConv ? activeConv.messages : []),
+    [activeConv],
+  );
+
+  // ── Conversation CRUD ──
+
+  const newConversation = useCallback(() => {
+    const id = generateId();
+    setConversations((prev) => [
+      { id, title: "New Chat", messages: [], createdAt: new Date().toISOString() },
+      ...prev,
+    ]);
+    setActiveConvId(id);
   }, []);
 
-  const clearMessages = useCallback(() => {
-    setMessages([]);
-    setStatus("idle");
-    setStreamingContent("");
-    setPathWarnings(null);
+  const deleteConversation = useCallback((id) => {
+    setConversations((prev) => {
+      const next = prev.filter((c) => c.id !== id);
+      if (activeConvId === id) {
+        setActiveConvId(next.length > 0 ? next[0].id : null);
+      }
+      return next;
+    });
+  }, [activeConvId]);
+
+  const switchConversation = useCallback((id) => {
+    setActiveConvId(id);
   }, []);
+
+  const renameConversation = useCallback((id, title) => {
+    setConversations((prev) =>
+      prev.map((c) => (c.id === id ? { ...c, title } : c)),
+    );
+  }, []);
+
+  // ── addMessage — accepts optional convId to avoid stale-closure races ──
+
+  const addMessage = useCallback((msg, convId) => {
+    const targetId = convId !== undefined ? convId : activeConvId;
+    if (!targetId) return;
+    setConversations((prev) =>
+      prev.map((c) => {
+        if (c.id === targetId) {
+          return {
+            ...c,
+            messages: [
+              ...c.messages,
+              { ...msg, id: generateId(), createdAt: new Date().toISOString() },
+            ],
+          };
+        }
+        return c;
+      }),
+    );
+  }, [activeConvId]);
+
+  // ── Persistence effects ──
+
+  useEffect(() => {
+    if (activePid && conversations.length > 0) {
+      saveConversations(activePid, conversations);
+    }
+  }, [conversations, activePid]);
+
+  useEffect(() => {
+    const prev = prevPidRef.current;
+    if (prev && prev !== activePid && conversations.length > 0) {
+      saveConversations(prev, conversations);
+    }
+    const convs = loadConversations(activePid);
+    setConversations(convs);
+    setActiveConvId(convs.length > 0 ? convs[0].id : null);
+    prevPidRef.current = activePid;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activePid]);
+
+  // ── sendMessage ──
 
   const sendMessage = useCallback(async (prompt) => {
     if (!prompt.trim()) return;
     const trimmed = prompt.trim();
-    addMessage({ role: "user", content: trimmed });
+
+    // Resolve target convId — auto-create if none active
+    let targetConvId = activeConvId;
+    if (!targetConvId) {
+      targetConvId = generateId();
+      setConversations((prev) => [
+        { id: targetConvId, title: autoTitle(trimmed), messages: [], createdAt: new Date().toISOString() },
+        ...prev,
+      ]);
+      setActiveConvId(targetConvId);
+    } else {
+      // Auto-title from first user message if still "New Chat" and empty
+      setConversations((prev) =>
+        prev.map((c) => {
+          if (c.id === targetConvId && c.title === "New Chat" && c.messages.length === 0) {
+            return { ...c, title: autoTitle(trimmed) };
+          }
+          return c;
+        }),
+      );
+    }
+
+    addMessage({ role: "user", content: trimmed }, targetConvId);
 
     setStatus("classifying");
     setStreamingContent("");
@@ -188,9 +338,10 @@ export function useChat({ graphData, crgDbRef, searchNodes, callers, callees, im
     }
 
     const richContext = await buildRichContext(trimmed, intent, graphData, crgQueries, activePid);
+  console.log(`[Chat] context size: ${richContext.length} chars, pid: ${activePid}`);
 
     if (!llmUrl) {
-      addMessage({ role: "assistant", content: "", metadata: { intent, result, route: { category: intent, label: intent } } });
+      addMessage({ role: "assistant", content: "", metadata: { intent, result, route: { category: intent, label: intent } } }, targetConvId);
       setStatus("idle");
       return;
     }
@@ -204,9 +355,9 @@ export function useChat({ graphData, crgDbRef, searchNodes, callers, callees, im
         model: model || undefined,
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: `${richContext}\n\n# User Query\n\n${trimmed}` },
+          { role: "user", content: `${richContext}\n\nAnswer the user's query using the context above. Be specific, cite file paths.\n\n# User Query\n\n${trimmed}` },
         ],
-        max_tokens: 2048,
+        max_tokens: 4096,
         temperature: 0.2,
         stream: true,
       };
@@ -234,9 +385,9 @@ export function useChat({ graphData, crgDbRef, searchNodes, callers, callees, im
             model: model || undefined,
             messages: [
               { role: "system", content: SYSTEM_PROMPT },
-              { role: "user", content: `${richContext}\n\n# User Query\n\n${trimmed}` },
+              { role: "user", content: `${richContext}\n\nAnswer the user's query using the context above. Be specific, cite file paths.\n\n# User Query\n\n${trimmed}` },
             ],
-            max_tokens: 2048,
+            max_tokens: 4096,
             temperature: 0.2,
           },
           projectId: activePid,
@@ -244,6 +395,9 @@ export function useChat({ graphData, crgDbRef, searchNodes, callers, callees, im
         const body = JSON.parse(j.body || "{}");
         fullText = body.choices?.[0]?.message?.content || "";
       } catch {}
+      if (!fullText) {
+        fullText = "(No response — the LLM returned empty output. Try rephrasing your question.)";
+      }
     }
 
     setPathWarnings(pw);
@@ -251,10 +405,22 @@ export function useChat({ graphData, crgDbRef, searchNodes, callers, callees, im
       role: "assistant",
       content: fullText,
       metadata: { intent, result, route: { category: intent, label: intent }, pathWarnings: pw },
-    });
+    }, targetConvId);
     setStreamingContent("");
     setStatus("idle");
-  }, [addMessage, searchNodes, callers, callees, impact, architecture, tests, activePid, llmUrl, llmToken, model, graphData]);
+  }, [addMessage, activeConvId, searchNodes, callers, callees, impact, architecture, tests, activePid, llmUrl, llmToken, model, graphData]);
 
-  return { messages, status, streamingContent, pathWarnings, sendMessage, clearMessages };
+  return {
+    messages,
+    conversations,
+    activeConvId,
+    status,
+    streamingContent,
+    pathWarnings,
+    sendMessage,
+    newConversation,
+    deleteConversation,
+    switchConversation,
+    renameConversation,
+  };
 }

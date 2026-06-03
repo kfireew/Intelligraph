@@ -9,7 +9,7 @@ export function LoadingOverlay({ title = "Loading", detail = "" }) {
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
         className="fixed inset-0 z-50 flex items-center justify-center"
-        style={{ background: "rgba(0,0,0,0.72)", backdropFilter: "blur(4px)" }}
+        style={{ background: "rgba(0,0,0,0.6)", backdropFilter: "blur(4px)" }}
       >
         <motion.div
           initial={{ scale: 0.9, opacity: 0 }}

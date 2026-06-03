@@ -66,7 +66,7 @@ export function CloneModal({ onClone, onClose, loading, onUploadComplete }) {
         animate={{ opacity: 1 }}
         exit={{ opacity: 0 }}
         className="fixed inset-0 z-50 flex items-center justify-center p-6"
-        style={{ background: "rgba(0,0,0,0.72)", backdropFilter: "blur(6px)" }}
+        style={{ background: "rgba(0,0,0,0.6)", backdropFilter: "blur(6px)" }}
         onClick={onClose}
       >
         <motion.div
@@ -74,7 +74,7 @@ export function CloneModal({ onClone, onClose, loading, onUploadComplete }) {
           animate={{ scale: 1, opacity: 1 }}
           exit={{ scale: 0.85, opacity: 0 }}
           transition={{ type: "spring", stiffness: 400, damping: 25 }}
-          className="glass rounded-2xl w-full max-w-md p-6 shadow-2xl"
+          className="rounded-2xl w-full max-w-md p-6 shadow-2xl" style={{ background: "rgba(13,17,23,1)", border: "1px solid #21262d" }}
           onClick={(e) => e.stopPropagation()}
         >
           {/* Header */}
@@ -161,9 +161,13 @@ export function CloneModal({ onClone, onClose, loading, onUploadComplete }) {
 
               <div className="grid grid-cols-2 gap-3 mb-5">
                 {/* Graphify */}
-                <label className={`glass rounded-xl p-4 flex flex-col items-center gap-2 cursor-pointer transition-all text-center ${
-                  uploadFiles.graphify ? "border-green/30 bg-green/3" : "hover:bg-surface-hover"
-                }`}>
+                <motion.label
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  transition={{ duration: 0.35, ease: "easeOut" }}
+                  className={`glass rounded-xl p-4 flex flex-col items-center gap-2 cursor-pointer transition-all text-center ${
+                    uploadFiles.graphify ? "border-green/30 bg-green/3" : "hover:bg-surface-hover"
+                  }`}>
                   <input type="file" accept=".json" className="hidden" onChange={(e) => handleFileSelect(e, "graphify")} />
                   <div className={`p-2.5 rounded-xl ${uploadFiles.graphify ? "bg-green/10" : "bg-white/4"}`}>
                     {uploadFiles.graphify ? <CheckCircle2 size={20} className="text-green" /> : <FileJson size={20} className="text-accent-light" />}
@@ -174,12 +178,16 @@ export function CloneModal({ onClone, onClose, loading, onUploadComplete }) {
                       {uploadFiles.graphify ? uploadFiles.graphify.name : "Graphify output"}
                     </div>
                   </div>
-                </label>
+                </motion.label>
 
                 {/* CRG */}
-                <label className={`glass rounded-xl p-4 flex flex-col items-center gap-2 cursor-pointer transition-all text-center ${
-                  uploadFiles.crg ? "border-green/30 bg-green/3" : "hover:bg-surface-hover"
-                }`}>
+                <motion.label
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  transition={{ duration: 0.35, delay: 0.12, ease: "easeOut" }}
+                  className={`glass rounded-xl p-4 flex flex-col items-center gap-2 cursor-pointer transition-all text-center ${
+                    uploadFiles.crg ? "border-green/30 bg-green/3" : "hover:bg-surface-hover"
+                  }`}>
                   <input type="file" accept=".db" className="hidden" onChange={(e) => handleFileSelect(e, "crg")} />
                   <div className={`p-2.5 rounded-xl ${uploadFiles.crg ? "bg-green/10" : "bg-white/4"}`}>
                     {uploadFiles.crg ? <CheckCircle2 size={20} className="text-green" /> : <Database size={20} className="text-cyan-400" />}
@@ -190,7 +198,8 @@ export function CloneModal({ onClone, onClose, loading, onUploadComplete }) {
                       {uploadFiles.crg ? uploadFiles.crg.name : "CRG database"}
                     </div>
                   </div>
-                </label>
+                </motion.label>
+
               </div>
 
               {status && (
