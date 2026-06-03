@@ -74,6 +74,17 @@ body {
   color: var(--color-accent-light);
 }
 
+.message-body p { @apply my-2 leading-relaxed; }
+.message-body ul, .message-body ol { @apply my-2 pl-5; }
+.message-body li { @apply my-1 leading-relaxed; }
+.message-body h1 { @apply text-lg font-bold mt-4 mb-2; }
+.message-body h2 { @apply text-base font-bold mt-3 mb-1.5; }
+.message-body h3 { @apply text-sm font-bold mt-3 mb-1; }
+.message-body strong { @apply font-bold text-text; }
+.message-body hr { @apply my-3 border-glass-border; }
+.message-body blockquote { @apply border-l-2 border-accent/30 pl-3 my-2 italic text-muted; }
+
+
 /* ReactFlow overrides for dark theme */
 .react-flow__background {
   background: transparent !important;

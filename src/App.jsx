@@ -120,7 +120,7 @@ export default function App() {
         onNewProject={() => setShowCloneModal(true)}
         onSwitchPanel={setActivePanel}
         onRename={projects.renameProject}
-        onDelete={async (pid) => { await projects.deleteProject(pid); upload.clearUploads(); }}
+        onDelete={async (pid) => { await projects.deleteProject(pid); upload.clearUploads(); chat.clearChats(pid); }}
       />
 
       {/* Main content area */}

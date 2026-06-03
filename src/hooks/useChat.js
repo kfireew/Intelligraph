@@ -7,7 +7,7 @@ import { graphifyService } from "../services/graphifyService";
 
 const SYSTEM_PROMPT = `You are an expert software architect helping a developer understand a codebase.
 
-Give a direct, concise answer. Do not output your thinking process or say "Let me analyze" — just answer.
+Give a direct, concise answer. Do not output your thinking process or say "Let me analyze" -- just answer.
 Use the provided context as your only source of truth. Mention specific file paths.
 If context is insufficient, state what is missing.
 Do not invent files, functions, imports, or APIs. Format file references as a markdown list with newlines (one per line).`;
@@ -59,7 +59,7 @@ async function buildRichContext(prompt, intent, graphData, crgQueries, activePid
     console.warn("CRG query error:", e);
   }
 
-  // 2. graphify query — full semantic search (article pattern: query + explain)
+  // 2. graphify query -- full semantic search (article pattern: query + explain)
   if (activePid) {
     try {
       const gfQuery = await graphifyService.query({ prompt: prompt.slice(0, 200), pid: activePid });
@@ -73,7 +73,7 @@ async function buildRichContext(prompt, intent, graphData, crgQueries, activePid
     } catch (e) { console.warn("graphify query failed:", e); }
   }
 
-  // 3. graphify explain — semantic analysis (plain language)
+  // 3. graphify explain -- semantic analysis (plain language)
   if (activePid) {
     try {
       const gfExplain = await graphifyService.explain({ concept: prompt.slice(0, 120), pid: activePid });
@@ -87,13 +87,13 @@ async function buildRichContext(prompt, intent, graphData, crgQueries, activePid
     } catch (e) { console.warn("graphify explain failed:", e); }
   }
 
-  // 4. CRG match results — formatted as structure tree (Hackathon pattern)
+  // 4. CRG match results -- formatted as structure tree (Hackathon pattern)
   if (crgResult.matches?.length) {
     let text = "\n## Matching Files & Functions\n";
     crgResult.matches.forEach((m) => {
       const name = m.name || m.qualified_name || "?";
       const loc = m.file_path || "";
-      const line = `- \`${name}\` — ${loc}${m.kind ? ` (${m.kind})` : ""}${m.line_start ? ` L${m.line_start}` : ""}\n`;
+      const line = `- \`${name}\` -- ${loc}${m.kind ? ` (${m.kind})` : ""}${m.line_start ? ` L${m.line_start}` : ""}\n`;
       if (totalChars + text.length + line.length <= MAX_CONTEXT_CHARS) {
         text += line;
       }
@@ -102,7 +102,7 @@ async function buildRichContext(prompt, intent, graphData, crgQueries, activePid
     totalChars += text.length;
   }
 
-  // 5. Code chunks — actual source code (Hackathon pattern: scored, truncated)
+  // 5. Code chunks -- actual source code (Hackathon pattern: scored, truncated)
   const allMatches = [
     ...(crgResult.matches || []),
     ...(crgResult.node || []),
@@ -123,7 +123,7 @@ async function buildRichContext(prompt, intent, graphData, crgQueries, activePid
           const snippet = c.content?.length > MAX_SNIPPET_CHARS
             ? c.content.slice(0, MAX_SNIPPET_CHARS) + "\n// ... (truncated)"
             : c.content;
-          const block = `### ${c.file_path} — \`${c.name}\` (L${c.start_line}-${c.end_line})\n\`\`\`${lang}\n${snippet}\n\`\`\`\n`;
+          const block = `### ${c.file_path} -- \`${c.name}\` (L${c.start_line}-${c.end_line})\n\`\`\`${lang}\n${snippet}\n\`\`\`\n`;
           if (totalChars + text.length + block.length > MAX_CONTEXT_CHARS) break;
           text += block;
         }
@@ -136,7 +136,7 @@ async function buildRichContext(prompt, intent, graphData, crgQueries, activePid
   }
 
 
-  // 6. Server context (ChromaDB/lexical — always fresh)
+  // 6. Server context (ChromaDB/lexical -- always fresh)
   if (activePid) {
     try {
       const resp = await fetch(`/projects/${activePid}/chat-context`, {
@@ -241,7 +241,7 @@ export function useChat({ graphData, crgDbRef, searchNodes, callers, callees, im
     );
   }, []);
 
-  // ── addMessage — accepts optional convId to avoid stale-closure races ──
+  // ── addMessage -- accepts optional convId to avoid stale-closure races ──
 
   const addMessage = useCallback((msg, convId) => {
     const targetId = convId !== undefined ? convId : activeConvId;
@@ -288,7 +288,7 @@ export function useChat({ graphData, crgDbRef, searchNodes, callers, callees, im
     if (!prompt.trim()) return;
     const trimmed = prompt.trim();
 
-    // Resolve target convId — auto-create if none active
+    // Resolve target convId -- auto-create if none active
     let targetConvId = activeConvId;
     if (!targetConvId) {
       targetConvId = generateId();
@@ -368,7 +368,7 @@ export function useChat({ graphData, crgDbRef, searchNodes, callers, callees, im
           fullText += data.text || "";
           setStreamingContent(fullText);
         } else if (event === "done") {
-          fullText = data.text || fullText;
+          fullText = (data.text || fullText).replace(/�/g, "--");
           pw = data.path_warnings || null;
         } else if (event === "error") {
           console.error("SSE error:", data.message);
@@ -393,24 +393,31 @@ export function useChat({ graphData, crgDbRef, searchNodes, callers, callees, im
           projectId: activePid,
         });
         const body = JSON.parse(j.body || "{}");
-        fullText = body.choices?.[0]?.message?.content || "";
+        fullText = (body.choices?.[0]?.message?.content || "").replace(/�/g, "--");
       } catch {}
       if (!fullText) {
-        fullText = "(No response — the LLM returned empty output. Try rephrasing your question.)";
+        fullText = "(No response -- the LLM returned empty output. Try rephrasing your question.)";
       }
     }
 
     setPathWarnings(pw);
     addMessage({
       role: "assistant",
-      content: fullText,
+      content: fullText.replace(/\u2014/g, "--"),
       metadata: { intent, result, route: { category: intent, label: intent }, pathWarnings: pw },
     }, targetConvId);
     setStreamingContent("");
     setStatus("idle");
   }, [addMessage, activeConvId, searchNodes, callers, callees, impact, architecture, tests, activePid, llmUrl, llmToken, model, graphData]);
 
+  const clearChats = useCallback((pid) => {
+    localStorage.removeItem(STORAGE_PREFIX + pid);
+    setConversations([]);
+    setActiveConvId(null);
+  }, []);
+
   return {
+    clearChats,
     messages,
     conversations,
     activeConvId,

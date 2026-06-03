@@ -39,7 +39,7 @@ def _get_db():
     """Return SQLite connection. In-memory when INTELLISCAN_DB not set."""
     if INTELLISCAN_DB:
         os.makedirs(os.path.dirname(INTELLISCAN_DB) or ".", exist_ok=True)
-        conn = sqlite3.connect(INTELLISCAN_DB)
+        conn = sqlite3.connect(INTELLISCAN_DB, check_same_thread=False)
     else:
         conn = sqlite3.connect(":memory:", check_same_thread=False)
     conn.row_factory = sqlite3.Row
@@ -701,7 +701,13 @@ def delete_project(pid):
     if proj and proj.get("repo_dir"):
         import shutil
         shutil.rmtree(proj["repo_dir"], ignore_errors=True)
-    conn = _db_conn(); conn.execute("DELETE FROM projects WHERE id=? AND user_key=?", (pid, _user_key())); conn.commit()
+    if proj:
+        try:
+            conn = _db_conn()
+            conn.execute("DELETE FROM projects WHERE id=? AND user_key=?", (pid, _user_key()))
+            conn.commit()
+        except Exception as e:
+            app.logger.warning("DB delete failed: %s", e)
     return jsonify({"status": "deleted"})
 
 
