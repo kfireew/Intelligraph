@@ -10,7 +10,7 @@ const SYSTEM_PROMPT = `You are an expert software architect helping a developer 
 Give a direct, concise answer. Do not output your thinking process or say "Let me analyze" — just answer.
 Use the provided context as your only source of truth. Mention specific file paths.
 If context is insufficient, state what is missing.
-Do not invent files, functions, imports, or APIs.`;
+Do not invent files, functions, imports, or APIs. Format file references as a markdown list with newlines (one per line).`;
 
 const MAX_CONTEXT_CHARS = 8000;
 const MAX_SNIPPET_CHARS = 2000;
@@ -266,9 +266,9 @@ export function useChat({ graphData, crgDbRef, searchNodes, callers, callees, im
 
   useEffect(() => {
     if (activePid && conversations.length > 0) {
-      saveConversations(activePid, conversations);
+      saveConversations(prevPidRef.current, conversations);
     }
-  }, [conversations, activePid]);
+  }, [conversations]);
 
   useEffect(() => {
     const prev = prevPidRef.current;
