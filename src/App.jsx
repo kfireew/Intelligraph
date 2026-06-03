@@ -8,6 +8,7 @@ import { GraphPanel } from "./components/GraphPanel";
 import { UploadPanel } from "./components/UploadPanel";
 import { LLMSettings } from "./components/LLMSettings";
 import { GuidePanel } from "./components/GuidePanel";
+import { ChevronLeft } from "lucide-react";
 import { CloneModal } from "./components/CloneModal";
 import { LoadingOverlay } from "./components/LoadingOverlay";
 import { useAuth } from "./hooks/useAuth";
@@ -224,7 +225,7 @@ export default function App() {
         </AnimatePresence>
 
         {/* Graph panel — always visible on the right */}
-        <motion.div animate={{ width: graphCollapsed ? 0 : "42%", opacity: graphCollapsed ? 0 : 1 }} transition={{ duration: 0.3, ease: "easeInOut" }} className="flex-shrink-0 border-l border-glass-border hidden lg:flex overflow-hidden">
+        <motion.div animate={{ width: graphCollapsed ? 40 : "42%" }} transition={{ duration: 0.3, ease: "easeInOut" }} className="flex-shrink-0 border-l border-glass-border hidden lg:flex overflow-hidden">
           <GraphPanel
             activePid={projects.activePid}
             collapsed={graphCollapsed}
