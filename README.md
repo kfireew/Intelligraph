@@ -1,4 +1,4 @@
-# IntelliGraph
+# Intelligraph
 
 Codebase intelligence platform — clone repos, index them with graphify + code-review-graph, and chat with an LLM about architecture, callers, callees, impact, and test coverage.
 

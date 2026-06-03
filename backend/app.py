@@ -752,7 +752,7 @@ def project_crg_db(pid):
 
 @app.route("/projects/<int:pid>/graph-html")
 def project_graph_html(pid):
-    """Serve graphify's graph.html with IntelliGraph dark theme injected.
+    """Serve graphify's graph.html with Intelligraph dark theme injected.
     Works for cloned repos (reads graphify-out/graph.html) AND uploads (generates HTML from graphify_data JSON)."""
     proj = _projects().get(pid)
     if not proj:
@@ -805,10 +805,10 @@ def project_graph_html(pid):
     if not html:
         return """<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{background:rgba(0,0,0,0.8);color:#c9d1d9;font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}p{text-align:center;max-width:400px;line-height:1.6}a{color:#5b7fff}code{background:#21262d;padding:2px 6px;border-radius:4px;font-size:12px}</style></head><body><p>No graph data available.<br>Go to <b>Upload</b> tab and upload:<br><code>graph.json</code> + <code>graph.db</code> + <code>graph.html</code></p></body></html>""", 404
 
-    # Inject IntelliGraph dark theme CSS overrides
+    # Inject Intelligraph dark theme CSS overrides
     THEME_OVERRIDES = """
 <style id="intelligraph-theme">
-/* ── IntelliGraph theme overrides ── */
+/* ── Intelligraph theme overrides ── */
 body {
     background: rgba(0,0,0,0.85) !important;
     color: #c9d1d9 !important;
@@ -906,7 +906,7 @@ body {
     });
 
 // Graph theme: force background after vis.js renders
-    // Theme: force IntelliGraph backgrounds (runs once after DOM ready)
+    // Theme: force Intelligraph backgrounds (runs once after DOM ready)
     requestAnimationFrame(function() {
       document.body.style.setProperty("background", "radial-gradient(ellipse at 50% 0%, rgba(139,92,246,0.06), transparent 70%), rgba(0,0,0,0.85)", "important");
       var g = document.getElementById("graph");
@@ -918,7 +918,7 @@ body {
 })();
 </script>
 """
-    # Inject IntelliGraph dark theme CSS overrides
+    # Inject Intelligraph dark theme CSS overrides
     # Find last </style> and inject overrides after it
     last_style = html.rfind('</style>')
     if last_style > 0:

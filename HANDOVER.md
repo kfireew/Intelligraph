@@ -1,4 +1,4 @@
-# HANDOVER — IntelliGraph Session 2026-06-03
+# HANDOVER — Intelligraph Session 2026-06-03
 
 ## Project state at session end
 
