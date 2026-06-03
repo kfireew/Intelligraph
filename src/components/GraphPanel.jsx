@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect } from "react";
+import { motion, AnimatePresence } from "framer-motion";
 import { GitBranch, Boxes, Maximize2, Minimize2, ChevronLeft, ChevronRight } from "lucide-react";
 
 /**
@@ -15,18 +16,21 @@ export function GraphPanel({ activePid, crgDb }) {
 
   const containerClass = expanded
     ? "fixed inset-0 z-40 bg-bg/90 backdrop-blur-sm p-6"
-    : collapsed
-    ? "w-10 min-w-[40px] min-h-0"
     : "flex-1 min-w-0 min-h-0";
 
   return (
-    <div className={containerClass} style={{ transition: "width 0.3s ease" }}>
+    <motion.div
+      animate={{ width: collapsed ? 40 : "auto", minWidth: collapsed ? 40 : 0 }}
+      transition={{ duration: 0.3, ease: "easeInOut" }}
+      className={containerClass}
+    >
       <div className="glass rounded-xl flex flex-col h-full overflow-hidden">
         <div className="flex items-center justify-between px-4 py-2.5 border-b border-glass-border min-h-[44px]">
-          <div className="flex items-center gap-2">
+          {!collapsed && <div className="flex items-center gap-2">
             <GitBranch size={14} className="text-accent-light" />
             <h3 className="text-xs font-bold text-text m-0">Graph</h3>
-          </div>
+          </div>}
+          {collapsed && <div className="flex-1" />}
           <div className="flex items-center gap-1">
             <button
               onClick={() => setCollapsed(!collapsed)}
@@ -79,6 +83,6 @@ export function GraphPanel({ activePid, crgDb }) {
           </>
         )}
       </div>
-    </div>
+    </motion.div>
   );
 }
