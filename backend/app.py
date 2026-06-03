@@ -800,10 +800,10 @@ def project_graph_html(pid):
                 else:
                     app.logger.warning("Generated graph HTML not found at %s", tmp_path)
         except Exception as e:
-            return f"""<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{{background:#0d1117;color:#c9d1d9;font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}}p{{text-align:center;max-width:400px;line-height:1.5}}code{{background:#21262d;padding:2px 6px;border-radius:4px;font-size:12px}}</style></head><body><p>Failed to generate graph HTML.<br><code>{str(e)[:200]}</code><br><br>Upload a pre-built <code>graph.html</code> instead.</p></body></html>""", 500
+            return f"""<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{{background:rgba(0,0,0,0.8);color:#c9d1d9;font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}}p{{text-align:center;max-width:400px;line-height:1.5}}code{{background:#21262d;padding:2px 6px;border-radius:4px;font-size:12px}}</style></head><body><p>Failed to generate graph HTML.<br><code>{str(e)[:200]}</code><br><br>Upload a pre-built <code>graph.html</code> instead.</p></body></html>""", 500
 
     if not html:
-        return """<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{background:#0d1117;color:#c9d1d9;font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}p{text-align:center;max-width:400px;line-height:1.6}a{color:#5b7fff}code{background:#21262d;padding:2px 6px;border-radius:4px;font-size:12px}</style></head><body><p>No graph data available.<br>Go to <b>Upload</b> tab and upload:<br><code>graph.json</code> + <code>graph.db</code> + <code>graph.html</code></p></body></html>""", 404
+        return """<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{background:rgba(0,0,0,0.8);color:#c9d1d9;font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}p{text-align:center;max-width:400px;line-height:1.6}a{color:#5b7fff}code{background:#21262d;padding:2px 6px;border-radius:4px;font-size:12px}</style></head><body><p>No graph data available.<br>Go to <b>Upload</b> tab and upload:<br><code>graph.json</code> + <code>graph.db</code> + <code>graph.html</code></p></body></html>""", 404
 
     # Inject IntelliScan dark theme CSS overrides
     THEME_OVERRIDES = """
@@ -855,7 +855,7 @@ body {
 #sidebar .neighbor-link { border-left-color: #30363d !important; }
 #sidebar .neighbor-link:hover { background: #161b22 !important; }
 #search {
-    background: #0d1117 !important;
+    background: rgba(0,0,0,0.8) !important;
     border: 1px solid #30363d !important;
     color: #c9d1d9 !important;
     font-family: 'Space Grotesk', 'DM Sans', sans-serif !important;
@@ -869,7 +869,7 @@ body {
 #legend-wrap { border-top: 1px solid #21262d !important; }
 #legend-wrap h3 { color: #8b949e !important; }
 .legend-item:hover { background: #161b22 !important; }
-.legend-cb, #select-all-cb { border-color: #30363d !important; background: #0d1117 !important; }
+.legend-cb, #select-all-cb { border-color: #30363d !important; background: rgba(0,0,0,0.8) !important; }
 #stats { color: #8b949e !important; border-top: 1px solid #21262d !important; font-family: 'Space Grotesk', 'DM Sans', sans-serif !important; }
 .legend-count { color: #8b949e !important; }
 </style>
