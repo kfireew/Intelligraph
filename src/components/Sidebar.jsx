@@ -55,7 +55,7 @@ export function Sidebar({
       <div className="flex items-center justify-between px-3 py-3.5 min-h-[52px]">
         {!collapsed && (
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="min-w-0">
-            <h2 className="text-base font-bold gradient-text m-0 leading-tight">Intelliscan</h2>
+            <h2 className="text-base font-bold gradient-text m-0 leading-tight">Intelligraph</h2>
             <p className="text-[10px] text-muted m-0">by Kfir Ezer</p>
           </motion.div>
         )}

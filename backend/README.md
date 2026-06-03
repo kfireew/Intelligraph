@@ -1,4 +1,4 @@
-# Kfirs-Intelliscan — Codebase Graph Q&A Chat
+# Kfirs-Intelligraph — Codebase Graph Q&A Chat
 
 A pod that serves a web UI where users upload knowledge graphs of their codebase and chat with them. Everything runs in the browser — no server-side graph storage.
 

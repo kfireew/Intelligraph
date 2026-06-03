@@ -1,4 +1,4 @@
-# HANDOVER — IntelliScan Session 2026-06-03
+# HANDOVER — IntelliGraph Session 2026-06-03
 
 ## Project state at session end
 
@@ -66,14 +66,14 @@ Commit: `10ac392` on main. All collapse-saga commits reverted. App running at `l
 ## How to run
 
 ```bash
-cd "C:/Users/Kfir Ezer/Desktop/intelliscan/Kfirs-Intelliscan"
+cd "C:/Users/Kfir Ezer/Desktop/intelligraph/Kfirs-Intelligraph"
 # Kill stuck processes
 taskkill /F /IM python.exe 2>/dev/null
 taskkill /F /IM node.exe 2>/dev/null
 # Build frontend
 npm run build
 # Start backend
-nohup python backend/app.py --port 5050 --host 0.0.0.0 > /tmp/intelliscan.log 2>&1 &
+nohup python backend/app.py --port 5050 --host 0.0.0.0 > /tmp/intelligraph.log 2>&1 &
 ```
 
 ## Testing notes

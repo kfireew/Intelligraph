@@ -30,16 +30,16 @@ DOWNLOADS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "downloads"
 STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 app = Flask(__name__, template_folder=TEMPLATES,
             static_folder=STATIC, static_url_path="/static")
-TEMP_DIR = os.environ.get("INTELLISCAN_TEMP", os.path.join(tempfile.gettempdir(), "intelliscan"))
+TEMP_DIR = os.environ.get("INTELLIGRAPH_TEMP", os.path.join(tempfile.gettempdir(), "intelligraph"))
 os.makedirs(TEMP_DIR, exist_ok=True)
 # ── SQLite persistence (optional) ──
-INTELLISCAN_DB = os.environ.get("INTELLISCAN_DB", os.path.join(TEMP_DIR, "intelliscan.db"))
+INTELLIGRAPH_DB = os.environ.get("INTELLIGRAPH_DB", os.path.join(TEMP_DIR, "intelligraph.db"))
 
 def _get_db():
-    """Return SQLite connection. In-memory when INTELLISCAN_DB not set."""
-    if INTELLISCAN_DB:
-        os.makedirs(os.path.dirname(INTELLISCAN_DB) or ".", exist_ok=True)
-        conn = sqlite3.connect(INTELLISCAN_DB, check_same_thread=False)
+    """Return SQLite connection. In-memory when INTELLIGRAPH_DB not set."""
+    if INTELLIGRAPH_DB:
+        os.makedirs(os.path.dirname(INTELLIGRAPH_DB) or ".", exist_ok=True)
+        conn = sqlite3.connect(INTELLIGRAPH_DB, check_same_thread=False)
     else:
         conn = sqlite3.connect(":memory:", check_same_thread=False)
     conn.row_factory = sqlite3.Row
@@ -83,7 +83,7 @@ def _load_projects():
     except Exception as e:
         app.logger.warning("DB load failed: %s", e)
 
-app.secret_key = os.environ.get("SECRET_KEY", "intelliscan-dev-key-do-not-use-in-production")
+app.secret_key = os.environ.get("SECRET_KEY", "intelligraph-dev-key-do-not-use-in-production")
 
 OIDC_ISSUER = os.environ.get("OIDC_ISSUER", "")
 OIDC_CLIENT_ID = os.environ.get("OIDC_CLIENT_ID", "")
@@ -238,7 +238,7 @@ def llm_relay():
     if llm_token:
         headers["Authorization"] = f"Bearer {llm_token}"
     headers["HTTP-Referer"] = "https://localhost"
-    headers["X-Title"] = "Intelliscan"
+    headers["X-Title"] = "Intelligraph"
 
     try:
         resp = requests.post(llm_url, json=payload, headers=headers, timeout=30)
@@ -268,7 +268,7 @@ def llm_relay_stream():
         if llm_token:
             headers["Authorization"] = f"Bearer {llm_token}"
         headers["HTTP-Referer"] = "https://localhost"
-        headers["X-Title"] = "Intelliscan"
+        headers["X-Title"] = "Intelligraph"
 
         p = dict(payload)
 
@@ -593,7 +593,7 @@ def clone_project():
         _projects()[pid] = proj
 
         try:
-            repo_dir = tempfile.mkdtemp(prefix=f"intelliscan-clone-{_user_key()}-{pid}-", dir=TEMP_DIR)
+            repo_dir = tempfile.mkdtemp(prefix=f"intelligraph-clone-{_user_key()}-{pid}-", dir=TEMP_DIR)
             if os.path.exists(repo_dir):
                 shutil.rmtree(repo_dir, ignore_errors=True)
             os.makedirs(repo_dir, exist_ok=True)
@@ -660,7 +660,7 @@ def clone_project():
                             if cid not in comms:
                                 comms[cid] = []
                             comms[cid].append(nid)
-                        html_path = f"{TEMP_DIR}/intelliscan-gf-html-{_user_key()}-{pid}-{int(time.time())}.html"
+                        html_path = f"{TEMP_DIR}/intelligraph-gf-html-{_user_key()}-{pid}-{int(time.time())}.html"
                         gf_export.to_html(G, comms, html_path)
                         proj["graph_html_path"] = html_path
                 except Exception as e:
@@ -752,7 +752,7 @@ def project_crg_db(pid):
 
 @app.route("/projects/<int:pid>/graph-html")
 def project_graph_html(pid):
-    """Serve graphify's graph.html with IntelliScan dark theme injected.
+    """Serve graphify's graph.html with IntelliGraph dark theme injected.
     Works for cloned repos (reads graphify-out/graph.html) AND uploads (generates HTML from graphify_data JSON)."""
     proj = _projects().get(pid)
     if not proj:
@@ -791,7 +791,7 @@ def project_graph_html(pid):
                     if cid not in comms:
                         comms[cid] = []
                     comms[cid].append(nid)
-                tmp_path = f"{TEMP_DIR}/intelliscan-gf-html-{_user_key()}-{pid}.html"
+                tmp_path = f"{TEMP_DIR}/intelligraph-gf-html-{_user_key()}-{pid}.html"
                 gf_export.to_html(G, comms, tmp_path)
                 if os.path.exists(tmp_path):
                     proj["graph_html_path"] = tmp_path
@@ -805,10 +805,10 @@ def project_graph_html(pid):
     if not html:
         return """<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{background:rgba(0,0,0,0.8);color:#c9d1d9;font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}p{text-align:center;max-width:400px;line-height:1.6}a{color:#5b7fff}code{background:#21262d;padding:2px 6px;border-radius:4px;font-size:12px}</style></head><body><p>No graph data available.<br>Go to <b>Upload</b> tab and upload:<br><code>graph.json</code> + <code>graph.db</code> + <code>graph.html</code></p></body></html>""", 404
 
-    # Inject IntelliScan dark theme CSS overrides
+    # Inject IntelliGraph dark theme CSS overrides
     THEME_OVERRIDES = """
-<style id="intelliscan-theme">
-/* ── IntelliScan theme overrides ── */
+<style id="intelligraph-theme">
+/* ── IntelliGraph theme overrides ── */
 body {
     background: rgba(0,0,0,0.85) !important;
     color: #c9d1d9 !important;
@@ -828,7 +828,7 @@ body {
     position: relative !important;
     overflow: hidden !important;
 }
-#intelliscan-sidebar-toggle {
+#intelligraph-sidebar-toggle {
     position: absolute !important;
     top: 8px !important;
     right: 8px !important;
@@ -847,7 +847,7 @@ body {
     padding: 0 !important;
     user-select: none !important;
 }
-#intelliscan-sidebar-toggle:hover {
+#intelligraph-sidebar-toggle:hover {
     background: rgba(255,255,255,0.06) !important;
     color: #c9d1d9 !important;
 }
@@ -876,15 +876,15 @@ body {
 
 <script>
 (function() {
-  if (window.__intelliscanSidebar) return;
-  window.__intelliscanSidebar = true;
+  if (window.__intelligraphSidebar) return;
+  window.__intelligraphSidebar = true;
   document.addEventListener('DOMContentLoaded', function() {
     var sb = document.getElementById('sidebar');
     if (!sb) return;
 
     // Create toggle button inside #graph
     var btn = document.createElement('button');
-    btn.id = 'intelliscan-sidebar-toggle';
+    btn.id = 'intelligraph-sidebar-toggle';
     btn.textContent = '\u00D7';
     btn.title = 'Close sidebar';
 
@@ -906,7 +906,7 @@ body {
     });
 
 // Graph theme: force background after vis.js renders
-    // Theme: force IntelliScan backgrounds (runs once after DOM ready)
+    // Theme: force IntelliGraph backgrounds (runs once after DOM ready)
     requestAnimationFrame(function() {
       document.body.style.setProperty("background", "radial-gradient(ellipse at 50% 0%, rgba(139,92,246,0.06), transparent 70%), rgba(0,0,0,0.85)", "important");
       var g = document.getElementById("graph");
@@ -918,7 +918,7 @@ body {
 })();
 </script>
 """
-    # Inject IntelliScan dark theme CSS overrides
+    # Inject IntelliGraph dark theme CSS overrides
     # Find last </style> and inject overrides after it
     last_style = html.rfind('</style>')
     if last_style > 0:
@@ -963,7 +963,7 @@ def project_upload_data(pid):
                         if cid not in comms:
                             comms[cid] = []
                         comms[cid].append(nid)
-                    html_path = f"{TEMP_DIR}/intelliscan-gf-html-{_user_key()}-{pid}-{int(time.time())}.html"
+                    html_path = f"{TEMP_DIR}/intelligraph-gf-html-{_user_key()}-{pid}-{int(time.time())}.html"
                     gf_export.to_html(G, comms, html_path)
                     proj["graph_html_path"] = html_path
             except Exception as e:
@@ -971,7 +971,7 @@ def project_upload_data(pid):
         except (json.JSONDecodeError, UnicodeDecodeError) as e:
             return jsonify({"error": str(e)}), 400
     elif ftype == "crg":
-        dest = f"{TEMP_DIR}/intelliscan-crg-{_user_key()}-{pid}.db"
+        dest = f"{TEMP_DIR}/intelligraph-crg-{_user_key()}-{pid}.db"
         f.save(dest)
         proj["crg_db_path"] = dest
         try:
@@ -986,7 +986,7 @@ def project_upload_data(pid):
         except Exception as e:
             print(f"CRG count warning: {e}", file=sys.stderr)
     elif ftype == "html":
-        dest = f"{TEMP_DIR}/intelliscan-gf-html-{_user_key()}-{pid}.html"
+        dest = f"{TEMP_DIR}/intelligraph-gf-html-{_user_key()}-{pid}.html"
         f.save(dest)
         proj["graph_html_path"] = dest
         proj["has_manual_html"] = True
@@ -1032,7 +1032,7 @@ def _get_graphify_path(proj):
     # Upload-based: write cached graphify_data to temp file
     gf_data = proj.get("graphify_data")
     if gf_data:
-        tmp = f"{TEMP_DIR}/intelliscan-gf-{_user_key()}-{proj.get('id', 'unknown')}.json"
+        tmp = f"{TEMP_DIR}/intelligraph-gf-{_user_key()}-{proj.get('id', 'unknown')}.json"
         with open(tmp, "w") as f:
             json.dump(gf_data, f)
         return tmp

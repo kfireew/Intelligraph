@@ -160,7 +160,7 @@ async function buildRichContext(prompt, intent, graphData, crgQueries, activePid
 
 // ── LocalStorage persistence for conversations ──
 
-const STORAGE_PREFIX = "intelliscan-chat-";
+const STORAGE_PREFIX = "intelligraph-chat-";
 
 function loadConversations(pid) {
   if (!pid) return [];

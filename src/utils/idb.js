@@ -1,4 +1,4 @@
-const DB_NAME = "intelliscan-graphs";
+const DB_NAME = "intelligraph-graphs";
 const DB_VERSION = 1;
 
 function openStore(mode) {

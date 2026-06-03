@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Start backend at D:\6.2.26\Kfirs-Intelliscan\backend for parity with copy."""
+"""Start backend at D:\6.2.26\Kfirs-Intelligraph\backend for parity with copy."""
 import subprocess
 import sys
 import os

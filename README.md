@@ -1,4 +1,4 @@
-# IntelliScan
+# IntelliGraph
 
 Codebase intelligence platform — clone repos, index them with graphify + code-review-graph, and chat with an LLM about architecture, callers, callees, impact, and test coverage.
 
@@ -37,7 +37,7 @@ Codebase intelligence platform — clone repos, index them with graphify + code-
 | Backend | Flask (Python) with OIDC auth |
 | Graph engine | [graphify](https://github.com/danielma-sifry/graphify) — code structure graph |
 | Dep graph | [code-review-graph](https://github.com/ahsolani/code-review-graph) — dependency graph with FTS5 |
-| Persistence | Server-side SQLite (`intelliscan.db`) + client-side IndexedDB |
+| Persistence | Server-side SQLite (`intelligraph.db`) + client-side IndexedDB |
 | LLM relay | SSE streaming through any OpenAI-compatible API |
 
 ## How it works
@@ -50,7 +50,7 @@ Codebase intelligence platform — clone repos, index them with graphify + code-
 2. `graphify update .` — parses the codebase, generates `graphify-out/graph.json` (nodes, edges, communities, code chunks)
 3. `code-review-graph build` — Tree-sitter parse, generates `.code-review-graph/graph.db` (SQLite with FTS5 full-text search)
 4. `graphify.export.to_html()` — generates `graphify-out/graph.html` (vis-network visualization)
-5. Stores metadata in `intelliscan.db`
+5. Stores metadata in `intelligraph.db`
 
 **Manual upload** — User provides `graph.json` + `graph.db` + `graph.html` via the New Project → Upload tab. Files are stored server-side and synced to IndexedDB for offline access.
 
@@ -105,7 +105,7 @@ The frontend replaces em dashes and other mojibake from the stream before render
 ## Project structure
 
 ```
-Kfirs-Intelliscan/
+Kfirs-Intelligraph/
 ├── backend/
 │   ├── app.py              # Flask application — all endpoints
 │   ├── mcp_server.py       # MCP server (HTTP)

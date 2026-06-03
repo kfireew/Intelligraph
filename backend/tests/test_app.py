@@ -33,7 +33,7 @@ def client():
 def test_index_returns_html(client):
     r = client.get("/")
     assert r.status_code == 200
-    assert b"Intelliscan" in r.data or b"<!DOCTYPE html>" in r.data
+    assert b"Intelligraph" in r.data or b"<!DOCTYPE html>" in r.data
 
 
 def test_status_returns_json(client):

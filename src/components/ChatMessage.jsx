@@ -27,7 +27,7 @@ export function ChatMessage({ message }) {
       <div className="flex items-center justify-between gap-2 mb-1.5">
         <div className="flex items-center gap-2">
           <span className="text-[11px] font-bold text-text-secondary opacity-80">
-            {isBot ? "Intelliscan" : "You"}
+            {isBot ? "Intelligraph" : "You"}
           </span>
           {metadata?.route && <RouteBadge route={metadata.route} />}
         </div>

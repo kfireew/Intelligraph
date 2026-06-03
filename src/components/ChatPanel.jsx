@@ -134,7 +134,7 @@ export function ChatPanel({
             )}
             <div>
               <h2 className="text-sm font-bold text-text m-0">
-                {activeProject ? activeProject.name : "Intelliscan Chat"}
+                {activeProject ? activeProject.name : "Intelligraph Chat"}
               </h2>
               <p className="text-[11px] text-muted m-0 mt-0.5">
                 {activeProject
@@ -200,7 +200,7 @@ export function ChatPanel({
               {streamingContent && status === "answering" && (
                 <div className="self-start max-w-[88%] glass-bubble rounded-[14px] rounded-bl-[4px] px-3.5 py-2.5">
                   <div className="flex items-center gap-2 mb-1.5">
-                    <span className="text-[11px] font-bold text-text-secondary opacity-80">Intelliscan</span>
+                    <span className="text-[11px] font-bold text-text-secondary opacity-80">Intelligraph</span>
                     <StatusPill tone="success">Streaming</StatusPill>
                   </div>
                   <div className="message-body text-[13px] leading-relaxed opacity-70">

@@ -1,4 +1,4 @@
-"""Intelliscan graph-builder: single EXE wrapper. Usage: graph-builder.exe <project-dir>"""
+"""Intelligraph graph-builder: single EXE wrapper. Usage: graph-builder.exe <project-dir>"""
 import subprocess, sys, os, json
 
 def main():
@@ -53,7 +53,7 @@ Graphs built successfully!
   {project_dir}\\.code-review-graph\\graph.db
   {project_dir}\\graphify-out\\graph.html
 
-Upload these three files in the Intelliscan web UI.
+Upload these three files in the Intelligraph web UI.
 """)
 
 if __name__ == "__main__":
