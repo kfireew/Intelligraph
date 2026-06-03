@@ -1,13 +1,13 @@
 import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { X, GitBranch, Upload as UploadIcon, Loader2, FileJson, Database, CheckCircle2, ArrowRight } from "lucide-react";
+import { X, GitBranch, Upload as UploadIcon, Loader2, FileJson, Database, CheckCircle2, ArrowRight, FileCode } from "lucide-react";
 
 export function CloneModal({ onClone, onClose, loading, onUploadComplete }) {
   const [gitUrl, setBitbucketUrl] = useState("");
   const [name, setName] = useState("");
   const [mode, setMode] = useState("bitbucket");
   const [status, setStatus] = useState("");
-  const [uploadFiles, setUploadFiles] = useState({ graphify: null, crg: null });
+  const [uploadFiles, setUploadFiles] = useState({ graphify: null, crg: null, html: null });
 
   const handleClone = async () => {
     if (!gitUrl.trim()) return;
@@ -29,7 +29,7 @@ export function CloneModal({ onClone, onClose, loading, onUploadComplete }) {
   };
 
   const handleUploadCreate = async () => {
-    if (!uploadFiles.graphify || !uploadFiles.crg) return;
+    if (!uploadFiles.graphify || !uploadFiles.crg || !uploadFiles.html) return;
     try {
       setStatus("Creating project & uploading...");
       const r = await fetch("/projects/clone", {
@@ -47,6 +47,10 @@ export function CloneModal({ onClone, onClose, loading, onUploadComplete }) {
       crgFD.append("graph_file", uploadFiles.crg);
       crgFD.append("type", "crg");
       await fetch(`/projects/${p.id}/upload-data`, { method: "POST", body: crgFD });
+      const htmlFD = new FormData();
+      htmlFD.append("graph_file", uploadFiles.html);
+      htmlFD.append("type", "html");
+      await fetch(`/projects/${p.id}/upload-data`, { method: "POST", body: htmlFD });
       setStatus(`Created: ${p.name || uploadFiles.graphify.name || "project"} — Upload complete`);
       setTimeout(() => {
         onClose();
@@ -57,7 +61,7 @@ export function CloneModal({ onClone, onClose, loading, onUploadComplete }) {
     }
   };
 
-  const bothUploaded = uploadFiles.graphify && uploadFiles.crg;
+  const allUploaded = uploadFiles.graphify && uploadFiles.crg && uploadFiles.html;
 
   return (
     <AnimatePresence>
@@ -159,47 +163,66 @@ export function CloneModal({ onClone, onClose, loading, onUploadComplete }) {
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-3 mb-5">
+              <div className="grid grid-cols-3 gap-3 mb-5">
                 {/* Graphify */}
                 <motion.label
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  transition={{ duration: 0.35, ease: "easeOut" }}
-                  className={`glass rounded-xl p-4 flex flex-col items-center gap-2 cursor-pointer transition-all text-center ${
-                    uploadFiles.graphify ? "border-green/30 bg-green/3" : "hover:bg-surface-hover"
-                  }`}>
-                  <input type="file" accept=".json" className="hidden" onChange={(e) => handleFileSelect(e, "graphify")} />
-                  <div className={`p-2.5 rounded-xl ${uploadFiles.graphify ? "bg-green/10" : "bg-white/4"}`}>
-                    {uploadFiles.graphify ? <CheckCircle2 size={20} className="text-green" /> : <FileJson size={20} className="text-accent-light" />}
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                transition={{ duration: 0.35, ease: "easeOut" }}
+                className={`glass rounded-xl p-4 flex flex-col items-center gap-2 cursor-pointer transition-all text-center ${
+                  uploadFiles.graphify ? "border-green/30 bg-green/3" : "hover:bg-surface-hover"
+                }`}>
+                <input type="file" accept=".json" className="hidden" onChange={(e) => handleFileSelect(e, "graphify")} />
+                <div className={`p-2.5 rounded-xl ${uploadFiles.graphify ? "bg-green/10" : "bg-white/4"}`}>
+                  {uploadFiles.graphify ? <CheckCircle2 size={20} className="text-green" /> : <FileJson size={20} className="text-accent-light" />}
+                </div>
+                <div>
+                  <div className="text-xs font-bold text-text">graph.json</div>
+                  <div className="text-[10px] text-muted mt-0.5">
+                    {uploadFiles.graphify ? uploadFiles.graphify.name : "Graphify output"}
                   </div>
-                  <div>
-                    <div className="text-xs font-bold text-text">graph.json</div>
-                    <div className="text-[10px] text-muted mt-0.5">
-                      {uploadFiles.graphify ? uploadFiles.graphify.name : "Graphify output"}
-                    </div>
-                  </div>
-                </motion.label>
+                </div>
+              </motion.label>
 
-                {/* CRG */}
-                <motion.label
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  transition={{ duration: 0.35, delay: 0.12, ease: "easeOut" }}
-                  className={`glass rounded-xl p-4 flex flex-col items-center gap-2 cursor-pointer transition-all text-center ${
-                    uploadFiles.crg ? "border-green/30 bg-green/3" : "hover:bg-surface-hover"
-                  }`}>
-                  <input type="file" accept=".db" className="hidden" onChange={(e) => handleFileSelect(e, "crg")} />
-                  <div className={`p-2.5 rounded-xl ${uploadFiles.crg ? "bg-green/10" : "bg-white/4"}`}>
-                    {uploadFiles.crg ? <CheckCircle2 size={20} className="text-green" /> : <Database size={20} className="text-cyan-400" />}
+              {/* CRG */}
+              <motion.label
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                transition={{ duration: 0.35, delay: 0.12, ease: "easeOut" }}
+                className={`glass rounded-xl p-4 flex flex-col items-center gap-2 cursor-pointer transition-all text-center ${
+                  uploadFiles.crg ? "border-green/30 bg-green/3" : "hover:bg-surface-hover"
+                }`}>
+                <input type="file" accept=".db" className="hidden" onChange={(e) => handleFileSelect(e, "crg")} />
+                <div className={`p-2.5 rounded-xl ${uploadFiles.crg ? "bg-green/10" : "bg-white/4"}`}>
+                  {uploadFiles.crg ? <CheckCircle2 size={20} className="text-green" /> : <Database size={20} className="text-cyan-400" />}
+                </div>
+                <div>
+                  <div className="text-xs font-bold text-text">graph.db</div>
+                  <div className="text-[10px] text-muted mt-0.5">
+                    {uploadFiles.crg ? uploadFiles.crg.name : "CRG database"}
                   </div>
-                  <div>
-                    <div className="text-xs font-bold text-text">graph.db</div>
-                    <div className="text-[10px] text-muted mt-0.5">
-                      {uploadFiles.crg ? uploadFiles.crg.name : "CRG database"}
-                    </div>
-                  </div>
-                </motion.label>
+                </div>
+              </motion.label>
 
+              {/* HTML */}
+              <motion.label
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                transition={{ duration: 0.35, delay: 0.24, ease: "easeOut" }}
+                className={`glass rounded-xl p-4 flex flex-col items-center gap-2 cursor-pointer transition-all text-center ${
+                  uploadFiles.html ? "border-green/30 bg-green/3" : "hover:bg-surface-hover"
+                }`}>
+                <input type="file" accept=".html" className="hidden" onChange={(e) => handleFileSelect(e, "html")} />
+                <div className={`p-2.5 rounded-xl ${uploadFiles.html ? "bg-green/10" : "bg-white/4"}`}>
+                  {uploadFiles.html ? <CheckCircle2 size={20} className="text-green" /> : <FileCode size={20} className="text-purple-400" />}
+                </div>
+                <div>
+                  <div className="text-xs font-bold text-text">graph.html</div>
+                  <div className="text-[10px] text-muted mt-0.5">
+                    {uploadFiles.html ? uploadFiles.html.name : "Vis-network graph"}
+                  </div>
+                </div>
+              </motion.label>
               </div>
 
               {status && (
@@ -213,9 +236,9 @@ export function CloneModal({ onClone, onClose, loading, onUploadComplete }) {
                 <button onClick={onClose} className="px-4 py-2 rounded-lg text-xs font-bold text-muted hover:text-text hover:bg-white/3 transition-colors">Cancel</button>
                 <button
                   onClick={handleUploadCreate}
-                  disabled={!bothUploaded}
+                  disabled={!allUploaded}
                   className="flex items-center gap-1.5 px-5 py-2 rounded-lg text-xs font-bold text-white disabled:opacity-40 transition-all"
-                  style={{ background: bothUploaded ? "linear-gradient(135deg, #8b5cf6, #d946ef)" : "rgba(255,255,255,0.06)" }}>
+                  style={{ background: allUploaded ? "linear-gradient(135deg, #8b5cf6, #d946ef)" : "rgba(255,255,255,0.06)" }}>
                   Create <ArrowRight size={14} />
                 </button>
               </div>

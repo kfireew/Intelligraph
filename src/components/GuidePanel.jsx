@@ -13,7 +13,7 @@ export function GuidePanel({ onMCPUpload, mcpStatus, graphifyStatus, crgStatus }
       </div>
 
       {/* Generate graphs section */}
-      <Section title="Generate Graph Files" icon={Download}>
+      <Section title="Manually Generate Graph Files" icon={Download}>
         <ol className="text-xs text-text-secondary space-y-2 m-0 pl-4">
           <li>Clone a repo or download graph-builder</li>
           <li>Run <code className="px-1.5 py-0.5 rounded bg-accent/10 text-accent-light text-[11px]">python graph_builder.py /path/to/repo</code></li>
