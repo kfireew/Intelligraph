@@ -16,28 +16,28 @@ export function GraphPanel({ activePid, crgDb }) {
 
   const containerClass = expanded
     ? "fixed inset-0 z-40 bg-bg/90 backdrop-blur-sm p-6"
-    : "flex-1 min-w-0 min-h-0";
+    : "min-h-0";
 
   return (
     <motion.div
-      animate={{ width: collapsed ? 40 : "auto", minWidth: collapsed ? 40 : 0 }}
+      animate={{ flex: collapsed ? "0 0 40px" : "1 1 0%", opacity: collapsed ? 0.6 : 1 }}
       transition={{ duration: 0.3, ease: "easeInOut" }}
       className={containerClass}
+      style={{ display: "flex", flexDirection: "column", overflow: "hidden" }}
     >
       <div className="glass rounded-xl flex flex-col h-full overflow-hidden">
         <div className="flex items-center justify-between px-4 py-2.5 border-b border-glass-border min-h-[44px]">
-          {!collapsed && <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2">
             <GitBranch size={14} className="text-accent-light" />
-            <h3 className="text-xs font-bold text-text m-0">Graph</h3>
-          </div>}
-          {collapsed && <div className="flex-1" />}
+            {!collapsed && <h3 className="text-xs font-bold text-text m-0">Graph</h3>}
+          </div>
           <div className="flex items-center gap-1">
             <button
               onClick={() => setCollapsed(!collapsed)}
               className="p-1 rounded text-muted hover:text-text hover:bg-white/5 transition-colors"
               title={collapsed ? "Expand graph" : "Collapse graph"}
             >
-              {collapsed ? <ChevronRight size={14} /> : <ChevronLeft size={14} />}
+              {collapsed ? <ChevronLeft size={14} /> : <ChevronRight size={14} />}
             </button>
             <button
               onClick={() => setExpanded(!expanded)}
@@ -48,7 +48,7 @@ export function GraphPanel({ activePid, crgDb }) {
           </div>
         </div>
 
-        {!graphUrl ? (
+        {collapsed ? null : !graphUrl ? (
           <div className="flex-1 flex items-center justify-center">
             <div className="text-center max-w-[240px]">
               <div className="w-10 h-10 mx-auto mb-2.5 rounded-xl bg-accent/10 flex items-center justify-center">
