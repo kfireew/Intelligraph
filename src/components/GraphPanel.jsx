@@ -6,9 +6,8 @@ import { GitBranch, Boxes, Maximize2, Minimize2, ChevronLeft, ChevronRight } fro
  * GraphPanel — wraps graphify's graph.html in an iframe.
  * Theme-injected by backend at /projects/<pid>/graph-html.
  */
-export function GraphPanel({ activePid, crgDb }) {
+export function GraphPanel({ activePid, crgDb, collapsed, onToggleCollapse }) {
   const [expanded, setExpanded] = useState(false);
-  const [collapsed, setCollapsed] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const iframeRef = useRef(null);
 
@@ -16,14 +15,10 @@ export function GraphPanel({ activePid, crgDb }) {
 
   const containerClass = expanded
     ? "fixed inset-0 z-40 bg-bg/90 backdrop-blur-sm p-6"
-    : "min-h-0";
+    : "min-h-0 flex-1 min-w-0";
 
   return (
-    <motion.div
-      animate={{ flex: collapsed ? "0 0 40px" : "1 1 0%", opacity: collapsed ? 0.6 : 1 }}
-      transition={{ duration: 0.3, ease: "easeInOut" }}
-      className={containerClass}
-      style={{ display: "flex", flexDirection: "column", overflow: "hidden" }}
+    <div className={containerClass} style={{ display: "flex", flexDirection: "column" }}
     >
       <div className="glass rounded-xl flex flex-col h-full overflow-hidden">
         <div className="flex items-center justify-between px-4 py-2.5 border-b border-glass-border min-h-[44px]">
@@ -33,7 +28,7 @@ export function GraphPanel({ activePid, crgDb }) {
           </div>
           <div className="flex items-center gap-1">
             <button
-              onClick={() => setCollapsed(!collapsed)}
+              onClick={onToggleCollapse}
               className="p-1 rounded text-muted hover:text-text hover:bg-white/5 transition-colors"
               title={collapsed ? "Expand graph" : "Collapse graph"}
             >
@@ -83,6 +78,6 @@ export function GraphPanel({ activePid, crgDb }) {
           </>
         )}
       </div>
-    </motion.div>
+    </div>
   );
 }

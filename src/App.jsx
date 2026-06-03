@@ -43,6 +43,7 @@ export default function App() {
   const [activePanel, setActivePanel] = useState("chat");
   const [showCloneModal, setShowCloneModal] = useState(false);
   const [cloneLoading, setCloneLoading] = useState(false);
+  const [graphCollapsed, setGraphCollapsed] = useState(false);
   const [mcpStatus, setMcpStatus] = useState("");
 
   // Load projects on mount
@@ -223,12 +224,12 @@ export default function App() {
         </AnimatePresence>
 
         {/* Graph panel — always visible on the right */}
-        <div className="w-[42%] flex-shrink-0 border-l border-glass-border hidden lg:flex">
+        <motion.div animate={{ width: graphCollapsed ? 0 : "42%", opacity: graphCollapsed ? 0 : 1 }} transition={{ duration: 0.3, ease: "easeInOut" }} className="flex-shrink-0 border-l border-glass-border hidden lg:flex overflow-hidden">
           <GraphPanel
             activePid={projects.activePid}
             crgDb={graph.crgDb}
           />
-        </div>
+        </motion.div>
       </div>
 
       {/* Clone modal */}
