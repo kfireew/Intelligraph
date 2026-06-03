@@ -227,6 +227,8 @@ export default function App() {
         <motion.div animate={{ width: graphCollapsed ? 0 : "42%", opacity: graphCollapsed ? 0 : 1 }} transition={{ duration: 0.3, ease: "easeInOut" }} className="flex-shrink-0 border-l border-glass-border hidden lg:flex overflow-hidden">
           <GraphPanel
             activePid={projects.activePid}
+            collapsed={graphCollapsed}
+            onToggleCollapse={() => setGraphCollapsed(!graphCollapsed)}
             crgDb={graph.crgDb}
           />
         </motion.div>
