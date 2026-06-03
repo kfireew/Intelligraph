@@ -1245,7 +1245,7 @@ def project_chat_context(pid):
     app.logger.info("chat-context pid=%s graphify_nodes=%s", pid, len(graphify_data.get("nodes", [])))
 
     parts = []
-    parts.append("You are an expert code analyst. Answer the user's question using only the provided code context. Be precise and cite file paths.")
+    parts.append("You are an expert code analyst. Use ONLY the code graph data provided below (nodes, edges, communities, file paths). NEVER reference README.md, markdown files, or documentation — those are not in the graph. Cite only actual source file paths from the graph data (e.g., src/main.py, gui/components.py). Be precise.")
 
     # Codebase structure overview
     all_files = sorted(set(n.get("source_file", "") for n in graphify_data.get("nodes", []) if n.get("source_file")))
