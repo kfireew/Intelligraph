@@ -151,6 +151,8 @@ export default function App() {
                 graphData={graph.graphData}
                 llmConfigured={!!(llm.llmUrl && llm.llmToken)}
                 onGoToLLM={() => setActivePanel("llm")}
+                graphCollapsed={graphCollapsed}
+                onToggleGraphCollapse={() => setGraphCollapsed(!graphCollapsed)}
               />
             </motion.div>
           )}
@@ -224,13 +226,18 @@ export default function App() {
           )}
         </AnimatePresence>
 
-        {/* Graph panel — always visible on the right */}
-        <motion.div animate={{ width: graphCollapsed ? 40 : "42%" }} transition={{ duration: 0.3, ease: "easeInOut" }} className="flex-shrink-0 border-l border-glass-border hidden lg:flex overflow-hidden">
+        {/* Graph panel — right side, collapses with width animation; stays mounted so iframe doesn't reload */}
+        <motion.div
+          animate={{ width: graphCollapsed ? 0 : "42%", opacity: graphCollapsed ? 0 : 1 }}
+          transition={{ duration: 0.3, ease: "easeInOut" }}
+          className="border-l border-glass-border hidden lg:flex overflow-hidden"
+          style={{ minWidth: 0 }}
+        >
           <GraphPanel
             activePid={projects.activePid}
+            crgDb={graph.crgDb}
             collapsed={graphCollapsed}
             onToggleCollapse={() => setGraphCollapsed(!graphCollapsed)}
-            crgDb={graph.crgDb}
           />
         </motion.div>
       </div>

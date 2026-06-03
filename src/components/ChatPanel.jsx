@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { ChatMessage } from "./ChatMessage";
 import { PromptComposer } from "./PromptComposer";
 import { StatusPill } from "./StatusPill";
-import { Settings, Zap, Plus, Trash2, MessageSquare, PanelLeftClose, PanelLeft } from "lucide-react";
+import { Settings, Zap, Plus, Trash2, MessageSquare, PanelLeftClose, PanelLeft, ChevronLeft } from "lucide-react";
 
 const STATUS_PILL = {
   idle: null,
@@ -38,6 +38,8 @@ export function ChatPanel({
   newConversation,
   deleteConversation,
   switchConversation,
+  graphCollapsed,
+  onToggleGraphCollapse,
 }) {
   const bottomRef = useRef(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -141,7 +143,18 @@ export function ChatPanel({
               </p>
             </div>
           </div>
-          {pill && <StatusPill tone={pill.tone}>{pill.text}</StatusPill>}
+          <div className="flex items-center gap-2">
+            {pill && <StatusPill tone={pill.tone}>{pill.text}</StatusPill>}
+            {graphCollapsed && onToggleGraphCollapse && (
+              <button
+                onClick={onToggleGraphCollapse}
+                className="p-1 rounded hover:bg-surface text-muted hover:text-text transition-colors"
+                title="Show graph"
+              >
+                <ChevronLeft size={14} />
+              </button>
+            )}
+          </div>
         </div>
 
         {/* Messages */}

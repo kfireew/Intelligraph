@@ -12,10 +12,10 @@ export function ChatMessage({ message }) {
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ type: "spring", stiffness: 300, damping: 25 }}
-      className={`max-w-[88%] min-w-0 px-3.5 py-2.5 rounded-[14px] text-sm ${
+      className={`w-fit max-w-[88%] min-w-0 px-3.5 py-2.5 rounded-[14px] text-sm ${
         isBot
-          ? "self-start glass-bubble rounded-bl-[4px]"
-          : "self-end rounded-br-[4px]"
+          ? "glass-bubble rounded-bl-[4px]"
+          : "ml-auto rounded-br-[4px]"
       }`}
       style={
         !isBot

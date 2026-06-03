@@ -368,7 +368,7 @@ export function useChat({ graphData, crgDbRef, searchNodes, callers, callees, im
           fullText += data.text || "";
           setStreamingContent(fullText);
         } else if (event === "done") {
-          fullText = (data.text || fullText).replace(/—/g, "--");
+          fullText = (data.text || fullText).replace(/\u2014/g, "--").replace(/\u00e2\u0080\u0094/g, "--");
           pw = data.path_warnings || null;
         } else if (event === "error") {
           console.error("SSE error:", data.message);
@@ -393,7 +393,7 @@ export function useChat({ graphData, crgDbRef, searchNodes, callers, callees, im
           projectId: activePid,
         });
         const body = JSON.parse(j.body || "{}");
-        fullText = (body.choices?.[0]?.message?.content || "").replace(/—/g, "--");
+        fullText = (body.choices?.[0]?.message?.content || "").replace(/\u2014/g, "--").replace(/\u00e2\u0080\u0094/g, "--");
       } catch {}
       if (!fullText) {
         fullText = "(No response -- the LLM returned empty output. Try rephrasing your question.)";
@@ -403,7 +403,7 @@ export function useChat({ graphData, crgDbRef, searchNodes, callers, callees, im
     setPathWarnings(pw);
     addMessage({
       role: "assistant",
-      content: fullText.replace(/\u2014/g, "--"),
+      content: fullText.replace(/\u2014/g, "--").replace(/\u00e2\u0080\u0094/g, "--"),
       metadata: { intent, result, route: { category: intent, label: intent }, pathWarnings: pw },
     }, targetConvId);
     setStreamingContent("");
