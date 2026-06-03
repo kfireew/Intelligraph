@@ -44,7 +44,7 @@ export function GraphPanel({ activePid, crgDb }) {
           </div>
         </div>
 
-        !graphUrl ? (
+        {!graphUrl ? (
           <div className="flex-1 flex items-center justify-center">
             <div className="text-center max-w-[240px]">
               <div className="w-10 h-10 mx-auto mb-2.5 rounded-xl bg-accent/10 flex items-center justify-center">
