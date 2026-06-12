@@ -1,0 +1,327 @@
+@import "tailwindcss";
+
+@theme {
+  --color-accent: #8b5cf6;
+  --color-accent-light: #a78bfa;
+  --color-magenta: #d946ef;
+  --color-magenta-light: #e879f9;
+  --color-bg: #000000;
+  --color-bg-alt: #0a0a0a;
+  --color-surface: rgba(255, 255, 255, 0.03);
+  --color-surface-hover: rgba(255, 255, 255, 0.06);
+  --color-border: rgba(255, 255, 255, 0.08);
+  --color-border-accent: rgba(139, 92, 246, 0.25);
+  --color-text: #ffffff;
+  --color-text-secondary: #fafafa;
+  --color-muted: #a1a1aa;
+  --color-muted-subtle: #71717a;
+  --color-green: #34d399;
+  --color-red: #f87171;
+  --color-orange: #fb923c;
+  --color-cyan: #22d3ee;
+  --color-glass-bg: rgba(10, 10, 10, 0.85);
+  --color-glass-border: rgba(255, 255, 255, 0.06);
+  --font-sans: "Space Grotesk", "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
+}
+
+body {
+  @apply bg-bg text-text font-sans h-screen overflow-hidden;
+  background: radial-gradient(ellipse at 50% 0%, rgba(139, 92, 246, 0.06), transparent 70%), var(--color-bg);
+}
+
+.glass {
+  background: rgba(10, 10, 10, 0.3);
+  border: 1px solid var(--color-glass-border);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+}
+
+.glass-bubble {
+  background: rgba(10, 10, 10, 0.85);
+  border: 1px solid var(--color-glass-border);
+}
+
+.chat-message {
+  content-visibility: auto;
+  contain-intrinsic-size: 80px;
+}
+
+.gradient-text {
+  background: linear-gradient(135deg, var(--color-accent), var(--color-magenta));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.gradient-border {
+  border-image: linear-gradient(135deg, var(--color-accent), var(--color-magenta)) 1;
+}
+
+/* Markdown rendered content */
+.message-body pre {
+  @apply my-3 p-3 overflow-x-auto rounded-lg;
+  background: rgba(0, 0, 0, 0.4);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  white-space: pre;
+}
+
+.message-body pre code {
+  @apply block text-sm;
+  min-width: max-content;
+  white-space: pre;
+}
+
+.message-body :not(pre) > code {
+  @apply px-1.5 py-0.5 rounded-md text-sm;
+  background: rgba(139, 92, 246, 0.12);
+  color: var(--color-accent-light);
+}
+
+.message-body p { @apply my-2 leading-relaxed; }
+.message-body ul, .message-body ol { @apply my-2 pl-5; }
+.message-body li { @apply my-1 leading-relaxed; }
+.message-body h1 { @apply text-lg font-bold mt-4 mb-2; }
+.message-body h2 { @apply text-base font-bold mt-3 mb-1.5; }
+.message-body h3 { @apply text-sm font-bold mt-3 mb-1; }
+.message-body strong { @apply font-bold text-text; }
+.message-body hr { @apply my-3 border-glass-border; }
+.message-body blockquote { @apply border-l-2 border-accent/30 pl-3 my-2 italic text-muted; }
+
+
+/* ReactFlow overrides for dark theme */
+.react-flow__background {
+  background: transparent !important;
+}
+
+.react-flow__controls button {
+  background: var(--color-glass-bg) !important;
+  border: 1px solid var(--color-glass-border) !important;
+  color: var(--color-muted) !important;
+  fill: var(--color-muted) !important;
+}
+
+.react-flow__minimap {
+  background: rgba(0, 0, 0, 0.3) !important;
+  border: 1px solid var(--color-glass-border) !important;
+}
+
+.react-flow__attribution {
+  display: none !important;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+/* Graph Orb — lava lamp with multiple fluid blobs */
+.graph-orb {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  border: none;
+  cursor: pointer;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: radial-gradient(circle at 35% 35%, rgba(139,92,246,0.5), rgba(139,92,246,0.15));
+  box-shadow: 0 0 30px rgba(139,92,246,0.3), inset 0 0 20px rgba(139,92,246,0.1);
+  animation: graph-float 4s ease-in-out infinite;
+  backdrop-filter: blur(4px);
+  overflow: visible;
+}
+
+.graph-orb:hover {
+  box-shadow: 0 0 40px rgba(139,92,246,0.5), inset 0 0 20px rgba(139,92,246,0.15);
+}
+
+/* Main lava lamp blob */
+.graph-orb-inner {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 45% 45%, rgba(167,139,250,0.9), rgba(124,58,237,0.5));
+  box-shadow: 0 0 14px rgba(139,92,246,0.5);
+  animation: blob1 5s ease-in-out infinite;
+  z-index: 1;
+}
+
+/* Secondary blobs (pseudo-elements) */
+.graph-orb::before, .graph-orb::after {
+  content: "";
+  position: absolute;
+  border-radius: 50%;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.graph-orb::before {
+  width: 14px;
+  height: 14px;
+  background: radial-gradient(circle at 40% 40%, rgba(139,92,246,0.7), rgba(124,58,237,0.3));
+  animation: blob2 6s ease-in-out infinite;
+  top: 10px;
+  left: 8px;
+  filter: blur(2px);
+}
+
+.graph-orb::after {
+  width: 10px;
+  height: 10px;
+  background: radial-gradient(circle at 50% 50%, rgba(167,139,250,0.6), rgba(139,92,246,0.2));
+  animation: blob3 7s ease-in-out infinite;
+  bottom: 10px;
+  right: 8px;
+  filter: blur(3px);
+}
+
+/* Blob animations — each moves differently, joining and separating */
+@keyframes blob1 {
+  0%   { transform: translate(0, 0) scale(1); }
+  20%  { transform: translate(3px, -4px) scale(1.05); }
+  40%  { transform: translate(-2px, 2px) scale(0.95); }
+  60%  { transform: translate(4px, 3px) scale(1.08); }
+  80%  { transform: translate(-3px, -2px) scale(0.92); }
+  100% { transform: translate(0, 0) scale(1); }
+}
+
+@keyframes blob2 {
+  0%   { transform: translate(0, 0) scale(1); }
+  25%  { transform: translate(6px, 4px) scale(1.2); }
+  50%  { transform: translate(-4px, -6px) scale(0.8); }
+  75%  { transform: translate(8px, -2px) scale(1.1); }
+  100% { transform: translate(0, 0) scale(1); }
+}
+
+@keyframes blob3 {
+  0%   { transform: translate(0, 0) scale(1); }
+  33%  { transform: translate(-5px, 5px) scale(0.7); }
+  66%  { transform: translate(3px, -7px) scale(1.3); }
+  100% { transform: translate(0, 0) scale(1); }
+}
+
+/* Pulse after answer — glow pulse */
+.graph-orb-pulse {
+  animation: graph-pulse 0.4s ease-in-out 2;
+  box-shadow: 0 0 60px rgba(139,92,246,0.7), 0 0 120px rgba(139,92,246,0.4);
+}
+
+@keyframes graph-float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-6px); }
+}
+
+@keyframes graph-pulse {
+  0%, 100% { transform: scale(1); box-shadow: 0 0 30px rgba(139,92,246,0.3); }
+  50% { transform: scale(1.25); box-shadow: 0 0 80px rgba(139,92,246,0.7); }
+}
+
+
+.graph-expanded {
+  position: fixed;
+  top: 40px;
+  right: 40px;
+  bottom: 40px;
+  left: 40px;
+  z-index: 9998;
+  display: flex;
+  flex-direction: column;
+  background: var(--color-glass-bg);
+  border: 1px solid var(--color-glass-border);
+  border-radius: 16px;
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  overflow: hidden;
+  box-shadow: 0 8px 48px rgba(0, 0, 0, 0.6);
+}
+
+.graph-close-btn {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  z-index: 10;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  border: none;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--color-muted);
+  cursor: pointer;
+  transition: background 0.2s ease, color 0.2s ease;
+}
+
+.graph-close-btn:hover {
+  background: rgba(139, 92, 246, 0.2);
+  color: var(--color-text);
+}
+
+.graph-glow {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 300px;
+  height: 300px;
+  transform: translate(-50%, -50%);
+  background: radial-gradient(circle, rgba(139, 92, 246, 0.15), transparent 70%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.graph-iframe-container {
+  flex: 1;
+  display: flex;
+  position: relative;
+  overflow: hidden;
+}
+
+.graph-iframe {
+  width: 100%;
+  height: 100%;
+  border: none;
+}
+
+.star-trail-canvas {
+  position: fixed;
+  pointer-events: none;
+  z-index: 1;
+}
+
+.graph-orb-pulse {
+  animation: graph-pulse 0.8s ease 2;
+}
+
+@keyframes graph-pulse {
+  0% {
+    transform: scale(1);
+    box-shadow: 0 4px 24px rgba(139, 92, 246, 0.4);
+  }
+  50% {
+    transform: scale(1.25);
+    box-shadow: 0 0 48px rgba(139, 92, 246, 0.7);
+  }
+  100% {
+    transform: scale(1);
+    box-shadow: 0 4px 24px rgba(139, 92, 246, 0.4);
+  }
+}
