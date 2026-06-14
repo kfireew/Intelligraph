@@ -4,7 +4,7 @@ import { endpoints } from "../config/endpoints";
 export const projectsService = {
   list: () => requestJson(endpoints.projects),
   getStatus: (pid) => requestJson(endpoints.projectStatus(pid)),
-  clone: ({ gitUrl, name, type = "bitbucket", accessToken, bitbucketUsername, useLinkedCredentials, authProvider }) =>
+  clone: ({ gitUrl, name, type = "bitbucket", accessToken, useLinkedCredentials, authProvider }) =>
     requestJson(endpoints.projectClone, {
       method: "POST",
       body: JSON.stringify({
@@ -13,7 +13,6 @@ export const projectsService = {
         type,
         ...(accessToken ? {
           access_token: accessToken,
-          bitbucket_username: bitbucketUsername,
           use_linked_credentials: useLinkedCredentials ?? true,
           auth_provider: authProvider || "bitbucket_datacenter",
         } : {}),

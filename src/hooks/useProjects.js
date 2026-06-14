@@ -23,9 +23,9 @@ export function useProjects() {
     setActivePid(pid);
   }, []);
 
-  const cloneProject = useCallback(async ({ gitUrl, name, accessToken, bitbucketUsername, useLinkedCredentials, authProvider }) => {
+  const cloneProject = useCallback(async ({ gitUrl, name, accessToken, useLinkedCredentials, authProvider }) => {
     try {
-      const p = await projectsService.clone({ gitUrl, name, accessToken, bitbucketUsername, useLinkedCredentials, authProvider });
+      const p = await projectsService.clone({ gitUrl, name, accessToken, useLinkedCredentials, authProvider });
       if (p.graphify_data && p.crg_db_path) {
         p.graphify_data.has_crg_db = true;
       }

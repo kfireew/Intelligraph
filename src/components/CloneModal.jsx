@@ -1,18 +1,15 @@
 import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { X, GitBranch, Loader2, ChevronDown, ChevronRight } from "lucide-react";
+import { X, GitBranch, Loader2 } from "lucide-react";
 
 export function CloneModal({ onClone, onClose, loading }) {
   const [gitUrl, setUrl] = useState("");
   const [name, setName] = useState("");
   const [status, setStatus] = useState("");
-  const [showAuth, setShowAuth] = useState(false);
   const [accessToken, setAccessToken] = useState("");
-  const [bitbucketUsername, setBitbucketUsername] = useState("");
 
   const clearSensitiveState = () => {
     setAccessToken("");
-    setBitbucketUsername("");
   };
 
   const handleClone = async () => {
@@ -22,7 +19,6 @@ export function CloneModal({ onClone, onClose, loading }) {
       const payload = { gitUrl: gitUrl.trim(), name: name.trim() || undefined };
       if (accessToken.trim()) {
         payload.accessToken = accessToken.trim();
-        payload.bitbucketUsername = bitbucketUsername.trim() || undefined;
         payload.useLinkedCredentials = true;
         payload.authProvider = "bitbucket_datacenter";
       }
@@ -66,37 +62,15 @@ export function CloneModal({ onClone, onClose, loading }) {
               className="w-full px-3 py-2 rounded-lg bg-white/3 border border-glass-border text-text text-sm outline-none focus:border-accent/40 transition-colors" />
           </div>
 
-          {/* Bitbucket authentication section */}
+          {/* Bitbucket HTTP Access Token */}
           <div className="mb-4">
-            <button
-              onClick={() => setShowAuth(!showAuth)}
-              className="flex items-center gap-2 text-[11px] font-bold text-muted uppercase tracking-wider mb-1.5 hover:text-text transition-colors w-full text-left">
-              {showAuth ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-              Bitbucket authentication
-            </button>
-            {showAuth && (
-              <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: "auto", opacity: 1 }}
-                exit={{ height: 0, opacity: 0 }} className="overflow-hidden">
-                <div className="mb-3">
-                  <label className="block text-[11px] font-bold text-muted uppercase tracking-wider mb-1.5">Bitbucket Data Center HTTP access token</label>
-                  <input type="password" value={accessToken} onChange={(e) => setAccessToken(e.target.value)}
-                    placeholder="BBDC-..."
-                    className="w-full px-3 py-2 rounded-lg bg-white/3 border border-glass-border text-text text-sm outline-none focus:border-accent/40 transition-colors font-mono tracking-widest" />
-                  <p className="text-[10px] text-muted-subtle mt-1 leading-relaxed">
-                    Required for private Bitbucket repos unless Intelligraph already has a linked Bitbucket credential for your account. OpenID login alone does not grant Git clone access. Use a read-only Bitbucket HTTP access token when possible.
-                  </p>
-                </div>
-                <div className="mb-3">
-                  <label className="block text-[11px] font-bold text-muted uppercase tracking-wider mb-1.5">Bitbucket username <span className="text-muted-subtle font-normal normal-case">(optional)</span></label>
-                  <input type="text" value={bitbucketUsername} onChange={(e) => setBitbucketUsername(e.target.value)}
-                    placeholder="username"
-                    className="w-full px-3 py-2 rounded-lg bg-white/3 border border-glass-border text-text text-sm outline-none focus:border-accent/40 transition-colors" />
-                  <p className="text-[10px] text-muted-subtle mt-1 leading-relaxed">
-                    Only needed if your Bitbucket server expects a username with the HTTP access token.
-                  </p>
-                </div>
-              </motion.div>
-            )}
+            <label className="block text-[11px] font-bold text-muted uppercase tracking-wider mb-1.5">BITBUCKET HTTP ACCESS TOKEN <span className="text-muted-subtle font-normal normal-case">(optional)</span></label>
+            <input type="password" value={accessToken} onChange={(e) => setAccessToken(e.target.value)}
+              placeholder="BBDC-..."
+              className="w-full px-3 py-2 rounded-lg bg-white/3 border border-glass-border text-text text-sm outline-none focus:border-accent/40 transition-colors font-mono tracking-widest" />
+            <p className="text-[10px] text-muted-subtle mt-1 leading-relaxed">
+              Only needed for <b>private</b> Bitbucket repos. Required <b>Read</b> permission on the repo. OpenID login alone does not grant Git clone access. Use a read-only Bitbucket HTTP access token when possible.
+            </p>
           </div>
 
           {status && (

@@ -581,19 +581,29 @@ def clone_project():
 
             _save_project(pid, proj)  # persist immediately on clone success
 
-            # ── graphify update ──
-            r = subprocess.run(["graphify", "update", "."], cwd=repo_dir,
-                             capture_output=True, text=True, timeout=120)
-            if r.returncode != 0:
-                app.logger.warning("graphify update failed (rc=%d): %s",
-                                   r.returncode, r.stderr[:200])
+            # ── graphify update (non-fatal) ──
+            try:
+                r = subprocess.run(["graphify", "update", "."], cwd=repo_dir,
+                                 capture_output=True, text=True, timeout=120)
+                if r.returncode != 0:
+                    app.logger.warning("graphify update failed (rc=%d): %s",
+                                       r.returncode, r.stderr[:200])
+            except FileNotFoundError:
+                app.logger.warning("graphify CLI not found — graph analysis skipped")
+            except Exception as e:
+                app.logger.warning("graphify update error: %s", str(e)[:200])
 
-            # ── code-review-graph build ──
-            r = subprocess.run(["code-review-graph", "build"], cwd=repo_dir,
-                              capture_output=True, text=True, timeout=120)
-            if r.returncode != 0:
-                app.logger.warning("code-review-graph build failed (rc=%d): %s",
-                                   r.returncode, r.stderr[:200])
+            # ── code-review-graph build (non-fatal) ──
+            try:
+                r = subprocess.run(["code-review-graph", "build"], cwd=repo_dir,
+                                  capture_output=True, text=True, timeout=120)
+                if r.returncode != 0:
+                    app.logger.warning("code-review-graph build failed (rc=%d): %s",
+                                       r.returncode, r.stderr[:200])
+            except FileNotFoundError:
+                app.logger.warning("code-review-graph CLI not found — CRG analysis skipped")
+            except Exception as e:
+                app.logger.warning("code-review-graph build error: %s", str(e)[:200])
 
             # ── Parse results ──
             gf_path = os.path.join(repo_dir, "graphify-out", "graph.json")
@@ -616,7 +626,7 @@ def clone_project():
                 proj["crg_nodes"] = cn
                 proj["edges"] = max(proj["edges"], ce)
             else:
-                app.logger.warning("CRG build failed (rc=%d): %s", r.returncode, r.stderr[:300])
+                app.logger.warning("CRG build did not produce output — skipping CRG analysis")
 
             # ── Generate graph.html from graphify_data ──
             if proj.get("graphify_data"):
