@@ -42,11 +42,12 @@ export default function App() {
       projects.selectProject(projects.projects[0].id);
   }, [projects.projects, projects.activePid, projects.selectProject]);
 
-  const handleClone = useCallback(async ({ gitUrl, name }) => {
+  const handleClone = useCallback(async (cloneArgs) => {
+    const { gitUrl, name, ...extra } = cloneArgs;
     if (!gitUrl) return;
     setCloneLoading(true);
     try {
-      const newProject = await projects.cloneProject({ gitUrl, name });
+      const newProject = await projects.cloneProject({ gitUrl, name, ...extra });
       if (newProject?.id) {
         projects.selectProject(newProject.id);
         setShowCloneModal(false); // Auto-close on success

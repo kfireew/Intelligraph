@@ -23,6 +23,7 @@ import requests
 from flask import (Flask, Response, jsonify, redirect, render_template,
                    request, send_file, send_from_directory, session,
                    stream_with_context, url_for)
+import bb_auth
 
 # ── App setup ────────────────────────────────────────────────────
 
@@ -470,7 +471,16 @@ def clone_project():
     if not git_url and clone_type != "upload":
         return jsonify({"error": "git_url required (GitHub or Bitbucket)"}), 400
 
-    oidc_token = session.get("oidc_access_token", "")
+    # Bitbucket Data Center auth fields (optional)
+    access_token = data.get("access_token")
+    if access_token is not None:
+        access_token = access_token.strip() or None
+    bitbucket_username = data.get("bitbucket_username")
+    if bitbucket_username is not None:
+        bitbucket_username = bitbucket_username.strip() or None
+    use_linked_credentials = data.get("use_linked_credentials", True)
+    auth_provider = data.get("auth_provider", "bitbucket_datacenter")
+
     name = data.get("name") or _name_from_url(git_url)
     pid = _next_pid()
     proj = {"name": name, "git_url": git_url, "status": "cloning", "nodes": 0, "edges": 0}
@@ -486,33 +496,106 @@ def clone_project():
                 shutil.rmtree(repo_dir, ignore_errors=True)
             os.makedirs(repo_dir, exist_ok=True)
 
-            # Any git URL — GitHub, Bitbucket, GitLab
-            clone_url = git_url
-            if "bitbucket" in git_url and oidc_token:
-                host = git_url.split("://", 1)[-1].split("/", 1)[0]
-                path = git_url.split("://", 1)[-1].split("/", 1)[1]
-                clone_url = f"https://x-token-auth:{oidc_token}@{host}/{path}"
+            # ── Credential resolution (Bitbucket Data Center) ──
+            token = None
+            username = None
+            credential_source = "none"
+            is_bitbucket = "bitbucket" in git_url.lower()
 
+            if is_bitbucket and auth_provider == "bitbucket_datacenter":
+                resolved = bb_auth.resolve_bitbucket_credential(
+                    access_token=access_token,
+                    bitbucket_username=bitbucket_username,
+                    use_linked_credentials=use_linked_credentials,
+                    user_key=_user_key(),
+                    project_id=pid,
+                )
+                if resolved:
+                    credential_source, token, username = resolved
+                else:
+                    # OIDC-authenticated user without credentials → fail immediately
+                    if get_user():
+                        status_code, body = bb_auth.missing_credential_error(is_oidc_user=True)
+                        return jsonify(body), status_code
+                    # Anonymous user: try no-auth public clone
+                    token = None
+                    username = None
+                    credential_source = "none"
+
+            # ── Log credential source (never the raw token) ──
+            app.logger.info(
+                "Clone auth [%s]: git_host=%s, repo=%s, source=%s, token_mask=%s",
+                _user_key(),
+                git_url.split("://", 1)[-1].split("/", 1)[0] if "://" in git_url else git_url.split("/")[0],
+                _name_from_url(git_url),
+                credential_source,
+                bb_auth.token_display(token) if token else "[NONE]",
+            )
+
+            # ── Preflight: git ls-remote ──
+            proj["status"] = "auth_test_pending"
+            _projects()[pid] = proj
+
+            preflight_ok, preflight_err = bb_auth.preflight_git_access(
+                git_url, token=token, username=username,
+            )
+
+            if not preflight_ok:
+                proj["status"] = "auth_failed"
+                _projects()[pid] = proj
+                _save_project(pid, proj)
+                if preflight_err == "bitbucket_auth_failed":
+                    error_code, error_body = bb_auth.auth_failed_error()
+                    return jsonify(error_body), error_code
+                elif preflight_err == "repo_not_found_or_no_access":
+                    error_code, error_body = bb_auth.repo_not_found_error()
+                    return jsonify(error_body), error_code
+                else:
+                    error_code, error_body = bb_auth.clone_failed_error()
+                    return jsonify(error_body), error_code
+
+            proj["status"] = "auth_test_passed"
+            _projects()[pid] = proj
+
+            # ── Clone (non-interactive, via GIT_ASKPASS) ──
             proj["status"] = "building"
-            r = subprocess.run(["git", "clone", "--depth", "1", clone_url, repo_dir],
-                             capture_output=True, text=True, timeout=120)
-            if r.returncode != 0:
-                _projects().pop(pid, None)  # don't persist failed clones
-                return jsonify({"error": r.stderr[:500]}), 500
+            result = bb_auth.run_git(
+                ["git", "clone", "--depth", "1", git_url, repo_dir],
+                repo_dir="/",
+                token=token,
+                username=username,
+                timeout=120,
+            )
+
+            if result.returncode != 0:
+                proj["status"] = "clone_failed"
+                _projects()[pid] = proj
+                _save_project(pid, proj)
+                return jsonify({
+                    "error": "clone_failed",
+                    "message": "Git clone failed after authentication preflight.",
+                }), 500
+
+            # ── Clean embedded credentials from remote URL ──
+            bb_auth.clean_remote_url(repo_dir)
+
             _save_project(pid, proj)  # persist immediately on clone success
 
+            # ── graphify update ──
             r = subprocess.run(["graphify", "update", "."], cwd=repo_dir,
-                              capture_output=True, text=True, timeout=120)
+                             capture_output=True, text=True, timeout=120)
             if r.returncode != 0:
                 app.logger.warning("graphify update failed (rc=%d): %s",
                                    r.returncode, r.stderr[:200])
+
+            # ── code-review-graph build ──
             r = subprocess.run(["code-review-graph", "build"], cwd=repo_dir,
                               capture_output=True, text=True, timeout=120)
             if r.returncode != 0:
                 app.logger.warning("code-review-graph build failed (rc=%d): %s",
                                    r.returncode, r.stderr[:200])
 
-            # Parse results
+            # ── Parse results ──
             gf_path = os.path.join(repo_dir, "graphify-out", "graph.json")
             crg_path = os.path.join(repo_dir, ".code-review-graph", "graph.db")
 
@@ -535,7 +618,7 @@ def clone_project():
             else:
                 app.logger.warning("CRG build failed (rc=%d): %s", r.returncode, r.stderr[:300])
 
-            # Generate graph.html from graphify_data
+            # ── Generate graph.html from graphify_data ──
             if proj.get("graphify_data"):
                 try:
                     import graphify
@@ -583,8 +666,8 @@ def clone_project():
         except Exception as e:
             proj["status"] = "error"
             proj["error"] = str(e)[:500]
+            app.logger.warning("Clone error [%s]: %s", _user_key(), str(e)[:500])
             return jsonify(proj), 500
-
 
         _projects()[pid] = proj
 

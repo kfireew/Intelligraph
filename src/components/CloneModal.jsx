@@ -1,19 +1,38 @@
 import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { X, GitBranch, Loader2 } from "lucide-react";
+import { X, GitBranch, Loader2, ChevronDown, ChevronRight } from "lucide-react";
 
 export function CloneModal({ onClone, onClose, loading }) {
   const [gitUrl, setUrl] = useState("");
   const [name, setName] = useState("");
   const [status, setStatus] = useState("");
+  const [showAuth, setShowAuth] = useState(false);
+  const [accessToken, setAccessToken] = useState("");
+  const [bitbucketUsername, setBitbucketUsername] = useState("");
+
+  const clearSensitiveState = () => {
+    setAccessToken("");
+    setBitbucketUsername("");
+  };
 
   const handleClone = async () => {
     if (!gitUrl.trim()) return;
     setStatus("Cloning...");
     try {
-      await onClone({ gitUrl: gitUrl.trim(), name: name.trim() || undefined });
+      const payload = { gitUrl: gitUrl.trim(), name: name.trim() || undefined };
+      if (accessToken.trim()) {
+        payload.accessToken = accessToken.trim();
+        payload.bitbucketUsername = bitbucketUsername.trim() || undefined;
+        payload.useLinkedCredentials = true;
+        payload.authProvider = "bitbucket_datacenter";
+      }
+      await onClone(payload);
       setStatus("");
-    } catch (e) { setStatus(`Error: ${e.message}`); }
+    } catch (e) {
+      setStatus(`Error: ${e.message}`);
+    } finally {
+      clearSensitiveState();
+    }
   };
 
   return (
@@ -36,16 +55,50 @@ export function CloneModal({ onClone, onClose, loading }) {
             <label className="block text-[11px] font-bold text-muted uppercase tracking-wider mb-1.5">Git URL</label>
             <input type="text" value={gitUrl} onChange={(e) => setUrl(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && handleClone()}
-              placeholder="https://github.com/user/repo" autoFocus
+              placeholder="https://github.com/user/repo or https://bitbucket.example.com/scm/PROJECT/repo.git" autoFocus
               className="w-full px-3 py-2 rounded-lg bg-white/3 border border-glass-border text-text text-sm outline-none focus:border-accent/40 transition-colors" />
           </div>
-          <div className="mb-5">
+          <div className="mb-4">
             <label className="block text-[11px] font-bold text-muted uppercase tracking-wider mb-1.5">Name <span className="text-muted-subtle font-normal normal-case">(optional)</span></label>
             <input type="text" value={name} onChange={(e) => setName(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && handleClone()}
               placeholder="Auto-detected from URL"
               className="w-full px-3 py-2 rounded-lg bg-white/3 border border-glass-border text-text text-sm outline-none focus:border-accent/40 transition-colors" />
           </div>
+
+          {/* Bitbucket authentication section */}
+          <div className="mb-4">
+            <button
+              onClick={() => setShowAuth(!showAuth)}
+              className="flex items-center gap-2 text-[11px] font-bold text-muted uppercase tracking-wider mb-1.5 hover:text-text transition-colors w-full text-left">
+              {showAuth ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+              Bitbucket authentication
+            </button>
+            {showAuth && (
+              <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: "auto", opacity: 1 }}
+                exit={{ height: 0, opacity: 0 }} className="overflow-hidden">
+                <div className="mb-3">
+                  <label className="block text-[11px] font-bold text-muted uppercase tracking-wider mb-1.5">Bitbucket Data Center HTTP access token</label>
+                  <input type="password" value={accessToken} onChange={(e) => setAccessToken(e.target.value)}
+                    placeholder="BBDC-..."
+                    className="w-full px-3 py-2 rounded-lg bg-white/3 border border-glass-border text-text text-sm outline-none focus:border-accent/40 transition-colors font-mono tracking-widest" />
+                  <p className="text-[10px] text-muted-subtle mt-1 leading-relaxed">
+                    Required for private Bitbucket repos unless Intelligraph already has a linked Bitbucket credential for your account. OpenID login alone does not grant Git clone access. Use a read-only Bitbucket HTTP access token when possible.
+                  </p>
+                </div>
+                <div className="mb-3">
+                  <label className="block text-[11px] font-bold text-muted uppercase tracking-wider mb-1.5">Bitbucket username <span className="text-muted-subtle font-normal normal-case">(optional)</span></label>
+                  <input type="text" value={bitbucketUsername} onChange={(e) => setBitbucketUsername(e.target.value)}
+                    placeholder="username"
+                    className="w-full px-3 py-2 rounded-lg bg-white/3 border border-glass-border text-text text-sm outline-none focus:border-accent/40 transition-colors" />
+                  <p className="text-[10px] text-muted-subtle mt-1 leading-relaxed">
+                    Only needed if your Bitbucket server expects a username with the HTTP access token.
+                  </p>
+                </div>
+              </motion.div>
+            )}
+          </div>
+
           {status && (
             <div className={`mb-4 p-2 rounded-lg text-[12px] flex items-center gap-2 ${
               status.startsWith("Error") ? "bg-red/10 text-red border border-red/20" : "bg-accent/10 text-accent-light"
