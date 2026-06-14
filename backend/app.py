@@ -1101,6 +1101,50 @@ def status():
         "projects": list(_projects().keys()),
     })
 
+@app.route("/diagnostics")
+def diagnostics():
+    """Check critical dependencies for clone pipeline."""
+    import shutil
+    result = {"status": {}, "errors": []}
+
+    # Git
+    git_path = shutil.which("git")
+    result["status"]["git"] = git_path or "NOT FOUND"
+
+    # graphify CLI
+    g_path = shutil.which("graphify")
+    result["status"]["graphify_cli"] = g_path or "NOT FOUND"
+
+    # code-review-graph CLI
+    c_path = shutil.which("code-review-graph")
+    result["status"]["code_review_graph_cli"] = c_path or "NOT FOUND"
+
+    # Python imports
+    for mod in ["graphify", "code_review_graph", "bb_auth", "nx_adapter", "retrieval", "merger", "planner"]:
+        try:
+            __import__(mod)
+            result["status"][f"import_{mod}"] = "ok"
+        except Exception as e:
+            result["status"][f"import_{mod}"] = f"FAILED: {str(e)[:100]}"
+            result["errors"].append(f"Import {mod} failed: {e}")
+
+    # pip list (truncated to relevant packages)
+    try:
+        r = subprocess.run(["pip", "list", "--format=columns"], capture_output=True, text=True, timeout=10)
+        relevant = [l for l in r.stdout.split("\n") if any(x in l.lower() for x in ["graphify", "code-review", "tree-sitter", "flask", "requests"])]
+        result["pip_packages"] = relevant
+    except Exception as e:
+        result["pip_packages"] = [f"pip list failed: {e}"]
+
+    # Data directories
+    result["status"]["repo_dir"] = REPO_DIR
+    result["status"]["repo_dir_exists"] = os.path.exists(REPO_DIR)
+    result["status"]["temp_dir"] = TEMP_DIR
+    result["status"]["temp_dir_exists"] = os.path.exists(TEMP_DIR)
+
+    result["healthy"] = len(result["errors"]) == 0
+    return jsonify(result)
+
 
 # ── Entry point ──────────────────────────────────────────────────
 
