@@ -9,7 +9,7 @@ WORKDIR /app
 COPY wheels/ wheels/
 RUN pip install --no-index --find-links=wheels/ flask requests graphify code-review-graph
 
-COPY app.py mcp_server.py mcp_server_standalone.py graph_builder.py ./
+COPY app.py bb_auth.py mcp_server.py mcp_server_standalone.py graph_builder.py ./
 COPY templates/ templates/
 COPY static/ static/
 RUN mkdir -p downloads /tmp/intelliscan
