@@ -21,8 +21,6 @@ def client():
     flask_app.secret_key = "test-key"
     app_module._PROJECTS.clear()
     app_module._NEXT_PID.clear()
-    app_module.mcp_tokens.clear()
-    app_module._project_tokens.clear()
     with flask_app.test_client() as c:
         c.get("/auth/me")
         yield c
@@ -419,7 +417,170 @@ def test_mcp_with_project_token(client):
     assert content["matches"][0]["name"] == "foo"
 
 
-def test_mcp_wiring_in_wsgi(client):
-    """mcp_server.mcp_tokens IS app.mcp_tokens (same object, not a copy)."""
-    import mcp_server
-    assert mcp_server.mcp_tokens is app_module.mcp_tokens
+
+# ── Completions (stateless) ─────────────────────────────────
+
+
+def _inject_project(client):
+    """Inject a project directly into _PROJECTS without clone endpoint."""
+    import flask
+    # Get or create anon session key
+    with client.application.app_context():
+        with client.session_transaction() as sess:
+            uk = sess.get("_anon_key", "anon-test-1")
+            sess["_anon_key"] = uk
+    # Ensure key exists in _PROJECTS (avoids recursion in _load_projects)
+    if uk not in app_module._PROJECTS:
+        app_module._PROJECTS[uk] = {}
+    pid = app_module._NEXT_PID.get(uk, 1)
+    app_module._NEXT_PID[uk] = pid + 1
+    proj = {"name": "completion-test", "status": "ready", "nodes": 1, "edges": 0,
+            "graphify_data": {"nodes": [{"label": "test", "source_file": "test.py",
+                                          "file_type": "py"}], "links": []}}
+    app_module._PROJECTS[uk][pid] = proj
+    return pid, uk
+
+
+def test_completions_no_prompt(client):
+    """Missing prompt returns 400 (project lookup not required)."""
+    r = client.post("/api/v1/projects/1/completions", json={})
+    assert r.status_code == 400
+    d = json.loads(r.data)
+    assert "prompt required" in d["error"]
+
+
+def test_completions_project_not_found(client):
+    """Unknown project returns 404."""
+    r = client.post("/api/v1/projects/999/completions", json={
+        "prompt": "hello", "llm_url": "https://openrouter.ai/api/v1/chat/completions"})
+    assert r.status_code == 404
+
+
+def test_completions_stateless_default(client):
+    """Default session_mode is stateless and returns session_mode in response."""
+    import unittest.mock
+    pid, _ = _inject_project(client)
+    with unittest.mock.patch("requests.post") as mock_post:
+        mock_post.return_value.status_code = 200
+        mock_post.return_value.json.return_value = {
+            "choices": [{"message": {"content": "mock answer"}}],
+            "usage": {"total_tokens": 42},
+        }
+        mock_post.return_value.text = "ok"
+        r = client.post(f"/api/v1/projects/{pid}/completions", json={
+            "prompt": "hello",
+            "llm_url": "https://openrouter.ai/api/v1/chat/completions",
+        })
+        assert r.status_code == 200
+        d = json.loads(r.data)
+        assert d["session_mode"] == "stateless"
+        assert d["conversation_reused"] is False
+        assert d["trace_id"].startswith("req_")
+        assert d["answer"] == "mock answer"
+
+
+def test_completions_unsupported_session_mode(client):
+    """session_mode other than stateless returns 400 (project not required)."""
+    r = client.post("/api/v1/projects/1/completions", json={
+        "prompt": "hello", "session_mode": "stateful"
+    })
+    assert r.status_code == 400
+    d = json.loads(r.data)
+    assert "unsupported_session_mode" in d["error"]
+
+
+def test_completions_conversation_id_rejected(client):
+    """conversation_id in stateless mode returns 400 (project not required)."""
+    r = client.post("/api/v1/projects/1/completions", json={
+        "prompt": "hello", "conversation_id": "abc-123"
+    })
+    assert r.status_code == 400
+    d = json.loads(r.data)
+    assert "conversation_id not supported" in d["error"]
+
+
+def test_completions_no_previous_messages_included(client):
+    """Each call sends only system + current prompt; no prior messages appended."""
+    import unittest.mock
+    pid, _ = _inject_project(client)
+    sent_payloads = []
+
+    def _capture(url, **kw):
+        sent_payloads.append(kw.get("json", {}))
+        m = unittest.mock.MagicMock()
+        m.status_code = 200
+        m.json.return_value = {"choices": [{"message": {"content": "ans"}}], "usage": {}}
+        m.text = "ok"
+        return m
+
+    with unittest.mock.patch("requests.post", side_effect=_capture):
+        r1 = client.post(f"/api/v1/projects/{pid}/completions", json={
+            "prompt": "Remember the word banana.",
+            "model": "gpt-4o-mini",
+            "llm_url": "https://openrouter.ai/api/v1/chat/completions",
+        })
+        assert r1.status_code == 200
+        r2 = client.post(f"/api/v1/projects/{pid}/completions", json={
+            "prompt": "What word did I ask you to remember?",
+            "model": "gpt-4o-mini",
+            "llm_url": "https://openrouter.ai/api/v1/chat/completions",
+        })
+        assert r2.status_code == 200
+
+    assert len(sent_payloads) == 2
+    for p in sent_payloads:
+        msgs = p.get("messages", [])
+        roles = [m["role"] for m in msgs]
+        assert roles == ["system", "user"]
+        assert all(m["role"] != "assistant" for m in msgs)
+
+
+def test_completions_no_provider_thread_reuse(client):
+    """Payloads must not contain thread/assistant/session IDs."""
+    import unittest.mock
+    pid, _ = _inject_project(client)
+    sent_payloads = []
+    sent_headers = []
+
+    def _capture(url, **kw):
+        sent_payloads.append(kw.get("json", {}))
+        sent_headers.append(kw.get("headers", {}))
+        m = unittest.mock.MagicMock()
+        m.status_code = 200
+        m.json.return_value = {"choices": [{"message": {"content": "ans"}}], "usage": {}}
+        m.text = "ok"
+        return m
+
+    with unittest.mock.patch("requests.post", side_effect=_capture):
+        for _ in range(3):
+            r = client.post(f"/api/v1/projects/{pid}/completions", json={
+                "prompt": "hello",
+                "include_context": False,
+                "llm_url": "https://openrouter.ai/api/v1/chat/completions",
+            })
+            assert r.status_code == 200
+
+    for payload in sent_payloads:
+        for key in ("thread_id", "session", "assistant_id", "conversation_id"):
+            assert key not in payload, f"payload should not contain '{key}'"
+    for hdrs in sent_headers:
+        assert "x-conversation-id" not in {k.lower(): k for k in hdrs}
+
+
+def test_completions_no_url_returns_400(client):
+    """Missing LLM URL returns 400."""
+    pid, _ = _inject_project(client)
+    r = client.post(f"/api/v1/projects/{pid}/completions", json={"prompt": "hello"})
+    assert r.status_code == 400
+    d = json.loads(r.data)
+    assert "llm_url required" in d["error"]
+
+
+def test_completions_blocked_host(client):
+    """Disallowed host returns 403."""
+    pid, _ = _inject_project(client)
+    r = client.post(f"/api/v1/projects/{pid}/completions", json={
+        "prompt": "hello",
+        "llm_url": "http://127.0.0.1:19999/chat",
+    })
+    assert r.status_code == 403

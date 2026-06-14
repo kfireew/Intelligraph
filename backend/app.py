@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from datetime import datetime, timezone
 from urllib.parse import urlencode, urlparse
 
@@ -830,6 +831,164 @@ def graph_retrieve_context():
     from retrieval import retrieve_context
     result = retrieve_context(proj, prompt)
     return jsonify(result)
+
+
+@app.route("/api/v1/projects/<int:pid>/completions", methods=["POST"])
+def project_completions(pid):
+    """Stateless completion endpoint for n8n/external automation.
+
+    Each call creates a fresh LLM request with fresh project context.
+    No LLM conversation state is persisted between calls.
+
+    Request:
+        {
+            "prompt": "Explain OCR correction",
+            "session_mode": "stateless",  # default; only mode supported
+            "conversation_id": null,      # rejected in stateless mode
+            "include_context": true,      # default true; retrieve project context
+            "llm_url": "...",             # optional, falls back to INTELLIGRAPH_LLM_URL env
+            "llm_token": "...",           # optional, falls back to INTELLIGRAPH_LLM_TOKEN env
+            "model": "gpt-4o-mini",       # optional, falls back to INTELLIGRAPH_LLM_MODEL env
+            "metadata": {"source": "n8n"} # optional, pass-through
+        }
+
+    Response:
+        {
+            "answer": "...",
+            "model": "gpt-4o-mini",
+            "session_mode": "stateless",
+            "trace_id": "req_...",
+            "conversation_reused": false,
+            "context_used": true,
+            "context_stats": {},
+            "path_warnings": [],
+            "usage": {}
+        }
+    """
+    data = request.get_json(force=True) or {}
+    prompt = (data.get("prompt") or "").strip()
+    if not prompt:
+        return jsonify({"error": "prompt required"}), 400
+
+    # Session mode: only stateless is supported
+    session_mode = data.get("session_mode", "stateless")
+    if session_mode != "stateless":
+        return jsonify({"error": "unsupported_session_mode", "session_mode": session_mode,
+                        "supported_modes": ["stateless"]}), 400
+
+    # conversation_id rejected in stateless mode to avoid ambiguity
+    if data.get("conversation_id") is not None:
+        return jsonify({"error": "conversation_id not supported in stateless mode",
+                        "session_mode": session_mode}), 400
+
+    proj = _projects().get(pid)
+    if not proj:
+        return jsonify({"error": "project not found"}), 404
+
+    # LLM provider: request body > env vars > default
+    llm_url = data.get("llm_url") or os.environ.get("INTELLIGRAPH_LLM_URL") or ""
+    llm_token = data.get("llm_token") or os.environ.get("INTELLIGRAPH_LLM_TOKEN") or ""
+    model = data.get("model") or os.environ.get("INTELLIGRAPH_LLM_MODEL") or "gpt-4o-mini"
+
+    if not llm_url:
+        return jsonify({"error": "llm_url required (set INTELLIGRAPH_LLM_URL env var or pass in body)",
+                        "session_mode": session_mode}), 400
+
+    host = urlparse(llm_url).hostname
+    if host not in ALLOWED_LLM_HOSTS:
+        return jsonify({"error": "provider not allowed", "session_mode": session_mode}), 403
+
+    # Retrieve fresh context per request (default: yes for automation)
+    include_context = data.get("include_context")
+    if include_context is None:
+        include_context = True
+    retrieved = ""
+    context_stats = {}
+    if include_context and proj.get("graphify_data"):
+        try:
+            from retrieval import retrieve_context
+            result = retrieve_context(proj, prompt)
+            retrieved = result.get("context", "")
+            context_stats = result.get("context_stats", {})
+        except Exception as e:
+            app.logger.warning("Completions context retrieval failed: %s", e)
+
+    # Build fresh LLM messages: system + context + prompt
+    system_msg = (
+        "You are a code analysis assistant. "
+        "Answer questions about the project based solely on the provided context. "
+        "Cite file paths when referencing code."
+    )
+    messages = [{"role": "system", "content": system_msg}]
+    if retrieved:
+        messages.append({"role": "user", "content": f"Project context:\n{retrieved}\n\nQuestion: {prompt}"})
+    else:
+        messages.append({"role": "user", "content": prompt})
+
+    # No previous messages appended — this is a clean completion
+    payload = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": 4096,
+        "temperature": 0.3,
+    }
+
+    headers = {"Content-Type": "application/json"}
+    if llm_token:
+        headers["Authorization"] = f"Bearer {llm_token}"
+    if host == "openrouter.ai":
+        headers["HTTP-Referer"] = "https://localhost"
+        headers["X-Title"] = "Intelligraph"
+
+    trace_id = f"req_{uuid.uuid4().hex[:12]}"
+
+    try:
+        resp = requests.post(llm_url, json=payload, headers=headers, timeout=60)
+        resp.encoding = "utf-8"
+        if resp.status_code != 200:
+            return jsonify({
+                "error": f"LLM returned {resp.status_code}",
+                "detail": resp.text[:1000],
+                "trace_id": trace_id,
+                "session_mode": session_mode,
+                "conversation_reused": False,
+            }), 502
+        body = resp.json()
+        choices = body.get("choices", [])
+        if not choices:
+            return jsonify({
+                "error": "empty LLM response",
+                "trace_id": trace_id,
+                "session_mode": session_mode,
+                "conversation_reused": False,
+            }), 502
+        answer = choices[0].get("message", {}).get("content", "")
+        path_warnings = _verify_paths(pid, answer) or []
+        return jsonify({
+            "answer": answer,
+            "model": model,
+            "session_mode": session_mode,
+            "trace_id": trace_id,
+            "conversation_reused": False,
+            "context_used": bool(retrieved),
+            "context_stats": context_stats if retrieved else {},
+            "path_warnings": path_warnings,
+            "usage": body.get("usage", {}),
+        })
+    except requests.exceptions.Timeout:
+        return jsonify({
+            "error": "LLM request timed out",
+            "trace_id": trace_id,
+            "session_mode": session_mode,
+            "conversation_reused": False,
+        }), 504
+    except Exception as e:
+        return jsonify({
+            "error": str(e),
+            "trace_id": trace_id,
+            "session_mode": session_mode,
+            "conversation_reused": False,
+        }), 502
 
 @app.route("/")
 def index():
