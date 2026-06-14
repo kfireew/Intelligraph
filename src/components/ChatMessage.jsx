@@ -19,7 +19,7 @@ export const ChatMessage = memo(function ChatMessage({ message }) {
     <div
       className={`chat-message w-fit max-w-[88%] min-w-0 px-3.5 py-2.5 rounded-[14px] text-sm ${
         isBot
-          ? "glass-bubble rounded-bl-[4px]"
+          ? "bg-[rgba(10,10,10,0.85)] border border-glass-border rounded-bl-[4px]"
           : "ml-auto rounded-br-[4px]"
       }`}
       style={
