@@ -246,6 +246,20 @@ def merge_tasks(tasks: list, per_task_results: list, graphify_data: dict, nx_met
     # 5. Code chunks — deduplicated, globally ranked, budgeted
     code_blocks = []
     seen_chunks = set()
+    # Collect CRG file paths and rescue info from all tasks
+    crg_paths = set()
+    crg_rescue_applied = False
+    crg_rescued_files = []
+    for result in per_task_results:
+        for cf in result.get("crg_domain_files", []):
+            if cf.get("file_path"):
+                crg_paths.add(cf["file_path"])
+        ri = result.get("crg_rescue_info", {})
+        if ri.get("applied"):
+            crg_rescue_applied = True
+            crg_rescued_files.extend(ri.get("rescued_files", []))
+    # Track which CRG file paths actually appear in raw code blocks
+    crg_file_paths_in_raw_chunks = set()
     for rank_entry in ranked:
         fp = rank_entry["file_path"]
         for result in per_task_results:
@@ -266,6 +280,9 @@ def merge_tasks(tasks: list, per_task_results: list, graphify_data: dict, nx_met
                 if is_architecture and len(code_blocks) >= 15:
                     continue  # skip remaining chunks — capped for architecture
                 code_blocks.append((rank_entry["score"], block))
+                # Track CRG files that actually entered raw chunks
+                if chunk["file_path"] in crg_paths:
+                    crg_file_paths_in_raw_chunks.add(chunk["file_path"])
 
     if code_blocks:
         code_blocks.sort(key=lambda x: -x[0])  # highest score first
@@ -277,10 +294,10 @@ def merge_tasks(tasks: list, per_task_results: list, graphify_data: dict, nx_met
     # Build context string and stats
     ctx = "\n\n".join(parts)
     total_edges = len(graphify_data.get("links", graphify_data.get("edges", [])))
-    data_ext = {".json", ".xml", ".csv", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".md", ".txt", ".log"}
-    data_assets = [sf for sf in _all_source_files if os.path.splitext(sf)[1].lower() in data_ext]
     omitted = max(0, len(_all_source_files) - 20)
     raw_code_chars = sum(len(b[1]) for b in code_blocks) if code_blocks else 0
+    data_ext = {".json", ".xml", ".csv", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".md", ".txt", ".log"}
+    data_assets = [sf for sf in _all_source_files if os.path.splitext(sf)[1].lower() in data_ext]
     crg_found = _crg_domain_found if is_architecture else 0
     crg_domain_layers = _domain_layers if is_architecture else {}
     stats = {
@@ -294,6 +311,9 @@ def merge_tasks(tasks: list, per_task_results: list, graphify_data: dict, nx_met
         "omitted_files": omitted,
         "crg_domain_files_found": crg_found,
         "crg_domain_files_included": min(crg_found, 10),
+        "crg_domain_files_in_raw_chunks": len(crg_file_paths_in_raw_chunks),
+        "crg_rescue_applied": crg_rescue_applied,
+        "crg_rescued_files": crg_rescued_files,
         "domain_layers_covered": crg_domain_layers,
     }
 

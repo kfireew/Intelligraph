@@ -201,17 +201,17 @@ def retrieve_context(proj: dict, prompt: str) -> dict:
 
         # ── CRG Domain Discovery (architecture/overview tasks only) ──
         crg_domain_files = []
+        crg_rescue_info = {"applied": False, "rescued_files": []}
         if task["type"] == "architecture":
             try:
                 from crg_domain_finder import find_domain_files_with_crg, get_crg_db_path
                 crg_path = get_crg_db_path(proj)
                 if crg_path:
                     crg_domain_files = find_domain_files_with_crg(crg_path, prompt, repo_dir=proj.get("repo_dir"), max_files=12)
-                    existing_paths = {r["file_path"] for r in ranked}
-                    for cf in crg_domain_files:
-                        if cf["file_path"] not in existing_paths:
-                            ranked.append(cf)
-                            existing_paths.add(cf["file_path"])
+                    # Merge CRG domain files into ranking with combined scores
+                    ranked = merge_graphify_and_crg_candidates(ranked, crg_domain_files)
+                    # Rescue: swap in CRG files if none in top 15
+                    ranked, crg_rescue_info = apply_architecture_layer_rescue(ranked, crg_domain_files)
             except Exception as e:
                 import logging as _l
                 _l.getLogger(__name__).warning("CRG domain discovery failed: %s", e)
@@ -226,15 +226,12 @@ def retrieve_context(proj: dict, prompt: str) -> dict:
             "chunks": chunks,
             "expanded_nodes": expanded_ids,
             "crg_domain_files": crg_domain_files,
+            "crg_rescue_info": crg_rescue_info,
         })
 
     # 3. ContextMerger: deduplicate, rank, budget, assemble
     from merger import merge_tasks
     context, merger_stats = merge_tasks(tasks, per_task_results, graphify_data, nx_metadata)
-    strategy = "planner"
-    if len(tasks) == 1:
-        strategy = tasks[0]["type"]
-
     # Collect matched nodes from planner tasks
     matched_nodes = []
     for result in per_task_results:
@@ -265,6 +262,9 @@ def retrieve_context(proj: dict, prompt: str) -> dict:
                     "label": nx_p["name"],
                     "source_file": nx_p.get("root", ""),
                 })
+    strategy = "planner"
+    if len(tasks) == 1:
+        strategy = tasks[0]["type"]
 
     # Build context_stats from merger stats + retrieval stats
     repo_dir = proj.get("repo_dir")
@@ -400,6 +400,177 @@ def _seed_architecture_fallback(graphify_data: dict, links: list, node_map: dict
                 _add_node(n)
 
     return result[:15]
+
+def merge_graphify_and_crg_candidates(
+    graphify_ranked: list[dict],
+    crg_domain_files: list[dict],
+    *,
+    max_results: int = 30,
+) -> list[dict]:
+    """Merge CRG domain files into Graphify-ranked list with combined scores.
+
+    Same file in both → sum scores, merge metadata (graph_score + crg_score).
+    New CRG file → insert with graph_score=0, crg_score=crg score.
+    Graphify-only file → crg_score=0, graph_score=existing score.
+
+    Returns merged list sorted by score descending, capped at max_results.
+    """
+    if not crg_domain_files:
+        result = []
+        for gr in graphify_ranked:
+            entry = dict(gr)
+            entry.setdefault("graph_score", entry.get("score", 0))
+            entry.setdefault("crg_score", 0)
+            entry.setdefault("matched_terms", [])
+            result.append(entry)
+        return result[:max_results]
+
+    # Build lookup by file_path
+    merged_map = {}
+
+    # Index graphify entries
+    for gr in graphify_ranked:
+        fp = gr.get("file_path", "")
+        if not fp:
+            continue
+        base_score = gr.get("score", 0)
+        reasons = gr.get("reason", [])
+        if isinstance(reasons, str):
+            reasons = [reasons]
+        merged_map[fp] = {
+            "file_path": fp,
+            "score": base_score,
+            "graph_score": base_score,
+            "crg_score": 0,
+            "reason": list(reasons),
+            "source": "graphify",
+            "matched_terms": [],
+        }
+
+    # Index CRG entries and merge
+    for cf in crg_domain_files:
+        fp = cf.get("file_path", "")
+        if not fp:
+            continue
+        crg_score = cf.get("score", 0)
+        matched_terms = cf.get("matched_terms", [])
+        cf_reason = cf.get("reason", "domain_workflow_match")
+        if isinstance(cf_reason, str):
+            cf_reason = [cf_reason]
+
+        if fp in merged_map:
+            entry = merged_map[fp]
+            entry["crg_score"] = crg_score
+            entry["score"] = entry["graph_score"] + crg_score
+            existing_terms = set(entry.get("matched_terms", []))
+            for t in matched_terms:
+                existing_terms.add(t)
+            entry["matched_terms"] = sorted(existing_terms)
+            entry["source"] = "graphify+crg"
+            for r in cf_reason:
+                if r not in entry["reason"]:
+                    entry["reason"].append(r)
+        else:
+            merged_map[fp] = {
+                "file_path": fp,
+                "score": crg_score,
+                "graph_score": 0,
+                "crg_score": crg_score,
+                "reason": list(cf_reason),
+                "source": "crg_fts",
+                "matched_terms": list(matched_terms),
+            }
+
+    # Sort by score descending, cap at max_results
+    merged = sorted(merged_map.values(), key=lambda x: -x["score"])
+    return merged[:max_results]
+
+
+def apply_architecture_layer_rescue(
+    merged_ranked: list[dict],
+    crg_domain_files: list[dict],
+    *,
+    min_crg_slots: int = 2,
+    max_crg_slots: int = 5,
+) -> tuple:
+    """Ensure CRG domain files have room in top 15 for architecture tasks.
+
+    If CRG found domain files but fewer than min_crg_slots are in the top 15,
+    rescue by replacing lowest-scoring non-critical files.
+
+    Protected files (entrypoints, critical structural files) are never removed.
+
+    Returns:
+        (ranked list, rescue_info dict)
+        rescue_info = {"applied": bool, "rescued_files": [str]}
+    """
+    _protected_names = {
+        "main.py", "app.py", "bridge.py", "database.py",
+        "__init__.py", "server.py", "router.py", "routes.py",
+    }
+    _protected_reason_substrings = ["entrypoint", "startup", "bridge", "database"]
+
+    if not crg_domain_files:
+        return merged_ranked, {"applied": False, "rescued_files": []}
+
+    crg_paths = {cf["file_path"] for cf in crg_domain_files if cf.get("file_path")}
+
+    top15 = merged_ranked[:15]
+
+    # Count CRG files already in top 15
+    crg_in_top15 = [e for e in top15 if e["file_path"] in crg_paths]
+
+    if len(crg_in_top15) >= min_crg_slots:
+        return merged_ranked, {"applied": False, "rescued_files": []}
+
+    # CRG files beyond current top 15, sorted by score
+    rest = merged_ranked[15:]
+    crg_rest = [e for e in rest if e["file_path"] in crg_paths]
+    crg_rest.sort(key=lambda x: -x["score"])
+
+    if not crg_rest:
+        return merged_ranked, {"applied": False, "rescued_files": []}
+
+    def _is_protected(entry):
+        fname = entry.get("file_path", "").split("/")[-1].split("\\")[-1]
+        if fname in _protected_names:
+            return True
+        reasons = entry.get("reason", [])
+        if isinstance(reasons, str):
+            reasons = [reasons]
+        for r in reasons:
+            rl = r.lower()
+            for sub in _protected_reason_substrings:
+                if sub in rl:
+                    return True
+        return False
+
+    # Replaceable files in top 15: not CRG, not protected
+    replaceable = [e for e in top15 if e["file_path"] not in crg_paths and not _is_protected(e)]
+    replaceable.sort(key=lambda x: x["score"])
+
+    slots_needed = min(min_crg_slots - len(crg_in_top15), len(crg_rest))
+    slots_needed = min(slots_needed, max_crg_slots - len(crg_in_top15))
+
+    if slots_needed <= 0 or not replaceable:
+        return merged_ranked, {"applied": False, "rescued_files": []}
+
+    replace_count = min(slots_needed, len(replaceable), len(crg_rest))
+    replacement_map = {}
+    for i in range(replace_count):
+        replacement_map[replaceable[i]["file_path"]] = crg_rest[i]
+
+    rescued = []
+    new_top15 = []
+    for entry in top15:
+        if entry["file_path"] in replacement_map:
+            repl = replacement_map[entry["file_path"]]
+            rescued.append(repl["file_path"])
+            new_top15.append(repl)
+        else:
+            new_top15.append(entry)
+
+    return new_top15 + merged_ranked[15:], {"applied": True, "rescued_files": rescued}
 
 
 def _build_node_map(graphify_data: dict) -> dict:
