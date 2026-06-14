@@ -1,8 +1,0 @@
-ToMamdas Encoding Metadata
-==================================================
-Original file: intelligraph.tar
-Original size: 216257024 bytes
-Original SHA256: 933e533cac28ff37c2e4f443fb3ae7525309186b7439a47ba40ef3b556b8606f
-Base64 size: 288342700 bytes
-Total chunks: 10
-Chunk size: 31457280 bytes

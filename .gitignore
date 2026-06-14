@@ -37,3 +37,6 @@ USER_MESSAGES.txt
 USER_MESSAGES_FINAL.txt
 USER_PROMPTS.txt
 USER_PROMPTS_COMPLETE.txt
+*.tar
+tomamdas_output/
+ToMamdas_*
