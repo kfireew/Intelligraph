@@ -75,11 +75,14 @@ def _save_project(pid, proj):
     except Exception as e:
         app.logger.warning("DB save failed: %s", e)
 
-def _load_projects():
+def _load_projects(uk=None):
     """Load projects from SQLite on startup."""
+    if uk is None:
+        return
     try:
+        _PROJECTS.setdefault(uk, {})
         conn = _db_conn()
-        rows = conn.execute("SELECT id, data FROM projects WHERE user_key = ?", (_user_key(),)).fetchall()
+        rows = conn.execute("SELECT id, data FROM projects WHERE user_key = ?", (uk,)).fetchall()
         for row in rows:
             data = json.loads(row["data"])
             if row["id"] not in _projects():
@@ -512,15 +515,19 @@ def clone_project():
                 )
                 if resolved:
                     credential_source, token, username = resolved
-                else:
-                    # OIDC-authenticated user without credentials → fail immediately
-                    if get_user():
+                elif get_user():
+                    # OIDC user without explicit token: fall back to session OIDC token
+                    oidc_token = session.get("oidc_access_token", "")
+                    if oidc_token:
+                        credential_source = "oidc_session"
+                        token = oidc_token
+                        username = None
+                        app.logger.info("Using OIDC access token for git auth (user=%s)",
+                                        get_user().get("name", "?"))
+                    else:
+                        # Logged in but no token at all — fail
                         status_code, body = bb_auth.missing_credential_error(is_oidc_user=True)
                         return jsonify(body), status_code
-                    # Anonymous user: try no-auth public clone
-                    token = None
-                    username = None
-                    credential_source = "none"
 
             # ── Log credential source (never the raw token) ──
             app.logger.info(
