@@ -89,12 +89,12 @@ def rank_neighborhood(expanded_node_ids: list, graphify_data: dict, node_map: di
         if entry["count"] > 2:
             entry["score"] += entry["count"] * 2
 
-        # Query-term relevance scoring
+        # Query-term relevance scoring (multiplicative boost for strong matches)
+        relevance = 0
         if query_tokens:
             label = (node.get("label") or "").lower()
             source = (node.get("source_file") or "").lower()
             content = (node.get("content") or node.get("text") or "").lower()[:500]
-            relevance = 0
             for t in query_tokens:
                 if t in label:
                     relevance += 4
@@ -102,9 +102,14 @@ def rank_neighborhood(expanded_node_ids: list, graphify_data: dict, node_map: di
                     relevance += 3
                 if t in content:
                     relevance += 2
-            if relevance > 0:
-                entry["score"] += min(relevance, 20)
-                entry["reasons"].append("query_relevant")
+        
+        # Apply relevance: multiplicative boost so relevant files outrank high-degree irrelevant ones
+        if relevance > 0:
+            entry["score"] += min(relevance, 30)
+            entry["reasons"].append("query_relevant")
+        elif query_tokens and entry["score"] > 20:
+            # Penalize irrelevant high-degree nodes when we have a specific query
+            entry["score"] = int(entry["score"] * 0.5)
 
     # Sort by score descending
     ranked = [

@@ -120,11 +120,11 @@ def merge_tasks(tasks: list, per_task_results: list, graphify_data: dict, nx_met
             parts.append("\n".join(nx_parts))
 
     # 2c. Determine query type for architecture-aware sections
-    is_architecture = any(t.get("type") in ("architecture", "overview", "how_works") for t in tasks)
+    is_architecture = any(t.get("type") in ("architecture", "overview") for t in tasks)
     # Check if this is a narrow architecture query (has a specific target)
     has_specific_target = any(
         t.get("type") == "architecture" and t.get("target") and
-        len(t["target"]) > 3 and t["target"].lower() not in ("the project", "this project", "project")
+        len(t["target"]) > 3 and t["target"].lower() not in ("the project", "this project", "project", "this", "the")
         for t in tasks
     )
 

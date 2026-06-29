@@ -280,7 +280,7 @@ def retrieve_context(proj: dict, prompt: str) -> dict:
     source_available = bool(repo_dir and os.path.isdir(repo_dir))
     raw_chunks = merger_stats.get("raw_chunks", 0)
     raw_code_chars = merger_stats.get("raw_code_chars", 0)
-    is_architecture = any(t.get("type") in ("architecture", "overview", "how_works") for t in tasks)
+    is_architecture = any(t.get("type") in ("architecture", "overview") for t in tasks)
     degraded = not source_available or (is_architecture and raw_chunks < 3 and raw_code_chars < 6000)
 
     # If context has no real source code, prepend a degraded warning

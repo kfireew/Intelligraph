@@ -51,15 +51,18 @@ def retrieve_chunks(ranked_files: list, proj: dict, task_policy: dict = None) ->
         source = n.get("source") or n.get("content") or ""
         if not source:
             continue
+        # Use node id hash for line numbers so chunks don't all collide at L1-51
+        node_idx = n.get("line_start") or (hash(n.get("id", "")) % 9000 + 1)
         chunks.append({
             "file_path": sf,
             "name": n.get("name") or n.get("label", ""),
-            "start_line": n.get("line_start", 1),
-            "end_line": n.get("line_end", min(n.get("line_start", 1) + 50, 9999)),
+            "start_line": node_idx,
+            "end_line": n.get("line_end", node_idx + 50),
             "content": source[:MAX_SNIPPET_CHARS],
         })
 
-    chunks = _dedup_overlapping(chunks[:MAX_CHUNKS])
+    # Dedup FIRST, then cap — avoids losing whole files when chunks are file-ordered
+    chunks = _dedup_overlapping(chunks)[:MAX_CHUNKS]
     return _apply_policy(chunks, task_policy)
 
 

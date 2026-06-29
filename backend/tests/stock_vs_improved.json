@@ -1,0 +1,174 @@
+{
+  "test_project": {
+    "nodes": 112,
+    "edges": 705,
+    "real_files": true
+  },
+  "stock": [
+    {
+      "query": "What is the login function?",
+      "chars": 48040,
+      "tokens": 12010,
+      "chunks": 50,
+      "code_chars": 50,
+      "truncated": true,
+      "files": 12,
+      "precision": 0.08,
+      "recall": 1.0
+    },
+    {
+      "query": "How does authentication work?",
+      "chars": 29171,
+      "tokens": 7292,
+      "chunks": 15,
+      "code_chars": 15,
+      "truncated": false,
+      "files": 12,
+      "precision": 0.17,
+      "recall": 1.0
+    },
+    {
+      "query": "Who calls the login function?",
+      "chars": 48040,
+      "tokens": 12010,
+      "chunks": 50,
+      "code_chars": 50,
+      "truncated": true,
+      "files": 14,
+      "precision": 0.07,
+      "recall": 1.0
+    },
+    {
+      "query": "What is the architecture of this project?",
+      "chars": 19434,
+      "tokens": 4858,
+      "chunks": 15,
+      "code_chars": 15,
+      "truncated": false,
+      "files": 15,
+      "precision": 0.2,
+      "recall": 1.0
+    },
+    {
+      "query": "What breaks if I change the User model?",
+      "chars": 48040,
+      "tokens": 12010,
+      "chunks": 50,
+      "code_chars": 50,
+      "truncated": true,
+      "files": 15,
+      "precision": 0.2,
+      "recall": 1.0
+    },
+    {
+      "query": "How does the cache service work?",
+      "chars": 33152,
+      "tokens": 8288,
+      "chunks": 15,
+      "code_chars": 15,
+      "truncated": false,
+      "files": 15,
+      "precision": 0.07,
+      "recall": 1.0
+    },
+    {
+      "query": "What does the email service do?",
+      "chars": 48040,
+      "tokens": 12010,
+      "chunks": 50,
+      "code_chars": 50,
+      "truncated": true,
+      "files": 15,
+      "precision": 0.07,
+      "recall": 1.0
+    }
+  ],
+  "improved": [
+    {
+      "query": "What is the login function?",
+      "chars": 10931,
+      "tokens": 2732,
+      "chunks": 5,
+      "code_chars": 10333,
+      "truncated": false,
+      "files": 12,
+      "precision": 0.08,
+      "recall": 1.0
+    },
+    {
+      "query": "How does authentication work?",
+      "chars": 8778,
+      "tokens": 2194,
+      "chunks": 10,
+      "code_chars": 8180,
+      "truncated": false,
+      "files": 12,
+      "precision": 0.17,
+      "recall": 1.0
+    },
+    {
+      "query": "Who calls the login function?",
+      "chars": 7128,
+      "tokens": 1782,
+      "chunks": 8,
+      "code_chars": 6530,
+      "truncated": false,
+      "files": 14,
+      "precision": 0.07,
+      "recall": 1.0
+    },
+    {
+      "query": "What is the architecture of this project?",
+      "chars": 20674,
+      "tokens": 5168,
+      "chunks": 10,
+      "code_chars": 19737,
+      "truncated": false,
+      "files": 15,
+      "precision": 0.2,
+      "recall": 1.0
+    },
+    {
+      "query": "What breaks if I change the User model?",
+      "chars": 12673,
+      "tokens": 3168,
+      "chunks": 6,
+      "code_chars": 12075,
+      "truncated": false,
+      "files": 15,
+      "precision": 0.2,
+      "recall": 1.0
+    },
+    {
+      "query": "How does the cache service work?",
+      "chars": 8841,
+      "tokens": 2210,
+      "chunks": 10,
+      "code_chars": 8243,
+      "truncated": false,
+      "files": 15,
+      "precision": 0.07,
+      "recall": 1.0
+    },
+    {
+      "query": "What does the email service do?",
+      "chars": 11015,
+      "tokens": 2753,
+      "chunks": 5,
+      "code_chars": 10417,
+      "truncated": false,
+      "files": 15,
+      "precision": 0.07,
+      "recall": 1.0
+    }
+  ],
+  "summary": {
+    "stock_total_tokens": 68478,
+    "improved_total_tokens": 20007,
+    "token_reduction_pct": 70.8,
+    "stock_avg_precision": 0.12,
+    "improved_avg_precision": 0.12,
+    "stock_avg_recall": 1.0,
+    "improved_avg_recall": 1.0
+  }
+}
