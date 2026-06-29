@@ -85,7 +85,7 @@ export function LLMSettings({ llmUrl, llmToken, model, models, modelsLoading, te
             value={url}
             onChange={(e) => setUrl(e.target.value)}
             onBlur={triggerFetch}
-            placeholder="https://openrouter.ai/api/v1/chat/completions"
+            placeholder="https://models.ai-services.idf.cts/v1/chat/completions"
             className="w-full px-3 py-2 rounded-lg bg-white/5 border border-border text-text text-xs outline-none focus:border-accent transition-colors"
           />
         </div>
@@ -101,7 +101,7 @@ export function LLMSettings({ llmUrl, llmToken, model, models, modelsLoading, te
               value={token}
               onChange={(e) => setToken(e.target.value)}
               onBlur={triggerFetch}
-              placeholder="sk-or-v1-..."
+              placeholder="sk-..."
               className="w-full px-3 py-2 pr-9 rounded-lg bg-white/5 border border-border text-text text-xs outline-none focus:border-accent transition-colors"
             />
             <button
@@ -168,7 +168,7 @@ export function LLMSettings({ llmUrl, llmToken, model, models, modelsLoading, te
               type="text"
               value={model}
               onChange={(e) => onSelectModel(e.target.value)}
-              placeholder="google/gemini-2.0-flash-001"
+              placeholder="gpt-4o-mini"
               className="w-full px-3 py-2 rounded-lg bg-white/5 border border-border text-text text-xs outline-none focus:border-accent transition-colors"
             />
           </div>

@@ -24,6 +24,16 @@ from flask import (Flask, Response, jsonify, redirect, render_template,
                    request, send_file, send_from_directory, session,
                    stream_with_context, url_for)
 
+# ── SSL: closed-network internal CAs ────────────────────────────
+# Internal services (LLM, SSO) use certs signed by internal CAs.
+# Disable verification by default; override with LLM_SSL_VERIFY=true.
+LLM_SSL_VERIFY = os.environ.get("LLM_SSL_VERIFY", "false").lower() == "true"
+try:
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+except Exception:
+    pass
+
 # ── App setup ────────────────────────────────────────────────────
 
 TEMPLATES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates")
@@ -140,7 +150,7 @@ def fetch_oidc_config():
         return
     try:
         url = f"{OIDC_ISSUER.rstrip('/')}/.well-known/openid-configuration"
-        OIDC_CONFIG = requests.get(url, timeout=10).json()
+        OIDC_CONFIG = requests.get(url, timeout=10, verify=LLM_SSL_VERIFY).json()
     except Exception:
         pass
 
@@ -186,13 +196,13 @@ def auth_callback():
             "grant_type": "authorization_code", "code": request.args.get("code"),
             "redirect_uri": url_for("auth_callback", _external=True),
             "client_id": OIDC_CLIENT_ID, "client_secret": OIDC_CLIENT_SECRET,
-        }, timeout=10).json()
+        }, timeout=10, verify=LLM_SSL_VERIFY).json()
         access_token = token_resp.get("access_token")
         if not access_token:
             return f"Token error: {token_resp.get('error_description', 'unknown')}", 400
         userinfo = requests.get(OIDC_CONFIG["userinfo_endpoint"],
                                 headers={"Authorization": f"Bearer {access_token}"},
-                                timeout=10).json()
+                                timeout=10, verify=LLM_SSL_VERIFY).json()
     except requests.exceptions.Timeout:
         return "SSO provider timed out during callback", 504
     except requests.exceptions.ConnectionError:
@@ -229,7 +239,7 @@ def auth_me():
 # ── LLM relay ────────────────────────────────────────────────────
 
 ALLOWED_LLM_HOSTS = set(h.strip() for h in os.environ.get(
-    "LLM_ALLOWED_HOSTS", "models.al-services.idf.cts"
+    "LLM_ALLOWED_HOSTS", "models.ai-services.idf.cts"
 ).split(",") if h.strip())
 
 @app.route("/llm/relay", methods=["POST"])
@@ -255,7 +265,7 @@ def llm_relay():
         headers["X-Title"] = "Intelligraph"
 
     try:
-        resp = requests.post(llm_url, json=payload, headers=headers, timeout=int(os.environ.get("INTELLIGRAPH_LLM_TIMEOUT", "120")))
+        resp = requests.post(llm_url, json=payload, headers=headers, timeout=int(os.environ.get("INTELLIGRAPH_LLM_TIMEOUT", "120")), verify=LLM_SSL_VERIFY)
         resp.encoding = "utf-8"
         return jsonify({"status": resp.status_code, "body": resp.text})
     except requests.exceptions.Timeout:
@@ -298,7 +308,7 @@ def llm_relay_stream():
             # Force stream=True on the upstream request for true SSE streaming
             p = dict(payload)
             p.setdefault("stream", True)
-            resp = requests.post(llm_url, json=p, headers=headers, timeout=int(os.environ.get("INTELLIGRAPH_LLM_TIMEOUT", "120")), stream=True)
+            resp = requests.post(llm_url, json=p, headers=headers, timeout=int(os.environ.get("INTELLIGRAPH_LLM_TIMEOUT", "120")), stream=True, verify=LLM_SSL_VERIFY)
             if resp.status_code != 200:
                 resp.encoding = "utf-8"
                 yield f"data: {json.dumps({'event': 'error', 'data': {'message': f'LLM returned {resp.status_code}: {resp.text[:200]}'}})}\n\n"
@@ -380,7 +390,7 @@ def llm_models():
     if llm_token:
         headers["Authorization"] = f"Bearer {llm_token}"
     try:
-        resp = requests.get(models_url, headers=headers, timeout=15)
+        resp = requests.get(models_url, headers=headers, timeout=15, verify=LLM_SSL_VERIFY)
         if resp.status_code != 200:
             return jsonify({"models": []})
         raw = resp.json()
@@ -724,7 +734,17 @@ def clone_project():
             _save_project(pid, proj)
 
         _projects()[pid] = proj
-        return jsonify({"id": pid, **proj})
+        # Return lightweight response — graph data is fetched separately via /graph-data
+        return jsonify({
+            "id": pid,
+            "name": proj.get("name"),
+            "status": proj.get("status"),
+            "nodes": proj.get("nodes", 0),
+            "edges": proj.get("edges", 0),
+            "has_graphify": bool(proj.get("graphify_data")),
+            "has_crg": bool(proj.get("crg_db_path") and os.path.exists(proj.get("crg_db_path", ""))),
+            "workspace_type": proj.get("workspace_type", "standard"),
+        })
 
     except Exception as e:
         import traceback
@@ -1102,7 +1122,7 @@ def project_completions(pid):
     trace_id = f"req_{uuid.uuid4().hex[:12]}"
 
     try:
-        resp = requests.post(llm_url, json=payload, headers=headers, timeout=int(os.environ.get("INTELLIGRAPH_LLM_TIMEOUT", "120")))
+        resp = requests.post(llm_url, json=payload, headers=headers, timeout=int(os.environ.get("INTELLIGRAPH_LLM_TIMEOUT", "120")), verify=LLM_SSL_VERIFY)
         resp.encoding = "utf-8"
         if resp.status_code != 200:
             return jsonify({

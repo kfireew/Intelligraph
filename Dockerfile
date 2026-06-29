@@ -22,7 +22,8 @@ ENV MKL_NUM_THREADS=2
 ENV NUMEXPR_NUM_THREADS=2
 ENV GRAPHIFY_MAX_WORKERS=4
 ENV CRG_PARSE_WORKERS=4
-ENV LLM_ALLOWED_HOSTS=models.al-services.idf.cts
+ENV LLM_ALLOWED_HOSTS=models.ai-services.idf.cts
+ENV LLM_SSL_VERIFY=false
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
   CMD curl -f http://localhost:5050/status || exit 1

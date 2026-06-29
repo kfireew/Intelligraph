@@ -119,10 +119,10 @@
     },
     {
       "query": "What is the architecture of this project?",
-      "chars": 20674,
-      "tokens": 5168,
+      "chars": 20676,
+      "tokens": 5169,
       "chunks": 10,
-      "code_chars": 19737,
+      "code_chars": 19739,
       "truncated": false,
       "files": 15,
       "precision": 0.2,
@@ -164,7 +164,7 @@
   ],
   "summary": {
     "stock_total_tokens": 68478,
-    "improved_total_tokens": 20007,
+    "improved_total_tokens": 20008,
     "token_reduction_pct": 70.8,
     "stock_avg_precision": 0.12,
     "improved_avg_precision": 0.12,

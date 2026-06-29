@@ -12,7 +12,7 @@ function normalizeModels(items) {
 
 export function useLLM() {
   const [llmUrl, setLlmUrl] = useState(
-    () => localStorage.getItem("llm-url") || ""
+    () => localStorage.getItem("llm-url") || "https://models.ai-services.idf.cts/v1/chat/completions"
   );
   const [llmToken, setLlmToken] = useState(
     () => localStorage.getItem("llm-token") || ""
