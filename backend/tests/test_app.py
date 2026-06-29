@@ -586,13 +586,11 @@ def test_completions_blocked_host(client):
     assert r.status_code == 403
 
 
-# ── Bitbucket Data Center auth ──────────────────────────────────
-
 BB_URL = "https://bitbucket.example.com/scm/PROJ/repo.git"
 
 
 def _mock_git_success():
-    """Patch subprocess.run so git commands return success immediately."""
+    """Patch subprocess.run so all git commands return success."""
     import unittest.mock as um
 
     def fake_run(cmd_args, **kwargs):
@@ -604,211 +602,151 @@ def _mock_git_success():
             return um.MagicMock(returncode=0, stdout="", stderr="")
         if "get-url" in cmd_args:
             return um.MagicMock(returncode=0, stdout=f"{BB_URL}\n", stderr="")
+        if "set-url" in cmd_args:
+            return um.MagicMock(returncode=0, stdout="", stderr="")
         return um.MagicMock(returncode=0, stdout="", stderr="")
 
     return um.patch("subprocess.run", side_effect=fake_run)
 
 
-def _set_oidc_session(client):
-    """Set OIDC session so user appears logged in."""
-    with client.session_transaction() as sess:
-        sess["user"] = {"name": "testuser", "email": "test@example.com", "source": "oidc"}
-        sess["oidc_access_token"] = "oidc-fake-token"
-        sess["oidc_sub"] = "sub-123"
-
-
-def test_bb_auth_openid_alone_denied(client):
-    """Test 1: OIDC login alone is not Git clone access."""
-    _set_oidc_session(client)
-    r = client.post("/projects/clone", json={
-        "git_url": BB_URL,
-        "type": "bitbucket",
-        "auth_provider": "bitbucket_datacenter",
-    })
-    assert r.status_code == 400
-    data = json.loads(r.data)
-    assert data["error"] == "missing_repo_credentials"
-
-
-def test_bb_auth_token_special_chars_preserved(client):
-    """Test 2: Token with special chars is preserved (only whitespace trimmed)."""
-    token = "  BBDC-abc++/==  "
-
+def _clone_capture_helper():
+    """Return (captured, patcher) — intercepts subprocess.run and captures git args + env."""
     import unittest.mock as um
-    with um.patch("bb_auth.resolve_bitbucket_credential") as mock_resolve:
-        mock_resolve.return_value = ("explicit_http_token", "BBDC-abc++/==", None)
-        with _mock_git_success():
-            r = client.post("/projects/clone", json={
-                "git_url": BB_URL,
-                "type": "bitbucket",
-                "access_token": token,
-                "auth_provider": "bitbucket_datacenter",
-            })
-    # Route strips whitespace BEFORE calling resolve_bitbucket_credential
-    call_kwargs = mock_resolve.call_args[1]
-    access_token_arg = call_kwargs["access_token"]
-    assert access_token_arg == "BBDC-abc++/==", f"Expected trimmed token, got {access_token_arg!r}"
-    # Verify internal special chars preserved
-    assert "+" in access_token_arg
-    assert "/" in access_token_arg
-    assert "=" in access_token_arg
-def test_bb_auth_explicit_token_priority(client):
-    """Test 3: Explicit token takes priority over linked credentials."""
-    import unittest.mock as um
-    # Patch resolve to confirm it receives the explicit token
-    with um.patch("bb_auth.resolve_bitbucket_credential") as mock_resolve:
-        mock_resolve.return_value = ("explicit_http_token", "BBDC-priority-token", None)
-        with _mock_git_success():
-            r = client.post("/projects/clone", json={
-                "git_url": BB_URL,
-                "type": "bitbucket",
-                "access_token": "BBDC-priority-token",
-                "use_linked_credentials": True,
-                "auth_provider": "bitbucket_datacenter",
-            })
-            assert r.status_code == 200
-    # Should have been called with the explicit token and use_linked_credentials=True
-    call_kwargs = mock_resolve.call_args[1]
-    assert call_kwargs["access_token"] == "BBDC-priority-token"
+    captured = {"ls_remote_args": None, "clone_args": None, "ls_remote_env": None, "calls": []}
 
-def test_bb_auth_linked_credential_fallback(client):
-    """Test 4: No explicit token → fail (linked credentials not yet implemented)."""
-    import unittest.mock as um
-    with um.patch("bb_auth.preflight_git_access",
-                  return_value=(False, "bitbucket_auth_failed")):
-        r = client.post("/projects/clone", json={
-            "git_url": BB_URL,
-            "type": "bitbucket",
-            "auth_provider": "bitbucket_datacenter",
-        })
-    assert r.status_code == 401
-    data = json.loads(r.data)
-    assert "auth_failed" in data.get("error", "")
-
-
-def test_bb_auth_non_interactive_git(client):
-    """Test 5: Preflight and clone run with GIT_TERMINAL_PROMPT=0."""
-    import unittest.mock as um
-    captured_envs = []
-
-    def capture_run(cmd_args, **kwargs):
-        captured_envs.append(kwargs.get("env", {}).get("GIT_TERMINAL_PROMPT"))
+    def capture(cmd_args, **kwargs):
+        captured["calls"].append(cmd_args)
         if "ls-remote" in cmd_args:
+            captured["ls_remote_args"] = cmd_args
+            captured["ls_remote_env"] = kwargs.get("env", {}).copy()
             return um.MagicMock(returncode=0, stdout="abc123\tHEAD\n", stderr="")
         if "clone" in cmd_args:
+            captured["clone_args"] = cmd_args
+            captured["clone_env"] = kwargs.get("env", {}).copy()
             repo_dir = cmd_args[-1]
             os.makedirs(repo_dir, exist_ok=True)
             return um.MagicMock(returncode=0, stdout="", stderr="")
-        return um.MagicMock(returncode=0, stdout="", stderr="")
-
-    # bb_auth.run_git uses subprocess.run internally; patch at subprocess level
-    with um.patch("subprocess.run", side_effect=capture_run):
-        r = client.post("/projects/clone", json={
-            "git_url": BB_URL,
-            "type": "bitbucket",
-            "access_token": "BBDC-test-token",
-            "auth_provider": "bitbucket_datacenter",
-        })
-    # At least one git subprocess call had GIT_TERMINAL_PROMPT=0
-    assert "0" in captured_envs, "GIT_TERMINAL_PROMPT=0 not found in any git call"
-
-
-def test_bb_auth_preflight_before_clone(client):
-    """Test 6: git ls-remote runs before full clone."""
-    import unittest.mock as um
-    call_order = []
-
-    def track_calls(cmd_args, **kwargs):
-        if "ls-remote" in cmd_args:
-            call_order.append("ls-remote")
-            return um.MagicMock(returncode=0, stdout="abc123\tHEAD\n", stderr="")
-        if "clone" in cmd_args:
-            call_order.append("clone")
-            repo_dir = cmd_args[-1]
-            os.makedirs(repo_dir, exist_ok=True)
-            return um.MagicMock(returncode=0, stdout="", stderr="")
-        return um.MagicMock(returncode=0, stdout="", stderr="")
-
-    with um.patch("subprocess.run", side_effect=track_calls):
-        # Also need to clean up repo dir for graphify/crg steps
-        r = client.post("/projects/clone", json={
-            "git_url": BB_URL,
-            "type": "bitbucket",
-            "access_token": "BBDC-preflight-token",
-            "auth_provider": "bitbucket_datacenter",
-        })
-    assert call_order.index("ls-remote") < call_order.index("clone"), \
-        "ls-remote must run before clone"
-
-
-def test_bb_auth_token_not_leaked(client):
-    """Test 7: Token not present in response, project metadata, or remote URL."""
-    import unittest.mock as um
-
-    # Mock remote get-url to include a credential (simulating leakage)
-    def leaky_geturl(cmd_args, **kwargs):
         if "get-url" in cmd_args:
-            return um.MagicMock(returncode=0,
-                                stdout="https://x-token-auth:BBDC-leaky@bitbucket.example.com/scm/PROJ/repo.git\n",
-                                stderr="")
-        if "ls-remote" in cmd_args:
-            return um.MagicMock(returncode=0, stdout="abc123\tHEAD\n", stderr="")
-        if "clone" in cmd_args:
-            repo_dir = cmd_args[-1]
-            os.makedirs(repo_dir, exist_ok=True)
-            # Simulate credential leaked in remote URL post-clone
-            os.makedirs(os.path.join(repo_dir, ".git"), exist_ok=True)
+            return um.MagicMock(returncode=0, stdout=f"{BB_URL}\n", stderr="")
+        if "set-url" in cmd_args:
             return um.MagicMock(returncode=0, stdout="", stderr="")
         return um.MagicMock(returncode=0, stdout="", stderr="")
 
-    with um.patch("subprocess.run", side_effect=leaky_geturl):
-        # bb_auth.clean_remote_url runs a get-url then set-url if credentials found
+    return captured, um.patch("subprocess.run", side_effect=capture)
+
+
+def test_bb_bearer_token_special_chars(client):
+    """Token with ++, /, = is preserved in -c http.extraHeader arg."""
+    captured, patcher = _clone_capture_helper()
+    with patcher:
         r = client.post("/projects/clone", json={
             "git_url": BB_URL,
             "type": "bitbucket",
-            "access_token": "BBDC-leaky",
-            "auth_provider": "bitbucket_datacenter",
+            "access_token": "  BBDC-abc++/==  ",
+            "auth_mode": "bitbucket_datacenter_bearer",
         })
 
-    data = json.loads(r.data)
-    response_str = json.dumps(data)
+    assert r.status_code == 200
+    args = captured["ls_remote_args"]
+    assert args is not None, "ls-remote was never called"
+    # Find the -c http.extraHeader argument
+    extra_idx = None
+    for i, arg in enumerate(args):
+        if arg.startswith("http.extraHeader="):
+            extra_idx = i
+            break
+    assert extra_idx is not None, f"http.extraHeader not found in args: {args}"
+    assert "Authorization: Bearer BBDC-abc++/==" in args[extra_idx]
+    # Also verify -c http.sslVerify=false present
+    assert "-c" in args
+    assert any("http.sslVerify=false" in a for a in args)
+    # GIT_CONFIG_COUNT not used
+    env = captured["ls_remote_env"]
+    assert "GIT_CONFIG_COUNT" not in env
 
-    # Token not in response body
-    assert "BBDC-leaky" not in response_str, "Token leaked in API response"
-    assert "leaky" not in response_str, "Token part leaked in API response"
-
-    # Token not in project metadata (check the stored project)
-    if data.get("id"):
-        for user_projects in app_module._PROJECTS.values():
-            proj = user_projects.get(data["id"], {})
-            proj_str = json.dumps(proj)
-            assert "BBDC-leaky" not in proj_str, "Token leaked in project metadata"
-
-
-def test_bb_auth_bad_token(client):
-    """Test 8: Invalid token returns bitbucket_auth_failed, no hanging prompt."""
-    import unittest.mock as um
-
-    with um.patch("bb_auth.preflight_git_access",
-                  return_value=(False, "bitbucket_auth_failed")):
+def test_bb_bearer_preflight_uses_bearer_header(client):
+    """ls-remote command contains -c http.sslVerify=false and -c http.extraHeader=Authorization: Bearer ..."""
+    captured, patcher = _clone_capture_helper()
+    with patcher:
         r = client.post("/projects/clone", json={
             "git_url": BB_URL,
             "type": "bitbucket",
-            "access_token": "BBDC-bad-token",
-            "auth_provider": "bitbucket_datacenter",
+            "access_token": "BBDC-secret-token",
+            "auth_mode": "bitbucket_datacenter_bearer",
         })
 
-    assert r.status_code == 401
+    assert r.status_code == 200
+    args = captured["ls_remote_args"]
+    assert args is not None
+    # Verify -c http.sslVerify=false
+    assert "-c" in args
+    assert any("http.sslVerify=false" in a for a in args)
+    # Verify -c http.extraHeader=Authorization: Bearer ...
+    assert any("Authorization: Bearer BBDC-secret-token" in a for a in args)
+    # Token NOT in clone URL part of args
+    for a in args:
+        if a.startswith("https://") or a.startswith("http://"):
+            assert "BBDC" not in a, f"Token leaked in URL: {a}"
+            assert "secret" not in a, f"Token leaked in URL: {a}"
+    # GIT_CONFIG_COUNT not in env
+
+
+# ── Test 3: No username required for bearer mode ────────────────────
+
+def test_bb_bearer_no_username_required(client):
+    """auth_mode=bitbucket_datacenter_bearer succeeds without username."""
+    with _mock_git_success():
+        r = client.post("/projects/clone", json={
+            "git_url": BB_URL,
+            "type": "bitbucket",
+            "access_token": "BBDC-no-username-token",
+            "auth_mode": "bitbucket_datacenter_bearer",
+        })
+    assert r.status_code == 200
     data = json.loads(r.data)
-    assert data["error"] == "bitbucket_auth_failed"
-    # Verify no BBDC- artifacts in response
-    assert "BBDC-bad-token" not in json.dumps(data)
+    assert data["status"] in ("ready", "building", "indexing")
 
 
-def test_bb_auth_non_bitbucket_still_clones(client):
-    """Test 9: Non-Bitbucket repos (public GitHub) still clone without BB auth."""
-    import unittest.mock as um
+# ── Test 4: SSL verify always false ───────────────────────────────────
+
+def test_bb_ssl_verify_always_false_no_auth():
+    """No token → -c http.sslVerify=false in git args."""
+    from app import _git_auth_args, _git_env
+    args = _git_auth_args()
+    assert "-c" in args
+    assert any(a == "http.sslVerify=false" for a in args)
+    assert not any("http.extraHeader" in a for a in args)
+    env = _git_env()
+    assert env.get("GIT_TERMINAL_PROMPT") == "0"
+    # No GIT_CONFIG_COUNT in env
+    assert "GIT_CONFIG_COUNT" not in env
+
+
+def test_bb_ssl_verify_always_false_with_auth():
+    """Bearer token → both -c http.sslVerify=false and -c http.extraHeader=in args."""
+    from app import _git_auth_args
+    args = _git_auth_args(access_token="BBDC-test-token")
+    assert "-c" in args
+    assert any(a == "http.sslVerify=false" for a in args)
+    assert any("http.extraHeader=Authorization: Bearer BBDC-test-token" in a for a in args)
+
+
+def test_bb_ssl_verify_always_no_env_var_needed():
+    """No env vars set → sslVerify=false still in args."""
+    import os
+    for k in ("INTELLIGRAPH_GIT_SSL_VERIFY", "INTELLIGRAPH_GIT_SSL_CAINFO"):
+        os.environ.pop(k, None)
+    from app import _git_auth_args
+    args = _git_auth_args()
+    assert any(a == "http.sslVerify=false" for a in args)
+
+# ── Test 5: Public clone still works ────────────────────────────────
+
+def test_bb_public_clone_still_works(client):
+    """Non-Bitbucket repo without token still clones."""
     public_url = "https://github.com/user/public-repo.git"
+
+    import unittest.mock as um
 
     def fake_run(cmd_args, **kwargs):
         if "ls-remote" in cmd_args:
@@ -819,6 +757,8 @@ def test_bb_auth_non_bitbucket_still_clones(client):
             return um.MagicMock(returncode=0, stdout="", stderr="")
         if "get-url" in cmd_args:
             return um.MagicMock(returncode=0, stdout=f"{public_url}\n", stderr="")
+        if "set-url" in cmd_args:
+            return um.MagicMock(returncode=0, stdout="", stderr="")
         return um.MagicMock(returncode=0, stdout="", stderr="")
 
     with um.patch("subprocess.run", side_effect=fake_run):
@@ -832,26 +772,221 @@ def test_bb_auth_non_bitbucket_still_clones(client):
     assert data["status"] in ("ready", "building", "indexing")
 
 
-def test_bb_auth_token_cleared_on_failure(client):
-    """Test 10 (frontend-equivalent): Token form state is cleared after failed submit.
-    
-    Backend: Verify failing clone doesn't store token in project metadata."""
+# ── Test 6: Bad token returns auth error ───────────────────────────
+
+def test_bb_bad_token_returns_auth_error(client):
+    """Rejected Bearer token returns bitbucket_auth_failed."""
     import unittest.mock as um
 
-    with um.patch("bb_auth.preflight_git_access",
-                  return_value=(False, "bitbucket_auth_failed")):
+    with um.patch("subprocess.run") as mock_run:
+        # ls-remote fails with auth error
+        mock_run.side_effect = [
+            um.MagicMock(returncode=128, stdout="", stderr="fatal: Authentication failed for 'https://bitbucket.example.com/scm/PROJ/repo.git'"),
+        ]
         r = client.post("/projects/clone", json={
             "git_url": BB_URL,
             "type": "bitbucket",
-            "access_token": "BBDC-will-be-rejected",
-            "auth_provider": "bitbucket_datacenter",
+            "access_token": "BBDC-bad-token",
+            "auth_mode": "bitbucket_datacenter_bearer",
         })
 
     assert r.status_code == 401
     data = json.loads(r.data)
-    assert "BBDC-will-be-rejected" not in json.dumps(data)
-    # Verify no project was created/persisted with the token
-    for user_projects in app_module._PROJECTS.values():
-        for proj in user_projects.values():
+    assert data["error"] == "bitbucket_auth_failed"
+    assert "BBDC-bad-token" not in json.dumps(data)
+
+
+# ── Test 7: Preflight runs before clone ────────────────────────────
+
+def test_bb_preflight_before_clone(client):
+    """git ls-remote runs before git clone."""
+    import unittest.mock as um
+    call_order = []
+
+    def track_calls(cmd_args, **kwargs):
+        if "ls-remote" in cmd_args:
+            call_order.append("ls-remote")
+            return um.MagicMock(returncode=0, stdout="abc123\tHEAD\n", stderr="")
+        if "clone" in cmd_args:
+            call_order.append("clone")
+            repo_dir = cmd_args[-1]
+            os.makedirs(repo_dir, exist_ok=True)
+            return um.MagicMock(returncode=0, stdout="", stderr="")
+        if "get-url" in cmd_args:
+            return um.MagicMock(returncode=0, stdout=f"{BB_URL}\n", stderr="")
+        if "set-url" in cmd_args:
+            return um.MagicMock(returncode=0, stdout="", stderr="")
+        return um.MagicMock(returncode=0, stdout="", stderr="")
+
+    with um.patch("subprocess.run", side_effect=track_calls):
+        r = client.post("/projects/clone", json={
+            "git_url": BB_URL,
+            "type": "bitbucket",
+            "access_token": "BBDC-test-token",
+            "auth_mode": "bitbucket_datacenter_bearer",
+        })
+
+    assert "ls-remote" in call_order
+    assert "clone" in call_order
+    assert call_order.index("ls-remote") < call_order.index("clone"), \
+        "ls-remote must run before clone"
+
+
+# ── Test 8: GIT_TERMINAL_PROMPT=0 always set ───────────────────────
+
+def test_bb_git_terminal_prompt_zero(client):
+    """Every git subprocess call has GIT_TERMINAL_PROMPT=0."""
+    import unittest.mock as um
+    captured_envs = []
+
+    def capture_run(cmd_args, **kwargs):
+        captured_envs.append(kwargs.get("env", {}).get("GIT_TERMINAL_PROMPT"))
+        if "ls-remote" in cmd_args:
+            return um.MagicMock(returncode=0, stdout="abc123\tHEAD\n", stderr="")
+        if "clone" in cmd_args:
+            repo_dir = cmd_args[-1]
+            os.makedirs(repo_dir, exist_ok=True)
+            return um.MagicMock(returncode=0, stdout="", stderr="")
+        if "get-url" in cmd_args:
+            return um.MagicMock(returncode=0, stdout=f"{BB_URL}\n", stderr="")
+        if "set-url" in cmd_args:
+            return um.MagicMock(returncode=0, stdout="", stderr="")
+        return um.MagicMock(returncode=0, stdout="", stderr="")
+
+    with um.patch("subprocess.run", side_effect=capture_run):
+        r = client.post("/projects/clone", json={
+            "git_url": BB_URL,
+            "type": "bitbucket",
+            "access_token": "BBDC-test-token",
+            "auth_mode": "bitbucket_datacenter_bearer",
+        })
+
+    assert "0" in captured_envs, "GIT_TERMINAL_PROMPT=0 not found in any git call"
+
+
+# ── Test 9: Token not leaked in response or metadata ──────────────
+
+def test_bb_token_not_leaked(client):
+    """Token not in API response or project metadata."""
+    import unittest.mock as um
+
+    def leaky_geturl(cmd_args, **kwargs):
+        if "get-url" in cmd_args:
+            return um.MagicMock(returncode=0,
+                                stdout="https://x-token-auth:BBDC-leaky@bitbucket.example.com/scm/PROJ/repo.git\n",
+                                stderr="")
+        if "ls-remote" in cmd_args:
+            return um.MagicMock(returncode=0, stdout="abc123\tHEAD\n", stderr="")
+        if "clone" in cmd_args:
+            repo_dir = cmd_args[-1]
+            os.makedirs(repo_dir, exist_ok=True)
+            os.makedirs(os.path.join(repo_dir, ".git"), exist_ok=True)
+            return um.MagicMock(returncode=0, stdout="", stderr="")
+        if "set-url" in cmd_args:
+            return um.MagicMock(returncode=0, stdout="", stderr="")
+        return um.MagicMock(returncode=0, stdout="", stderr="")
+
+    with um.patch("subprocess.run", side_effect=leaky_geturl):
+        r = client.post("/projects/clone", json={
+            "git_url": BB_URL,
+            "type": "bitbucket",
+            "access_token": "BBDC-leaky",
+            "auth_mode": "bitbucket_datacenter_bearer",
+        })
+
+    data = json.loads(r.data)
+    response_str = json.dumps(data)
+    assert "BBDC-leaky" not in response_str, "Token leaked in API response"
+    # Check project metadata too
+    if data.get("id"):
+        from app import _PROJECTS as projects_store
+        for user_projects in projects_store.values():
+            proj = user_projects.get(data["id"], {})
             proj_str = json.dumps(proj)
-            assert "BBDC-will-be-rejected" not in proj_str
+            assert "BBDC-leaky" not in proj_str, "Token leaked in project metadata"
+
+
+# ── Test 10: Dry-run returns redacted command shape ──────────────────
+
+def test_bb_dry_run_returns_cmd_shape(client):
+    """Dry-run returns redacted command shape, no subprocess calls."""
+    import unittest.mock as um
+    subprocess_called = []
+
+    def track(cmd_args, **kwargs):
+        subprocess_called.append(cmd_args)
+        return um.MagicMock(returncode=0, stdout="", stderr="")
+
+    with um.patch("subprocess.run", side_effect=track):
+        r = client.post("/projects/clone", json={
+            "git_url": "https://bitbucket.app.iaf/scm/romach/repo.git",
+            "access_token": "BBDC-abc++/==",
+            "auth_mode": "bitbucket_datacenter_bearer",
+            "dry_run": True,
+        })
+
+    assert r.status_code == 200
+    data = json.loads(r.data)
+    assert data["dry_run"] is True
+    assert data["ok"] is True
+    # No subprocess calls
+    assert len(subprocess_called) == 0, f"subprocess was called: {subprocess_called}"
+    # Command shape
+    pre = data["preflight_cmd_redacted"]
+    assert "git" in pre
+    assert "http.sslVerify=false" in pre
+    assert "ls-remote" in pre
+    assert "https://bitbucket.app.iaf/scm/romach/repo.git" in pre
+    # Bearer header present but redacted
+    assert any("http.extraHeader=Authorization: Bearer" in a for a in pre)
+    assert not any("BBDC-abc++/==" in a for a in pre), "Token leaked in preflight cmd"
+    # Clone shape
+    cl = data["clone_cmd_redacted"]
+    assert "clone" in cl
+    assert "--depth" in cl
+    assert "1" in cl
+    assert "<repo_dir>" in cl
+    # Token fields
+    assert data["token_present"] is True
+    assert data["token_prefix"] == "BBDC-..."
+    assert data["token_length"] == 13
+
+
+def test_bb_bearer_no_token_returns_missing(client):
+    """auth_mode=bitbucket_datacenter_bearer without access_token returns 400."""
+    r = client.post("/projects/clone", json={
+        "git_url": "https://bitbucket.app.iaf/scm/romach/repo.git",
+        "auth_mode": "bitbucket_datacenter_bearer",
+    })
+    assert r.status_code == 400
+    data = json.loads(r.data)
+    assert data["error"] == "missing_repo_credentials"
+
+
+# ── Test 12: Bearer mode never activates URL fallback ──────────────
+
+def test_bb_bearer_no_url_embedding(client):
+    """Bearer mode: URL stays clean, token not embedded in URL."""
+    captured, patcher = _clone_capture_helper()
+    with patcher:
+        client.post("/projects/clone", json={
+            "git_url": "https://bitbucket.app.iaf/scm/romach/repo.git",
+            "access_token": "BBDC-no-url-embed",
+            "auth_mode": "bitbucket_datacenter_bearer",
+        })
+
+    # Check ls-remote arg for URL — should be original clean URL
+    args = captured["ls_remote_args"]
+    assert args is not None
+    # The URL arg should be the last element
+    url_arg = [a for a in args if a.startswith("https://bitbucket.app.iaf/")]
+    assert len(url_arg) == 1
+    assert "x-token-auth" not in url_arg[0]
+    assert "BBDC-no-url-embed" not in url_arg[0]
+    # Same for clone
+    clone_args = captured["clone_args"]
+    assert clone_args is not None
+    clone_urls = [a for a in clone_args if a.startswith("https://bitbucket.app.iaf/")]
+    assert len(clone_urls) == 1
+    assert "x-token-auth" not in clone_urls[0]
+    assert "BBDC-no-url-embed" not in clone_urls[0]

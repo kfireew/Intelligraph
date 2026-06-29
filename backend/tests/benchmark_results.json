@@ -1,0 +1,123 @@
+[
+  {
+    "query": "What is the login function?",
+    "intent": "what_is",
+    "context_chars": 861,
+    "est_tokens": 215,
+    "files_retrieved": 5,
+    "files": [
+      "auth.py",
+      "database.py",
+      "models.py",
+      "routes.py",
+      "utils.py"
+    ],
+    "raw_chunks": 5,
+    "raw_code_chars": 458,
+    "strategy": "what_is",
+    "precision": 0.2,
+    "recall": 1.0,
+    "expected_found": [
+      "auth.py"
+    ],
+    "expected_missing": []
+  },
+  {
+    "query": "How does authentication work?",
+    "intent": "how_works",
+    "context_chars": 2314,
+    "est_tokens": 578,
+    "files_retrieved": 6,
+    "files": [
+      "auth.py",
+      "database.py",
+      "main.py",
+      "models.py",
+      "routes.py",
+      "utils.py"
+    ],
+    "raw_chunks": 6,
+    "raw_code_chars": 549,
+    "strategy": "how_works",
+    "precision": 0.33,
+    "recall": 1.0,
+    "expected_found": [
+      "auth.py",
+      "utils.py"
+    ],
+    "expected_missing": []
+  },
+  {
+    "query": "Who calls the login function?",
+    "intent": "callers",
+    "context_chars": 670,
+    "est_tokens": 167,
+    "files_retrieved": 3,
+    "files": [
+      "auth.py",
+      "main.py",
+      "routes.py"
+    ],
+    "raw_chunks": 3,
+    "raw_code_chars": 267,
+    "strategy": "callers",
+    "precision": 0.33,
+    "recall": 1.0,
+    "expected_found": [
+      "routes.py"
+    ],
+    "expected_missing": []
+  },
+  {
+    "query": "What is the architecture of this project?",
+    "intent": "architecture",
+    "context_chars": 1332,
+    "est_tokens": 333,
+    "files_retrieved": 6,
+    "files": [
+      "auth.py",
+      "database.py",
+      "main.py",
+      "models.py",
+      "routes.py",
+      "utils.py"
+    ],
+    "raw_chunks": 6,
+    "raw_code_chars": 549,
+    "strategy": "architecture",
+    "precision": 0.67,
+    "recall": 1.0,
+    "expected_found": [
+      "auth.py",
+      "main.py",
+      "models.py",
+      "routes.py"
+    ],
+    "expected_missing": []
+  },
+  {
+    "query": "What breaks if I change the User model?",
+    "intent": "impact",
+    "context_chars": 751,
+    "est_tokens": 187,
+    "files_retrieved": 4,
+    "files": [
+      "auth.py",
+      "main.py",
+      "models.py",
+      "routes.py"
+    ],
+    "raw_chunks": 4,
+    "raw_code_chars": 348,
+    "strategy": "impact",
+    "precision": 0.5,
+    "recall": 0.67,
+    "expected_found": [
+      "auth.py",
+      "models.py"
+    ],
+    "expected_missing": [
+      "database.py"
+    ]
+  }
+]

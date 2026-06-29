@@ -19,8 +19,7 @@ export function CloneModal({ onClone, onClose, loading }) {
       const payload = { gitUrl: gitUrl.trim(), name: name.trim() || undefined };
       if (accessToken.trim()) {
         payload.accessToken = accessToken.trim();
-        payload.useLinkedCredentials = true;
-        payload.authProvider = "bitbucket_datacenter";
+        payload.authMode = "bitbucket_datacenter_bearer";
       }
       await onClone(payload);
       setStatus("");

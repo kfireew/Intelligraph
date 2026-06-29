@@ -2,15 +2,25 @@
 NeighborhoodRanker — Ranks expanded nodes by centrality, risk, and relevance.
 
 Takes expanded node IDs and graph data, returns ranked file list.
-Ranking factors: degree centrality, community cohesion, dependency risk.
+Ranking factors: degree centrality, community cohesion, dependency risk,
+and query-term relevance.
 
 Input:  expanded_node_ids + graphify_data
 Output: { ranked_files: [{ file_path, score, reason }] }
 """
 
+import re
 
-def rank_neighborhood(expanded_node_ids: list, graphify_data: dict, node_map: dict = None) -> list:
+
+def rank_neighborhood(expanded_node_ids: list, graphify_data: dict, node_map: dict = None,
+                      query: str = "") -> list:
     """Rank expanded nodes and produce sorted file list.
+    
+    Args:
+        expanded_node_ids: node IDs from traversal
+        graphify_data: full graph data
+        node_map: optional pre-built node lookup
+        query: original user query for relevance scoring
     
     Returns [{ file_path, score, reason }] sorted by score descending.
     """
@@ -35,6 +45,14 @@ def rank_neighborhood(expanded_node_ids: list, graphify_data: dict, node_map: di
             if key:
                 degree[key] = degree.get(key, 0) + 1
 
+    # Extract query tokens for relevance scoring
+    query_tokens = set()
+    if query:
+        lower = query.lower()
+        for t in re.split(r"[\s_\-\./]", lower):
+            if len(t) > 1:
+                query_tokens.add(t)
+
     # Score each expanded node
     scored_files = {}  # file_path → { score, reason, count }
     for nid in expanded_node_ids:
@@ -50,13 +68,14 @@ def rank_neighborhood(expanded_node_ids: list, graphify_data: dict, node_map: di
         entry = scored_files[sf]
         entry["count"] += 1
 
-        # Degree centrality
+        # Degree centrality (logarithmic to avoid flattening)
         deg = degree.get(nid, 0)
         if deg > 0:
-            entry["score"] += min(deg * 2, 20)
+            import math
+            entry["score"] += min(math.log2(deg + 1) * 5, 25)
 
         # Node is a hub (high degree relative to average)
-        avg_deg = max(len(degree) // max(len(nodes), 1), 1)
+        avg_deg = max(len(degree) / max(len(nodes), 1), 1.0)
         if deg > avg_deg * 3:
             entry["score"] += 10
             entry["reasons"].append("hub_node")
@@ -69,6 +88,23 @@ def rank_neighborhood(expanded_node_ids: list, graphify_data: dict, node_map: di
         # File with many matched nodes (dense file)
         if entry["count"] > 2:
             entry["score"] += entry["count"] * 2
+
+        # Query-term relevance scoring
+        if query_tokens:
+            label = (node.get("label") or "").lower()
+            source = (node.get("source_file") or "").lower()
+            content = (node.get("content") or node.get("text") or "").lower()[:500]
+            relevance = 0
+            for t in query_tokens:
+                if t in label:
+                    relevance += 4
+                if t in source:
+                    relevance += 3
+                if t in content:
+                    relevance += 2
+            if relevance > 0:
+                entry["score"] += min(relevance, 20)
+                entry["reasons"].append("query_relevant")
 
     # Sort by score descending
     ranked = [

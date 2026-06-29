@@ -1,27 +1,116 @@
-import { Download, Server } from "lucide-react";
+import { Download, Server, Copy, Check, ExternalLink } from "lucide-react";
+import { useState } from "react";
 import { endpoints } from "../config/endpoints";
 
-export function GuidePanel({ activePid }) {
+function copy(text) {
+  navigator.clipboard.writeText(text);
+}
+
+export function GuidePanel({ activePid, activeProject }) {
+  const [copied, setCopied] = useState(null);
+  const isReady = activeProject && ["ready", "cloned", "indexed"].includes(activeProject.status);
+  const pid = activeProject?.id;
+  const completionsUrl = pid ? `/api/v1/projects/${pid}/completions` : "/api/v1/projects/{pid}/completions";
+  const curlExample = pid
+    ? `curl -X POST ${window.location.origin}${completionsUrl} \\\n  -H "Content-Type: application/json" \\\n  -H "Authorization: Bearer <your-api-token>" \\\n  -d '{\n  "prompt": "Explain the architecture",\n  "include_context": true,\n  "llm_url": "https://openrouter.ai/api/v1/chat/completions",\n  "llm_token": "sk-..."\n}'`
+    : null;
+  const n8nExample = pid ? `{
+  "method": "POST",
+  "url": "${window.location.origin}${completionsUrl}",
+  "authentication": "genericCredentialType",
+  "genericAuthType": "httpBearerAuth",
+  "sendBody": true,
+  "bodyParameters": {
+    "parameters": [
+      { "name": "prompt", "value": "Explain the architecture" },
+      { "name": "include_context", "value": true },
+      { "name": "llm_url", "value": "https://openrouter.ai/api/v1/chat/completions" },
+      { "name": "llm_token", "value": "sk-..." }
+    ]
+  }
+}` : null;
+
+  const handleCopy = (key, text) => {
+    copy(text);
+    setCopied(key);
+    setTimeout(() => setCopied(null), 2000);
+  };
+
   return (
     <div className="flex flex-col flex-1 min-h-0 p-6 overflow-y-auto space-y-6">
       <div className="flex items-center gap-2"><Server size={18} className="text-accent-light" /><h2 className="text-lg font-bold gradient-text">MCP Setup</h2></div>
+      <Section title="Integrations / API" icon={Server}>
+        {!activeProject ? (
+          <p className="text-xs text-muted-subtle m-0">Select a project to see its API endpoint.</p>
+        ) : !isReady ? (
+          <div>
+            <p className="text-xs text-muted-subtle m-0 mb-2">Project status: <span className="text-yellow-400 font-medium">{activeProject.status}</span>. Wait for cloning to finish.</p>
+            <div className="relative group opacity-50 pointer-events-none">
+              <pre className="m-0 p-2.5 rounded-lg bg-black/30 text-[11px] font-mono text-text-secondary overflow-x-auto">{completionsUrl}</pre>
+            </div>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <p className="text-xs text-text-secondary m-0 leading-relaxed">Use this endpoint for n8n, CI/CD, or external automation targeting <span className="text-text font-semibold">{activeProject.name}</span>.</p>
+
+            {/* Endpoint URL */}
+            <div>
+              <p className="text-[11px] font-bold text-muted uppercase tracking-wider mb-1.5">Endpoint</p>
+              <div className="relative group">
+                <pre className="m-0 p-2.5 rounded-lg bg-black/30 text-[11px] font-mono text-text-secondary overflow-x-auto cursor-pointer select-all whitespace-pre-wrap break-all"
+                  onClick={() => handleCopy("endpoint", `POST ${completionsUrl}`)}>{completionsUrl}</pre>
+                <button onClick={() => handleCopy("endpoint", `POST ${completionsUrl}`)}
+                  className="absolute top-1.5 right-1.5 p-1 rounded bg-black/40 hover:bg-black/60 text-muted-subtle hover:text-text transition-colors">
+                  {copied === "endpoint" ? <Check size={12} className="text-green-400" /> : <Copy size={12} />}
+                </button>
+              </div>
+            </div>
+
+            <details className="mt-2">
+              <summary className="text-[11px] font-bold text-muted cursor-pointer hover:text-text transition-colors">cURL &amp; n8n examples</summary>
+              <div className="mt-2 space-y-3">
+                {/* cURL */}
+                <div>
+                  <p className="text-[11px] font-bold text-muted uppercase tracking-wider mb-1.5">cURL</p>
+                  <div className="relative group">
+                    <pre className="m-0 p-2.5 rounded-lg bg-black/30 text-[11px] font-mono text-text-secondary overflow-x-auto text-[10px] leading-relaxed whitespace-pre-wrap break-all"
+                      onClick={() => handleCopy("curl", curlExample)}>{curlExample}</pre>
+                    <button onClick={() => handleCopy("curl", curlExample)}
+                      className="absolute top-1.5 right-1.5 p-1 rounded bg-black/40 hover:bg-black/60 text-muted-subtle hover:text-text transition-colors">
+                      {copied === "curl" ? <Check size={12} className="text-green-400" /> : <Copy size={12} />}
+                    </button>
+                  </div>
+                </div>
+
+                {/* n8n HTTP Request */}
+                <div>
+                  <p className="text-[11px] font-bold text-muted uppercase tracking-wider mb-1.5">n8n HTTP Request (JSON)</p>
+                  <div className="relative group">
+                    <pre className="m-0 p-2.5 rounded-lg bg-black/30 text-[11px] font-mono text-text-secondary overflow-x-auto text-[10px] leading-relaxed whitespace-pre-wrap break-all"
+                      onClick={() => handleCopy("n8n", n8nExample)}>{n8nExample}</pre>
+                    <button onClick={() => handleCopy("n8n", n8nExample)}
+                      className="absolute top-1.5 right-1.5 p-1 rounded bg-black/40 hover:bg-black/60 text-muted-subtle hover:text-text transition-colors">
+                      {copied === "n8n" ? <Check size={12} className="text-green-400" /> : <Copy size={12} />}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </details>
+          </div>
+        )}
+      </Section>
       <Section title="REST API Endpoints" icon={Server}>
-        <p className="text-xs text-text-secondary m-0 mb-3 leading-relaxed">Use these endpoints for n8n, CI/CD, or external automation.</p>
+        <p className="text-xs text-text-secondary m-0 mb-3 leading-relaxed">General endpoints for scripting and automation.</p>
         <div className="space-y-2">
           <div>
             <p className="text-[11px] font-bold text-muted uppercase tracking-wider mb-1">Clone Repository</p>
             <div className="relative group">
               <pre className="m-0 p-2.5 rounded-lg bg-black/30 text-[11px] font-mono text-text-secondary overflow-x-auto cursor-pointer select-all"
-                onClick={(e) => { navigator.clipboard.writeText(e.target.textContent.trim()); }}>{`POST /projects/clone`}</pre>
-              <span className="absolute top-1 right-1.5 text-[9px] text-muted-subtle opacity-0 group-hover:opacity-60 transition-opacity">click to copy</span>
-            </div>
-          </div>
-          <div>
-            <p className="text-[11px] font-bold text-muted uppercase tracking-wider mb-1">Completions (stateless)</p>
-            <div className="relative group">
-              <pre className="m-0 p-2.5 rounded-lg bg-black/30 text-[11px] font-mono text-text-secondary overflow-x-auto cursor-pointer select-all"
-                onClick={(e) => { navigator.clipboard.writeText(e.target.textContent.trim()); }}>{`POST /api/v1/projects/{pid}/completions`}</pre>
-              <span className="absolute top-1 right-1.5 text-[9px] text-muted-subtle opacity-0 group-hover:opacity-60 transition-opacity">click to copy</span>
+                onClick={() => handleCopy("clone", "POST /projects/clone")}>{`POST /projects/clone`}</pre>
+              <button onClick={() => handleCopy("clone", "POST /projects/clone")}
+                className="absolute top-1.5 right-1.5 p-1 rounded bg-black/40 hover:bg-black/60 text-muted-subtle hover:text-text transition-colors">
+                {copied === "clone" ? <Check size={12} className="text-green-400" /> : <Copy size={12} />}
+              </button>
             </div>
           </div>
         </div>
@@ -34,15 +123,6 @@ export function GuidePanel({ activePid }) {
   "git_url": "https://bitbucket.example.com/scm/PROJ/repo.git",
   "access_token": "BBDC-...",
   "auth_provider": "bitbucket_datacenter"
-}`}</pre>
-            </div>
-            <div>
-              <p className="text-[10px] text-muted-subtle mb-1">Ask a question about project 1:</p>
-              <pre className="m-0 p-2 rounded-lg bg-black/30 text-[10px] font-mono text-text-secondary overflow-x-auto">{`{
-  "prompt": "Explain the architecture",
-  "include_context": true,
-  "llm_url": "https://openrouter.ai/api/v1/chat/completions",
-  "llm_token": "sk-..."
 }`}</pre>
             </div>
           </div>

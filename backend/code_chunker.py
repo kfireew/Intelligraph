@@ -14,6 +14,7 @@ log = logging.getLogger(__name__)
 
 CHUNKING_MODE = "unknown"
 _TS_LANGUAGES = None
+MAX_CHUNK_CHARS = 2000
 
 
 def get_available_languages():
@@ -65,6 +66,8 @@ def _extract_python_chunks(node, source_bytes, file_path, depth=0):
             name = source_bytes[name_node.start_byte:name_node.end_byte].decode()
             kind = "class" if node.type == "class_definition" else "function"
             content = source_bytes[node.start_byte:node.end_byte].decode()
+            if len(content) > MAX_CHUNK_CHARS:
+                content = content[:MAX_CHUNK_CHARS] + "\n# ... (truncated)"
             chunks.append({
                 "file_path": file_path,
                 "name": name,
@@ -100,6 +103,8 @@ def _extract_generic_chunks(node, source_bytes, file_path, depth=0,
             name = source_bytes[name_node.start_byte:name_node.end_byte].decode()
             kind = "class" if node_type in class_types else "function"
             content = source_bytes[node.start_byte:node.end_byte].decode()
+            if len(content) > MAX_CHUNK_CHARS:
+                content = content[:MAX_CHUNK_CHARS] + "\n// ... (truncated)"
             chunks.append({
                 "file_path": file_path,
                 "name": name,

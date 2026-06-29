@@ -9,13 +9,14 @@ Output: { expanded: [node_ids], by_depth: {1: [...], 2: [...], ...} }
 """
 
 
-def plan_traversal(task: dict, matched_nodes: list, links: list) -> dict:
+def plan_traversal(task: dict, matched_nodes: list, links: list, max_expanded: int = 200) -> dict:
     """Expand matched nodes by following links per task operations.
     
     Args:
         task:     { type, target, depth, compression, operations }
         matched_nodes: [{ id, label, ... }] from NodeResolver
         links:   [{ source, target, from, to, relation }, ...]
+        max_expanded: safety cap on total expanded nodes to prevent explosion
     
     Returns:
         { expanded: [node_id_set], by_depth: { depth: [node_id_set] } }
@@ -67,18 +68,22 @@ def plan_traversal(task: dict, matched_nodes: list, links: list) -> dict:
             if "outgoing" in directions or "both" in directions:
                 for neighbor in outgoing.get(nid, []):
                     if neighbor and neighbor not in visited:
+                        if len(visited) >= max_expanded:
+                            break
                         next_ids.add(neighbor)
                         visited.add(neighbor)
             if "incoming" in directions or "both" in directions:
                 for neighbor in incoming.get(nid, []):
                     if neighbor and neighbor not in visited:
+                        if len(visited) >= max_expanded:
+                            break
                         next_ids.add(neighbor)
                         visited.add(neighbor)
         if next_ids:
             by_depth[depth] = list(next_ids)
             expanded.update(next_ids)
         current = next_ids
-        if not current:
+        if not current or len(visited) >= max_expanded:
             break
 
     return {

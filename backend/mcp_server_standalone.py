@@ -21,6 +21,8 @@ import json
 import os
 import sys
 
+MCP_CONTEXT_CHARS = int(os.environ.get("MCP_CONTEXT_CHARS", "6000"))
+
 # Ensure the runtime module is importable
 RUNTIME_DIR = os.path.dirname(os.path.abspath(__file__))
 if RUNTIME_DIR not in sys.path:
@@ -46,11 +48,30 @@ def load_data():
 # ── Build project dict for retrieve_context ──
 
 def _build_project():
-    """Build a project dict that retrieva_context can use."""
+    """Build a project dict that retrieve_context can use."""
+    repo_dir = None
+    if args.graphify:
+        # graphify-out is inside the repo root, so go up one level
+        graphify_parent = os.path.dirname(args.graphify)
+        if os.path.basename(graphify_parent) == "graphify-out":
+            repo_dir = os.path.dirname(graphify_parent)
+        else:
+            # Walk up to find .git directory
+            candidate = graphify_parent
+            for _ in range(5):
+                if os.path.isdir(os.path.join(candidate, ".git")):
+                    repo_dir = candidate
+                    break
+                parent = os.path.dirname(candidate)
+                if parent == candidate:
+                    break
+                candidate = parent
+            if repo_dir is None:
+                repo_dir = graphify_parent
     return {
         "graphify_data": GRAPHIFY_DATA or {},
         "crg_db_path": CRG_DB or "",
-        "repo_dir": os.path.dirname(args.graphify) if args.graphify else None,
+        "repo_dir": repo_dir,
         "_G": None,
     }
 
@@ -62,7 +83,7 @@ def tool_search(query, limit=15):
     proj = _build_project()
     result = retrieve_context(proj, query)
     files = result.get("files", [])[:limit]
-    ctx = result.get("context", "")[:800]
+    ctx = result.get("context", "")[:MCP_CONTEXT_CHARS]
     return {"matches": files, "context": ctx}
 
 
@@ -72,7 +93,7 @@ def tool_callers(name, limit=15):
     proj = _build_project()
     result = retrieve_context(proj, query)
     files = result.get("files", [])[:limit]
-    ctx = result.get("context", "")[:800]
+    ctx = result.get("context", "")[:MCP_CONTEXT_CHARS]
     return {"matches": files, "context": ctx}
 
 
@@ -82,7 +103,7 @@ def tool_callees(name, limit=15):
     proj = _build_project()
     result = retrieve_context(proj, query)
     files = result.get("files", [])[:limit]
-    ctx = result.get("context", "")[:800]
+    ctx = result.get("context", "")[:MCP_CONTEXT_CHARS]
     return {"matches": files, "context": ctx}
 
 
@@ -92,7 +113,7 @@ def tool_impact(name, limit=15):
     proj = _build_project()
     result = retrieve_context(proj, query)
     files = result.get("files", [])[:limit]
-    ctx = result.get("context", "")[:800]
+    ctx = result.get("context", "")[:MCP_CONTEXT_CHARS]
     return {"matches": files, "context": ctx}
 
 
@@ -101,7 +122,7 @@ def tool_architecture(prompt, limit=15):
     proj = _build_project()
     result = retrieve_context(proj, prompt or "architecture overview")
     files = result.get("files", [])[:limit]
-    ctx = result.get("context", "")[:800]
+    ctx = result.get("context", "")[:MCP_CONTEXT_CHARS]
     return {"matches": files, "context": ctx}
 
 
@@ -111,7 +132,7 @@ def tool_tests(name, limit=15):
     proj = _build_project()
     result = retrieve_context(proj, query)
     files = result.get("files", [])[:limit]
-    ctx = result.get("context", "")[:800]
+    ctx = result.get("context", "")[:MCP_CONTEXT_CHARS]
     return {"matches": files, "context": ctx}
 
 

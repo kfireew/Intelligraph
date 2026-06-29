@@ -12,7 +12,7 @@ function normalizeModels(items) {
 
 export function useLLM() {
   const [llmUrl, setLlmUrl] = useState(
-    () => localStorage.getItem("llm-url") || "https://openrouter.ai/api/v1/chat/completions"
+    () => localStorage.getItem("llm-url") || ""
   );
   const [llmToken, setLlmToken] = useState(
     () => localStorage.getItem("llm-token") || ""

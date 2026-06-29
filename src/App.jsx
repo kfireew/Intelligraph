@@ -107,7 +107,7 @@ export default function App() {
           {activePanel === "guide" && (
             <motion.div key="guide" initial={{ opacity: 0 }} animate={{ opacity: 1 }}
               exit={{ opacity: 0 }} transition={{ duration: 0.15 }} className="flex flex-1 min-w-0">
-              <GuidePanel activePid={projects.activePid} />
+              <GuidePanel activePid={projects.activePid} activeProject={projects.activeProject} />
             </motion.div>
           )}
         </AnimatePresence>

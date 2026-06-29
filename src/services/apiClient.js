@@ -69,7 +69,6 @@ export const streamSse = async function* (url, options = {}) {
         const frame = JSON.parse(trimmed.slice(6));
         const event = frame.event;
         const data = frame.data;
-        if (data?.text) data.text = data.text.replace(/\u00e2\u0080\u0094/g, "--");
         yield { event, data };
       } catch {
         // skip unparseable frames

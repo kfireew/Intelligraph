@@ -175,41 +175,49 @@ export function useChat({ activePid, llmUrl, llmToken, model, onMatchedNodes, on
     // but also extract matchedNodes from the full response
     let matchedNodes = [];
     const richContextResp = await (async () => {
-      if (!activePid) return { context: trimmed, matchedNodes: [] };
+      if (!activePid) return { context: "", matchedNodes: [] };
       try {
         const resp = await fetch("/graph/retrieve-context", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ prompt: trimmed, project_id: activePid }),
         });
-        if (!resp.ok) return { context: trimmed, matchedNodes: [] };
+        if (!resp.ok) return { context: "", matchedNodes: [] };
         const data = await resp.json();
         matchedNodes = data.matched_nodes || [];
-        return { context: data.context || trimmed, matchedNodes };
+        return { context: data.context || "", matchedNodes };
       } catch {
-        return { context: trimmed, matchedNodes: [] };
+        return { context: "", matchedNodes: [] };
       }
     })();
     const richContext = richContextResp.context;
     if (onMatchedNodes && matchedNodes?.length) onMatchedNodes(matchedNodes);
-  console.log(`[Chat] context size: ${richContext.length} chars, pid: ${activePid}, matched: ${matchedNodes.length}`);
 
     if (!llmUrl) {
-      addMessage({ role: "assistant", content: "", metadata: { intent, route: { category: intent, label: intent } } }, targetConvId);
+      addMessage({ role: "assistant", content: "No LLM endpoint configured. Click the settings icon to set your LLM URL and token.", metadata: { intent, route: { category: intent, label: intent } } }, targetConvId);
       setStatus("idle");
       return;
     }
 
-    // Stream LLM
+    // Stream LLM — with conversation history (last 4 turns)
     setStatus("answering");
     let fullText = "";
     let pw = null;
     try {
+      // Build conversation history from prior messages (last 4 turns, truncated)
+      const priorMessages = (activeConv?.messages || []).slice(-8); // last 4 turns (user+assistant)
+      const historyMessages = priorMessages.map(m => ({
+        role: m.role,
+        content: m.content.length > 200 ? m.content.slice(0, 200) + "..." : m.content,
+      }));
+
       const payload = {
         model: model || undefined,
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: `${richContext}\n\nAnswer the user's query using the context above. Be specific, cite file paths.\n\n# User Query\n\n${trimmed}` },
+          ...(richContext ? [{ role: "system", content: `Project context:\n${richContext}` }] : []),
+          ...historyMessages,
+          { role: "user", content: trimmed },
         ],
         max_tokens: 4096,
         temperature: 0.2,
@@ -222,7 +230,7 @@ export function useChat({ activePid, llmUrl, llmToken, model, onMatchedNodes, on
           fullText += data.text || "";
           setStreamingContent(fullText);
         } else if (event === "done") {
-          fullText = (data.text || fullText).replace(/\u00e2\u0080\u0094/g, "--");
+          fullText = data.text || fullText;
           pw = data.path_warnings || null;
         } else if (event === "error") {
           console.error("SSE error:", data.message);
@@ -232,6 +240,11 @@ export function useChat({ activePid, llmUrl, llmToken, model, onMatchedNodes, on
       console.error("SSE stream failed:", e);
       // Fallback to sync
       try {
+        const priorMessages = (activeConv?.messages || []).slice(-8);
+        const historyMessages = priorMessages.map(m => ({
+          role: m.role,
+          content: m.content.length > 200 ? m.content.slice(0, 200) + "..." : m.content,
+        }));
         const j = await llmService.relay({
           url: llmUrl,
           token: llmToken,
@@ -239,7 +252,9 @@ export function useChat({ activePid, llmUrl, llmToken, model, onMatchedNodes, on
             model: model || undefined,
             messages: [
               { role: "system", content: SYSTEM_PROMPT },
-              { role: "user", content: `${richContext}\n\nAnswer the user's query using the context above. Be specific, cite file paths.\n\n# User Query\n\n${trimmed}` },
+              ...(richContext ? [{ role: "system", content: `Project context:\n${richContext}` }] : []),
+              ...historyMessages,
+              { role: "user", content: trimmed },
             ],
             max_tokens: 4096,
             temperature: 0.2,
@@ -247,8 +262,10 @@ export function useChat({ activePid, llmUrl, llmToken, model, onMatchedNodes, on
           projectId: activePid,
         });
         const body = JSON.parse(j.body || "{}");
-        fullText = (body.choices?.[0]?.message?.content || "").replace(/\u00e2\u0080\u0094/g, "--");
-      } catch {}
+        fullText = body.choices?.[0]?.message?.content || "";
+      } catch (err) {
+        fullText = `(LLM request failed: ${err.message || "unknown error"})`;
+      }
       if (!fullText) {
         fullText = "(No response -- the LLM returned empty output. Try rephrasing your question.)";
       }
@@ -257,7 +274,7 @@ export function useChat({ activePid, llmUrl, llmToken, model, onMatchedNodes, on
     setPathWarnings(pw);
     addMessage({
       role: "assistant",
-      content: fullText.replace(/\u00e2\u0080\u0094/g, "--"),
+      content: fullText,
       metadata: { intent, route: { category: intent, label: intent }, pathWarnings: pw },
     }, targetConvId);
     setStreamingContent("");

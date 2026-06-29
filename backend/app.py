@@ -164,7 +164,7 @@ def auth_login():
     if not OIDC_CONFIG:
         fetch_oidc_config()
     if not OIDC_CONFIG:
-        return jsonify({"error": "Cannot fetch OIDC config"}), 500
+        return jsonify({"error": "Cannot reach SSO provider. Check that OIDC_ISSUER is accessible from the container."}), 503
     state = secrets.token_urlsafe(16)
     session["oidc_state"] = state
     params = {
@@ -181,17 +181,24 @@ def auth_login():
 def auth_callback():
     if request.args.get("state") != session.pop("oidc_state", None):
         return "Invalid state", 400
-    token_resp = requests.post(OIDC_CONFIG["token_endpoint"], data={
-        "grant_type": "authorization_code", "code": request.args.get("code"),
-        "redirect_uri": url_for("auth_callback", _external=True),
-        "client_id": OIDC_CLIENT_ID, "client_secret": OIDC_CLIENT_SECRET,
-    }, timeout=10).json()
-    access_token = token_resp.get("access_token")
-    if not access_token:
-        return f"Token error: {token_resp.get('error_description', 'unknown')}", 400
-    userinfo = requests.get(OIDC_CONFIG["userinfo_endpoint"],
-                            headers={"Authorization": f"Bearer {access_token}"},
-                            timeout=10).json()
+    try:
+        token_resp = requests.post(OIDC_CONFIG["token_endpoint"], data={
+            "grant_type": "authorization_code", "code": request.args.get("code"),
+            "redirect_uri": url_for("auth_callback", _external=True),
+            "client_id": OIDC_CLIENT_ID, "client_secret": OIDC_CLIENT_SECRET,
+        }, timeout=10).json()
+        access_token = token_resp.get("access_token")
+        if not access_token:
+            return f"Token error: {token_resp.get('error_description', 'unknown')}", 400
+        userinfo = requests.get(OIDC_CONFIG["userinfo_endpoint"],
+                                headers={"Authorization": f"Bearer {access_token}"},
+                                timeout=10).json()
+    except requests.exceptions.Timeout:
+        return "SSO provider timed out during callback", 504
+    except requests.exceptions.ConnectionError:
+        return "Cannot reach SSO provider during callback", 502
+    except Exception as e:
+        return f"SSO callback error: {str(e)[:200]}", 502
     session["user"] = {
         "name": userinfo.get("preferred_username") or userinfo.get("email", "unknown"),
         "email": userinfo.get("email", ""),
@@ -221,9 +228,9 @@ def auth_me():
 
 # ── LLM relay ────────────────────────────────────────────────────
 
-ALLOWED_LLM_HOSTS = set(os.environ.get(
-    "LLM_ALLOWED_HOSTS", "ai-services.ai.idf.cts,litellm-api.up.railway.app,openrouter.ai"
-).split(","))
+ALLOWED_LLM_HOSTS = set(h.strip() for h in os.environ.get(
+    "LLM_ALLOWED_HOSTS", "models.al-services.idf.cts"
+).split(",") if h.strip())
 
 @app.route("/llm/relay", methods=["POST"])
 def llm_relay():
@@ -248,9 +255,13 @@ def llm_relay():
         headers["X-Title"] = "Intelligraph"
 
     try:
-        resp = requests.post(llm_url, json=payload, headers=headers, timeout=30)
+        resp = requests.post(llm_url, json=payload, headers=headers, timeout=int(os.environ.get("INTELLIGRAPH_LLM_TIMEOUT", "120")))
         resp.encoding = "utf-8"
-        return jsonify({"status": resp.status_code, "body": resp.text[:8000]})
+        return jsonify({"status": resp.status_code, "body": resp.text})
+    except requests.exceptions.Timeout:
+        return jsonify({"error": "LLM request timed out"}), 504
+    except requests.exceptions.ConnectionError:
+        return jsonify({"error": "Cannot reach LLM provider"}), 503
     except Exception as e:
         return jsonify({"error": str(e)}), 502
 
@@ -284,31 +295,24 @@ def llm_relay_stream():
         full_text = ""
         try:
             yield f"data: {json.dumps({'event': 'start', 'data': {}})}\n\n"
-            resp = requests.post(llm_url, json=p, headers=headers, timeout=120)
+            # Force stream=True on the upstream request for true SSE streaming
+            p = dict(payload)
+            p.setdefault("stream", True)
+            resp = requests.post(llm_url, json=p, headers=headers, timeout=int(os.environ.get("INTELLIGRAPH_LLM_TIMEOUT", "120")), stream=True)
             if resp.status_code != 200:
+                resp.encoding = "utf-8"
                 yield f"data: {json.dumps({'event': 'error', 'data': {'message': f'LLM returned {resp.status_code}: {resp.text[:200]}'}})}\n\n"
                 return
 
-            # Try JSON first — handles providers that misreport content-type as SSE
             content_type = resp.headers.get("content-type", "")
-            resp.encoding = "utf-8"
-            text = None
-            try:
-                body = resp.json()
-                text = body.get("choices", [{}])[0].get("message", {}).get("content") or None
-            except Exception:
-                pass
 
-            if text:
-                full_text = text
-                yield f"data: {json.dumps({'event': 'token', 'data': {'text': text}})}\n\n"
-            elif "text/event-stream" in content_type:
-                # True SSE — parse data frames for delta content
+            if "text/event-stream" in content_type:
+                # True SSE — parse delta frames as they arrive
                 current_frame = []
-                for line in resp.iter_lines(decode_unicode=True):
-                    if line is None:
+                for raw_line in resp.iter_lines(decode_unicode=True):
+                    if raw_line is None:
                         continue
-                    line = line.rstrip("\r")
+                    line = raw_line.rstrip("\r")
                     if line == "":
                         for frame_line in current_frame:
                             if frame_line.startswith("data: ") and "[DONE]" not in frame_line:
@@ -324,8 +328,24 @@ def llm_relay_stream():
                     else:
                         current_frame.append(line)
             else:
-                full_text = resp.text[:500]
-                yield f"data: {json.dumps({'event': 'token', 'data': {'text': full_text}})}\n\n"
+                # Non-SSE response (JSON) — emit full text then split into word-level tokens for UX
+                resp.encoding = "utf-8"
+                text = None
+                try:
+                    body = resp.json()
+                    text = body.get("choices", [{}])[0].get("message", {}).get("content") or None
+                except Exception:
+                    pass
+                if text:
+                    full_text = text
+                    # Emit in word-level chunks for progressive display
+                    words = text.split(" ")
+                    for i, w in enumerate(words):
+                        chunk = w + (" " if i < len(words) - 1 else "")
+                        yield f"data: {json.dumps({'event': 'token', 'data': {'text': chunk}})}\n\n"
+                else:
+                    full_text = resp.text[:500]
+                    yield f"data: {json.dumps({'event': 'token', 'data': {'text': full_text}})}\n\n"
 
             done_data = {"text": full_text}
             if project_id is not None:
@@ -333,6 +353,10 @@ def llm_relay_stream():
                 if warnings:
                     done_data["path_warnings"] = warnings
             yield f"data: {json.dumps({'event': 'done', 'data': done_data})}\n\n"
+        except requests.exceptions.Timeout:
+            yield f"data: {json.dumps({'event': 'error', 'data': {'message': 'LLM request timed out'}})}\n\n"
+        except requests.exceptions.ConnectionError:
+            yield f"data: {json.dumps({'event': 'error', 'data': {'message': 'Cannot reach LLM provider'}})}\n\n"
         except Exception as e:
             yield f"data: {json.dumps({'event': 'error', 'data': {'message': str(e)}})}\n\n"
 
@@ -464,6 +488,56 @@ def list_projects():
                     "has_crg": bool(p.get("crg_db_path") and os.path.exists(p.get("crg_db_path", "")))}
                    for pid, p in _projects().items()])
 
+
+# ── Git helpers ────────────────────────────────────────────────────
+
+def _git_auth_args(access_token=None):
+    """Build git -c arguments for SSL + Bearer auth, matching manual working command.
+
+    Returns list like:
+      ["-c", "http.sslVerify=false", "-c", "http.extraHeader=Authorization: Bearer <token>"]
+    """
+    args = ["-c", "http.sslVerify=false"]
+    if access_token:
+        args += ["-c", f"http.extraHeader=Authorization: Bearer {access_token}"]
+    return args
+
+
+def _git_env():
+    """Minimal git env — no token in here, just suppress interactive prompts."""
+    return {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+
+
+def redact_secret(text, token=None):
+    """Replace token or BBDC- patterns with [REDACTED]."""
+    import re as _re
+    result = text
+    if token and token in result:
+        result = result.replace(token, "[REDACTED]")
+    result = _re.sub(r"BBDC-[A-Za-z0-9+/=_-]+", "[REDACTED]", result)
+    result = _re.sub(r"Authorization: Bearer\s+\S+", "Authorization: Bearer [REDACTED]", result)
+    return result
+
+
+def _clean_remote_url(repo_dir):
+    """Ensure no token leaked into git remote origin URL."""
+    try:
+        r = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=repo_dir, capture_output=True, text=True, timeout=10, env=_git_env(),
+        )
+        if r.returncode == 0:
+            url = r.stdout.strip()
+            if "BBDC-" in url or "x-token-auth:" in url or "://" in url and "@" in url.split("://", 1)[-1]:
+                cleaned = url.split("://", 1)[0] + "://" + url.split("://", 1)[-1].split("@", 1)[-1]
+                subprocess.run(
+                    ["git", "remote", "set-url", "origin", cleaned],
+                    cwd=repo_dir, capture_output=True, timeout=10, env=_git_env(),
+                )
+                app.logger.warning("Cleaned embedded credentials from remote origin in %s", repo_dir)
+    except Exception:
+        pass  # non-fatal
+
 @app.route("/projects/clone", methods=["POST"])
 def clone_project():
     try:
@@ -487,9 +561,43 @@ def clone_project():
             repo_dir = os.path.join(REPO_DIR, f"{_user_key()}-{pid}-{uuid.uuid4().hex[:12]}")
             os.makedirs(repo_dir)
 
-            # ── Clone URL with optional credentials ──
+            auth_mode = data.get("auth_mode")
+            use_bearer = auth_mode == "bitbucket_datacenter_bearer"
+
+            if use_bearer and access_token is None:
+                return jsonify({"error": "missing_repo_credentials", "message": "Provide a Bitbucket Data Center HTTP access token for Bearer auth."}), 400
+
+            # ── Dry-run: return redacted command shape, no git calls ──
+            if data.get("dry_run"):
+                _projects().pop(pid, None)
+                redacted_token = access_token if (use_bearer and access_token) else None
+                git_auth = _git_auth_args(access_token=redacted_token)
+                def _redact_cmd(cmd_list):
+                    return [redact_secret(c, redacted_token) for c in cmd_list]
+                preflight_cmd = _redact_cmd(["git"] + git_auth + ["ls-remote", git_url])
+                clone_cmd = _redact_cmd(["git"] + git_auth + ["clone", "--depth", "1", git_url, "<repo_dir>"])
+                result = {
+                    "ok": True, "dry_run": True,
+                    "git_url": git_url,
+                    "auth_mode": auth_mode or None,
+                    "token_present": access_token is not None,
+                    "token_prefix": access_token[:5] + "..." if access_token else None,
+                    "token_length": len(access_token) if access_token else 0,
+                    "preflight_cmd_redacted": preflight_cmd,
+                    "clone_cmd_redacted": clone_cmd,
+                    "git_terminal_prompt": "0",
+                }
+                return jsonify(result)
+
+            # ── Auth mode ──
+            # Build git -c args (matches working manual command)
+            git_auth = _git_auth_args(access_token=access_token if use_bearer else None)
+            git_env = _git_env()
+
+            # Clone URL stays clean — token goes in http.extraHeader, not the URL
             clone_url = git_url
-            if "bitbucket" in git_url.lower():
+            if not use_bearer and "bitbucket" in git_url.lower():
+                # Backward compat: URL-embedding fallback
                 use_token = access_token or session.get("oidc_access_token", "")
                 if use_token:
                     try:
@@ -499,27 +607,56 @@ def clone_project():
                     except (ValueError, IndexError):
                         app.logger.warning("Could not parse git URL for token embedding")
 
-            proj["status"] = "building"
-            r = subprocess.run(["git", "clone", "--depth", "1", clone_url, repo_dir],
-                             capture_output=True, text=True, timeout=120)
+            r = subprocess.run(["git"] + git_auth + ["ls-remote", clone_url],
+                             capture_output=True, text=True, timeout=30, env=git_env)
             if r.returncode != 0:
                 _projects().pop(pid, None)
-                return jsonify({"error": r.stderr[:500]}), 500
+                err = (r.stderr or "").lower()
+                if use_bearer and ("401" in err or "403" in err or "authentication" in err or "access denied" in err or "could not read" in err):
+                    return jsonify({"error": "bitbucket_auth_failed", "message": "Bitbucket rejected the Bearer token. Check repo read permission."}), 401
+                if "not found" in err or "could not read" in err:
+                    return jsonify({"error": "repo_not_found_or_no_access", "message": "Repository was not found or the token does not have access."}), 500
+                if "certificate" in err or "tls" in err or "ssl" in err or "verify" in err:
+                    return jsonify({"error": "git_tls_ca_untrusted", "message": "Git SSL certificate verification error (http.sslVerify=false is set). The Bitbucket server SSL certificate may be misconfigured. Contact your infrastructure team."}), 500
+                return jsonify({"error": "clone_failed", "message": redact_secret(r.stderr[:500], access_token)}), 500
+
+            # ── Clone (same -c flags) ──
+            proj["status"] = "building"
+            r = subprocess.run(["git"] + git_auth + ["clone", "--depth", "1", clone_url, repo_dir],
+                             capture_output=True, text=True, timeout=120, env=git_env)
+            if r.returncode != 0:
+                _projects().pop(pid, None)
+                return jsonify({"error": "clone_failed", "message": redact_secret(r.stderr[:500], access_token)}), 500
+
+            # Scrub any leaked token from remote origin
+            _clean_remote_url(repo_dir)
             _save_project(pid, proj)
 
-            # graphify update
-            r = subprocess.run(["graphify", "update", "."], cwd=repo_dir,
-                             capture_output=True, text=True, timeout=120)
-            if r.returncode != 0:
-                app.logger.warning("graphify update failed (rc=%d): %s",
-                                   r.returncode, r.stderr[:200])
+            # graphify update — cap workers to prevent CPU saturation
+            graphify_env = {**os.environ, "GRAPHIFY_MAX_WORKERS": os.environ.get("GRAPHIFY_MAX_WORKERS", "4")}
+            try:
+                r = subprocess.run(["graphify", "update", "."], cwd=repo_dir,
+                                 capture_output=True, text=True, timeout=300, env=graphify_env)
+                if r.returncode != 0:
+                    app.logger.warning("graphify update failed (rc=%d): %s",
+                                       r.returncode, r.stderr[:200])
+            except subprocess.TimeoutExpired:
+                app.logger.warning("graphify update timed out after 300s — continuing with partial data")
+            except FileNotFoundError:
+                app.logger.warning("graphify CLI not found — skipping graph build")
 
-            # code-review-graph build
-            r = subprocess.run(["code-review-graph", "build"], cwd=repo_dir,
-                              capture_output=True, text=True, timeout=120)
-            if r.returncode != 0:
-                app.logger.warning("code-review-graph build failed (rc=%d): %s",
-                                   r.returncode, r.stderr[:200])
+            # code-review-graph build — cap workers to prevent CPU saturation
+            crg_env = {**os.environ, "CRG_PARSE_WORKERS": os.environ.get("CRG_PARSE_WORKERS", "4")}
+            try:
+                r = subprocess.run(["code-review-graph", "build"], cwd=repo_dir,
+                                  capture_output=True, text=True, timeout=300, env=crg_env)
+                if r.returncode != 0:
+                    app.logger.warning("code-review-graph build failed (rc=%d): %s",
+                                       r.returncode, r.stderr[:200])
+            except subprocess.TimeoutExpired:
+                app.logger.warning("code-review-graph build timed out after 300s — continuing with partial data")
+            except FileNotFoundError:
+                app.logger.warning("code-review-graph CLI not found — skipping CRG build")
 
             # Parse results
             gf_path = os.path.join(repo_dir, "graphify-out", "graph.json")
@@ -592,7 +729,19 @@ def clone_project():
     except Exception as e:
         import traceback
         app.logger.warning("Clone error [%s]: %s\n%s", _user_key(), str(e)[:500], traceback.format_exc())
-        return jsonify({"error": str(e)[:500]}), 500
+        return jsonify({"error": redact_secret(str(e)[:500], access_token)}), 500
+
+
+@app.route("/projects/<int:pid>", methods=["GET"])
+def get_project(pid):
+    proj = _projects().get(pid)
+    if not proj:
+        return jsonify({"error": "project not found"}), 404
+    return jsonify({"id": pid, "name": proj.get("name"), "status": proj.get("status"),
+                    "nodes": proj.get("nodes", 0), "edges": proj.get("edges", 0),
+                    "has_graphify": bool(proj.get("graphify_data")),
+                    "has_crg": bool(proj.get("crg_db_path") and os.path.exists(proj.get("crg_db_path", ""))),
+                    "workspace_type": proj.get("workspace_type", "standard")})
 
 
 @app.route("/projects/<int:pid>", methods=["PATCH"])
@@ -833,7 +982,12 @@ def graph_retrieve_context():
         return jsonify({"context": "", "files": [], "strategy": "no_project", "plan": {}}), 200
 
     from retrieval import retrieve_context
-    result = retrieve_context(proj, prompt)
+    try:
+        result = retrieve_context(proj, prompt)
+    except Exception as e:
+        app.logger.warning("retrieve_context failed: %s", e, exc_info=True)
+        result = {"context": "", "files": [], "strategy": "retrieval_error", "plan": {},
+                  "matched_nodes": [], "context_stats": {"error": str(e)[:200]}}
     return jsonify(result)
 
 
@@ -919,9 +1073,11 @@ def project_completions(pid):
 
     # Build fresh LLM messages: system + context + prompt
     system_msg = (
-        "You are a code analysis assistant. "
-        "Answer questions about the project based solely on the provided context. "
-        "Cite file paths when referencing code."
+        "You are an expert software architect helping a developer understand a codebase. "
+        "Give a direct, concise answer. Do not output your thinking process or say \"Let me analyze\" -- just answer. "
+        "Use the provided context as your only source of truth. Mention specific file paths. "
+        "If context is insufficient, state what is missing. "
+        "Do not invent files, functions, imports, or APIs. Format file references as a markdown list with newlines."
     )
     messages = [{"role": "system", "content": system_msg}]
     if retrieved:
@@ -929,12 +1085,11 @@ def project_completions(pid):
     else:
         messages.append({"role": "user", "content": prompt})
 
-    # No previous messages appended — this is a clean completion
     payload = {
         "model": model,
         "messages": messages,
         "max_tokens": 4096,
-        "temperature": 0.3,
+        "temperature": 0.2,
     }
 
     headers = {"Content-Type": "application/json"}
@@ -947,7 +1102,7 @@ def project_completions(pid):
     trace_id = f"req_{uuid.uuid4().hex[:12]}"
 
     try:
-        resp = requests.post(llm_url, json=payload, headers=headers, timeout=60)
+        resp = requests.post(llm_url, json=payload, headers=headers, timeout=int(os.environ.get("INTELLIGRAPH_LLM_TIMEOUT", "120")))
         resp.encoding = "utf-8"
         if resp.status_code != 200:
             return jsonify({
@@ -996,12 +1151,11 @@ def project_completions(pid):
 
 @app.route("/")
 def index():
-    # Serve React production build if available
     react_dist = os.path.join(os.path.dirname(__file__), "..", "dist")
     react_index = os.path.join(react_dist, "index.html")
     if os.path.isfile(react_index):
         return send_file(react_index)
-    return render_template("index.html", oidc_configured=bool(OIDC_ISSUER))
+    return jsonify({"error": "Frontend build (dist/) not found. Build with npm run build."}), 503
 
 
 @app.route("/assets/<path:filename>")

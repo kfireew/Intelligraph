@@ -168,9 +168,18 @@ def retrieve_context(proj: dict, prompt: str) -> dict:
         from resolver import resolve_nodes
         matched = resolve_nodes(task["target"], graphify_data)
 
-        # Architecture tasks: always prefer graph-heuristic seeding over
-        # document/label matches (e.g. "architecture" matches README.md labels)
-        if task["type"] == "architecture":
+        # Architecture tasks: merge resolver matches with graph-heuristic seeding
+        # (was: replace resolver output entirely — now we keep both for better targeting)
+        if task["type"] == "architecture" and matched:
+            arch_seeds = _seed_architecture_fallback(graphify_data, links, node_map)
+            # Merge: keep resolver matches first, add arch seeds not already present
+            seen_ids = {n.get("id") or n.get("label") for n in matched}
+            for n in arch_seeds:
+                nid = n.get("id") or n.get("label")
+                if nid and nid not in seen_ids:
+                    matched.append(n)
+                    seen_ids.add(nid)
+        elif task["type"] == "architecture" and not matched:
             matched = _seed_architecture_fallback(graphify_data, links, node_map)
         elif not matched:
             # Fall back to BFS against community hubs for other unmatched queries
@@ -183,7 +192,7 @@ def retrieve_context(proj: dict, prompt: str) -> dict:
         # ── NeighborhoodRanker: rank expanded set ──
         from ranker import rank_neighborhood, build_degree_scores
         expanded_ids = traversal.get("expanded", [])
-        ranked = rank_neighborhood(expanded_ids, graphify_data, node_map)
+        ranked = rank_neighborhood(expanded_ids, graphify_data, node_map, query=prompt)
 
         # ── If no traversal matches, seed from matched/fallback files ──
         if not ranked:
@@ -207,7 +216,7 @@ def retrieve_context(proj: dict, prompt: str) -> dict:
                 from crg_domain_finder import find_domain_files_with_crg, get_crg_db_path
                 crg_path = get_crg_db_path(proj)
                 if crg_path:
-                    crg_domain_files = find_domain_files_with_crg(crg_path, prompt, repo_dir=proj.get("repo_dir"), max_files=12)
+                    crg_domain_files = find_domain_files_with_crg(crg_path, prompt, repo_dir=proj.get("repo_dir"), max_files=12, graphify_data=graphify_data)
                     # Merge CRG domain files into ranking with combined scores
                     ranked = merge_graphify_and_crg_candidates(ranked, crg_domain_files)
                     # Rescue: swap in CRG files if none in top 15
