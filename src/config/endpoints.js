@@ -12,7 +12,6 @@ export const endpoints = {
 
   // LLM
   llmRelay: "/llm/relay",
-  llmRelayStream: "/llm/relay/stream",
 
   // Downloads
   downloadMCPServer: "/download/mcp-server",

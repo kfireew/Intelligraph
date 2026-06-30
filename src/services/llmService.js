@@ -1,4 +1,4 @@
-import { requestJson, streamSse } from "./apiClient";
+import { requestJson } from "./apiClient";
 import { endpoints } from "../config/endpoints";
 
 export const llmService = {
@@ -7,12 +7,4 @@ export const llmService = {
       method: "POST",
       body: JSON.stringify({ url, token, payload, project_id: projectId }),
     }),
-
-  relayStream: async function* ({ url, token, payload, projectId }) {
-    yield* streamSse(endpoints.llmRelayStream, {
-      method: "POST",
-      body: JSON.stringify({ url, token, payload, project_id: projectId }),
-    });
-  },
-
 };

@@ -199,75 +199,46 @@ export function useChat({ activePid, llmUrl, llmToken, model, onMatchedNodes, on
       return;
     }
 
-    // Stream LLM — with conversation history (last 4 turns)
+    // LLM call — non-streaming relay (LLM provider doesn't support streaming)
     setStatus("answering");
     let fullText = "";
     let pw = null;
     try {
-      // Build conversation history from prior messages (last 4 turns, truncated)
-      const priorMessages = (activeConv?.messages || []).slice(-8); // last 4 turns (user+assistant)
+      const priorMessages = (activeConv?.messages || []).slice(-8);
       const historyMessages = priorMessages.map(m => ({
         role: m.role,
         content: m.content.length > 200 ? m.content.slice(0, 200) + "..." : m.content,
       }));
 
-      const payload = {
-        model: model || undefined,
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          ...(richContext ? [{ role: "system", content: `Project context:\n${richContext}` }] : []),
-          ...historyMessages,
-          { role: "user", content: trimmed },
-        ],
-        max_tokens: 4096,
-        temperature: 0.2,
-      };
+      const j = await llmService.relay({
+        url: llmUrl,
+        token: llmToken,
+        payload: {
+          model: model || undefined,
+          messages: [
+            { role: "system", content: SYSTEM_PROMPT },
+            ...(richContext ? [{ role: "system", content: `Project context:\n${richContext}` }] : []),
+            ...historyMessages,
+            { role: "user", content: trimmed },
+          ],
+          max_tokens: 4096,
+          temperature: 0.2,
+        },
+        projectId: activePid,
+      });
 
-      const stream = llmService.relayStream({ url: llmUrl, token: llmToken, payload, projectId: activePid });
-      for await (const { event, data } of stream) {
-        if (event === "token") {
-          fullText += data.text || "";
-          setStreamingContent(fullText);
-        } else if (event === "done") {
-          fullText = data.text || fullText;
-          pw = data.path_warnings || null;
-        } else if (event === "error") {
-          console.error("SSE error:", data.message);
+      if (j.status !== 200) {
+        const errBody = JSON.parse(j.body || "{}");
+        fullText = `(LLM error ${j.status}: ${errBody.error?.message || errBody.detail || j.body?.slice(0, 200) || "unknown"})`;
+      } else {
+        const body = JSON.parse(j.body || "{}");
+        fullText = body.choices?.[0]?.message?.content || "";
+        if (!fullText) {
+          fullText = "(No response -- the LLM returned empty output. Try rephrasing your question.)";
         }
       }
     } catch (e) {
-      console.error("SSE stream failed:", e);
-      // Fallback to sync
-      try {
-        const priorMessages = (activeConv?.messages || []).slice(-8);
-        const historyMessages = priorMessages.map(m => ({
-          role: m.role,
-          content: m.content.length > 200 ? m.content.slice(0, 200) + "..." : m.content,
-        }));
-        const j = await llmService.relay({
-          url: llmUrl,
-          token: llmToken,
-          payload: {
-            model: model || undefined,
-            messages: [
-              { role: "system", content: SYSTEM_PROMPT },
-              ...(richContext ? [{ role: "system", content: `Project context:\n${richContext}` }] : []),
-              ...historyMessages,
-              { role: "user", content: trimmed },
-            ],
-            max_tokens: 4096,
-            temperature: 0.2,
-          },
-          projectId: activePid,
-        });
-        const body = JSON.parse(j.body || "{}");
-        fullText = body.choices?.[0]?.message?.content || "";
-      } catch (err) {
-        fullText = `(LLM request failed: ${err.message || "unknown error"})`;
-      }
-      if (!fullText) {
-        fullText = "(No response -- the LLM returned empty output. Try rephrasing your question.)";
-      }
+      fullText = `(LLM request failed: ${e.message || "unknown error"})`;
     }
 
     setPathWarnings(pw);
