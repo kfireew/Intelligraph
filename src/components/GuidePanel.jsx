@@ -92,33 +92,36 @@ export function GuidePanel({ activePid, activeProject }) {
         {activeProject && (
           <div className="mb-3 p-2 rounded-lg bg-accent/5 border border-accent/10">
             <p className="text-xs text-text-secondary m-0">
-              Project: <span className="text-text font-semibold">{activeProject.name}</span> &nbsp;|&nbsp; ID: <span className="text-accent-light font-mono">{pid}</span> &nbsp;|&nbsp; Status: <span className={isReady ? "text-green" : "text-yellow-400"}>{activeProject.status}</span>
+              Project: <span className="text-text font-semibold">{activeProject.name}</span> &nbsp;|&nbsp; ID: <span className="text-accent-light font-mono">{pid}</span> &nbsp;|&nbsp; Status: <span className={isReady ? "text-green" : "text-yellow-400"}>{activeProject.status}</span> &nbsp;|&nbsp; Nodes: <span className="text-accent-light font-mono">{activeProject.nodes || 0}</span> &nbsp;|&nbsp; Edges: <span className="text-accent-light font-mono">{activeProject.edges || 0}</span>
             </p>
           </div>
         )}
 
         {/* Project Completions */}
         <div className="space-y-3">
-          <div>
-            <p className="text-xs text-text-secondary m-0 leading-relaxed mb-2">
-              Send a question about your codebase and get an AI-powered answer with context from the code graph.
-            </p>
-          </div>
-
-          {!activeProject ? null : !isReady ? (
-            <p className="text-xs text-muted-subtle m-0">Project is still {activeProject.status}. Wait for it to finish before using the API.</p>
+          {!activeProject ? (
+            <p className="text-xs text-muted-subtle m-0">Select a project on the left. The endpoint, cURL, and n8n config below will auto-fill with that project's ID and your container URL.</p>
+          ) : !isReady ? (
+            <p className="text-xs text-muted-subtle m-0">Project is still <span className="text-yellow-400">{activeProject.status}</span>. Wait for it to finish before using the API.</p>
           ) : (
             <>
-              <CodeBlock id="endpoint" label="Endpoint URL" code={`POST ${fullCompletionsUrl}`} />
+              <div>
+                <p className="text-xs text-text-secondary m-0 mb-1 leading-relaxed">
+                  Send a POST with a <code className="px-1 py-0.5 rounded bg-accent/10 text-accent-light text-[11px] font-mono">prompt</code> and your LLM credentials. Intelligraph retrieves relevant code context from the graph and sends it to the LLM for you.
+                </p>
+              </div>
 
-              <details className="mt-2">
-                <summary className="text-[11px] font-bold text-muted cursor-pointer hover:text-text transition-colors">cURL example</summary>
-                <div className="mt-2"><CodeBlock id="curl" code={curlExample} /></div>
-              </details>
+              <CodeBlock id="endpoint" label={`Endpoint for "${activeProject.name}"`} code={`POST ${fullCompletionsUrl}`} />
 
-              <details className="mt-2">
-                <summary className="text-[11px] font-bold text-muted cursor-pointer hover:text-text transition-colors">n8n example</summary>
-                <div className="mt-2"><CodeBlock id="n8n" code={JSON.stringify({
+              <div className="mt-3">
+                <p className="text-[11px] font-bold text-muted uppercase tracking-wider mb-1.5">cURL — copy &amp; paste</p>
+                <CodeBlock id="curl" code={curlExample} />
+              </div>
+
+              <div className="mt-3">
+                <p className="text-[11px] font-bold text-muted uppercase tracking-wider mb-1.5">n8n HTTP Request node</p>
+                <p className="text-[10px] text-muted-subtle m-0 mb-1.5">Set Method = POST, URL = the endpoint above, Auth = Bearer. Body parameters:</p>
+                <CodeBlock id="n8n" code={JSON.stringify({
                   method: "POST",
                   url: fullCompletionsUrl,
                   authentication: "genericCredentialType",
@@ -132,6 +135,17 @@ export function GuidePanel({ activePid, activeProject }) {
                       { name: "llm_token", value: "YOUR-TOKEN-HERE" },
                     ],
                   },
+                }, null, 2)} />
+              </div>
+
+              <details className="mt-3">
+                <summary className="text-[11px] font-bold text-muted cursor-pointer hover:text-text transition-colors">What the response looks like</summary>
+                <div className="mt-2"><CodeBlock id="respExample" code={JSON.stringify({
+                  answer: "The authentication module lives in src/auth/...",
+                  model: "qwen/Qwen2.5-Coder-7B-Instruct",
+                  context_used: true,
+                  context_stats: { chunks: 12, tokens: 3400 },
+                  path_warnings: [],
                 }, null, 2)} /></div>
               </details>
             </>
