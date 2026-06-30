@@ -242,69 +242,9 @@ ALLOWED_LLM_HOSTS = set(h.strip() for h in os.environ.get(
     "LLM_ALLOWED_HOSTS", "models.ai-services.idf.cts"
 ).split(",") if h.strip())
 
-def _llm_url_variants(llm_url):
-    """Generate URL variants to try when the primary URL returns 405.
-
-    Some LiteLLM deployments only accept /chat/completions (no /v1 prefix)
-    or /completions instead of /v1/chat/completions.
-    Returns a list of (url, is_completions_api) tuples.
-    """
-    base = llm_url.rstrip("/")
-    variants = [(base, False)]
-    # Try without /v1 prefix
-    no_v1 = re.sub(r"/v1/chat/completions/?$", "/chat/completions", base)
-    if no_v1 != base:
-        variants.append((no_v1, False))
-    # Try /completions (text completions API — different payload format)
-    as_completions = re.sub(r"/v1/chat/completions/?$", "/v1/completions", base)
-    if as_completions != base:
-        no_v1_completions = re.sub(r"/v1/completions/?$", "/completions", as_completions)
-        variants.append((as_completions, True))
-        variants.append((no_v1_completions, True))
-    return variants
-
-
-def _convert_to_completions_payload(payload):
-    """Convert chat completions payload to text completions format."""
-    messages = payload.get("messages", [])
-    # Flatten messages into a single prompt
-    parts = []
-    for msg in messages:
-        role = msg.get("role", "user")
-        content = msg.get("content", "")
-        if role == "system":
-            parts.append(f"[System]: {content}")
-        elif role == "user":
-            parts.append(content)
-        elif role == "assistant":
-            parts.append(f"[Assistant]: {content}")
-    prompt = "\n\n".join(parts)
-    return {
-        "model": payload.get("model", ""),
-        "prompt": prompt,
-        "max_tokens": payload.get("max_tokens", 4096),
-        "temperature": payload.get("temperature", 0.2),
-    }
-
-
-def _parse_completions_response(body):
-    """Convert text completions response to chat completions format."""
-    try:
-        data = json.loads(body) if isinstance(body, str) else body
-        text = data.get("choices", [{}])[0].get("text", "")
-        data["choices"] = [{"message": {"content": text, "role": "assistant"}, "index": 0, "finish_reason": "stop"}]
-        return json.dumps(data)
-    except Exception:
-        return body
-
-
 @app.route("/llm/relay", methods=["POST"])
 def llm_relay():
-    """Relay LLM requests — forwards user's LLM call through the pod.
-
-    Tries multiple URL variants if the primary returns 405 (method not allowed).
-    Some LiteLLM deployments use /chat/completions or /completions instead of /v1/chat/completions.
-    """
+    """Relay LLM requests — forwards user's LLM call through the pod."""
     data = request.get_json(force=True)
     llm_url = data.get("url", "").strip()
     llm_token = data.get("token", "").strip()
@@ -324,35 +264,16 @@ def llm_relay():
         headers["HTTP-Referer"] = "https://localhost"
         headers["X-Title"] = "Intelligraph"
 
-    timeout = int(os.environ.get("INTELLIGRAPH_LLM_TIMEOUT", "120"))
-    variants = _llm_url_variants(llm_url)
-    last_status = 0
-    last_body = ""
-
-    for url, is_completions_api in variants:
-        p = _convert_to_completions_payload(payload) if is_completions_api else payload
-        try:
-            resp = requests.post(url, json=p, headers=headers, timeout=timeout, verify=LLM_SSL_VERIFY)
-            resp.encoding = "utf-8"
-            last_status = resp.status_code
-            last_body = resp.text
-            if resp.status_code == 200:
-                if is_completions_api:
-                    last_body = _parse_completions_response(resp.text)
-                return jsonify({"status": resp.status_code, "body": last_body})
-            if resp.status_code != 405:
-                # Non-405 error — return immediately
-                return jsonify({"status": resp.status_code, "body": resp.text})
-            # 405 → try next variant
-        except requests.exceptions.Timeout:
-            return jsonify({"error": "LLM request timed out"}), 504
-        except requests.exceptions.ConnectionError:
-            return jsonify({"error": "Cannot reach LLM provider"}), 503
-        except Exception as e:
-            return jsonify({"error": str(e)}), 502
-
-    # All variants returned 405
-    return jsonify({"status": 405, "body": last_body or '{"detail":"method not allowed"}'})
+    try:
+        resp = requests.post(llm_url, json=payload, headers=headers, timeout=int(os.environ.get("INTELLIGRAPH_LLM_TIMEOUT", "120")), verify=LLM_SSL_VERIFY)
+        resp.encoding = "utf-8"
+        return jsonify({"status": resp.status_code, "body": resp.text})
+    except requests.exceptions.Timeout:
+        return jsonify({"error": "LLM request timed out"}), 504
+    except requests.exceptions.ConnectionError:
+        return jsonify({"error": "Cannot reach LLM provider"}), 503
+    except Exception as e:
+        return jsonify({"error": str(e)}), 502
 
 
 @app.route("/llm/relay/stream", methods=["POST"])
@@ -384,31 +305,13 @@ def llm_relay_stream():
         full_text = ""
         try:
             yield f"data: {json.dumps({'event': 'start', 'data': {}})}\n\n"
-            # Use HTTP stream=True for response streaming, but don't force stream param on LLM API
             p = dict(payload)
-            p.pop("stream", None)  # remove stream param if present — non-streaming completion
-
-            # Try URL variants — some LiteLLM deployments return 405 for /v1/chat/completions
-            timeout = int(os.environ.get("INTELLIGRAPH_LLM_TIMEOUT", "120"))
-            variants = _llm_url_variants(llm_url)
-            resp = None
-            for url, is_completions_api in variants:
-                vp = _convert_to_completions_payload(p) if is_completions_api else p
-                resp = requests.post(url, json=vp, headers=headers, timeout=timeout, stream=True, verify=LLM_SSL_VERIFY)
-                if resp.status_code == 200:
-                    break
-                if resp.status_code != 405:
-                    break  # non-405 error — report it
-                # 405 → try next variant
-
-            if resp is None or resp.status_code != 200:
-                status = resp.status_code if resp is not None else 502
-                body = resp.text[:200] if resp is not None else "no response"
-                yield f"data: {json.dumps({'event': 'error', 'data': {'message': f'LLM returned {status}: {body}'}})}\n\n"
+            p.pop("stream", None)  # non-streaming completion — some providers 405 on stream
+            resp = requests.post(llm_url, json=p, headers=headers, timeout=int(os.environ.get("INTELLIGRAPH_LLM_TIMEOUT", "120")), stream=True, verify=LLM_SSL_VERIFY)
+            if resp.status_code != 200:
+                resp.encoding = "utf-8"
+                yield f"data: {json.dumps({'event': 'error', 'data': {'message': f'LLM returned {resp.status_code}: {resp.text[:200]}'}})}\n\n"
                 return
-
-            # Check if we used the completions API — need to parse differently
-            used_completions_api = any(v[1] for v in variants if v[0] == resp.url)
 
             content_type = resp.headers.get("content-type", "")
 
