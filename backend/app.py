@@ -242,8 +242,8 @@ ALLOWED_LLM_HOSTS = set(h.strip() for h in os.environ.get(
     "LLM_ALLOWED_HOSTS", "models.ai-services.idf.cts"
 ).split(",") if h.strip())
 
-@app.route("/llm/relay", methods=["POST"])
-def llm_relay():
+@app.route("/llm/ask", methods=["POST"])
+def llm_ask():
     """Relay LLM requests — forwards user's LLM call through the pod."""
     data = request.get_json(force=True)
     llm_url = data.get("url", "").strip()
@@ -1235,6 +1235,6 @@ if __name__ == "__main__":
 
     print(f"OIDC:      {'configured' if OIDC_ISSUER else 'disabled'}")
     print(f"Downloads: /download/mcp-server, /download/graph-builder")
-    print(f"LLM relay: /llm/relay")
+    print(f"LLM relay: /llm/ask")
     print(f"Server:    http://{args.host}:{args.port}")
     app.run(host=args.host, port=args.port, debug=False)

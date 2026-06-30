@@ -11,7 +11,7 @@ export const endpoints = {
   projectPull: (pid) => `/projects/${pid}/pull`,
 
   // LLM
-  llmRelay: "/llm/relay",
+  llmRelay: "/llm/ask",
 
   // Downloads
   downloadMCPServer: "/download/mcp-server",

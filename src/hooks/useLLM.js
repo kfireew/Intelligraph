@@ -79,7 +79,7 @@ export function useLLM() {
       temperature: 0.1,
     };
     try {
-      const r = await fetch("/llm/relay", {
+      const r = await fetch("/llm/ask", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ url: savedUrlRef.current, token: savedTokenRef.current, payload }),
