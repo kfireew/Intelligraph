@@ -1,4 +1,4 @@
-import { Download, Server, Copy, Check } from "lucide-react";
+import { Download, Server, Copy, Check, FileCode } from "lucide-react";
 import { useState } from "react";
 import { endpoints } from "../config/endpoints";
 
@@ -10,49 +10,51 @@ export function GuidePanel({ activePid, activeProject }) {
   const [copied, setCopied] = useState(null);
   const isReady = activeProject && ["ready", "cloned", "indexed"].includes(activeProject.status);
   const pid = activeProject?.id;
-  const completionsUrl = pid ? `/api/v1/projects/${pid}/completions` : "/api/v1/projects/{pid}/completions";
 
+  // Auto-fill from what the user already has
+  const containerUrl = typeof window !== "undefined" ? window.location.origin : "http://localhost:5050";
   const llmUrl = (typeof localStorage !== "undefined" && localStorage.getItem("llm-url")) || "https://models.ai-services.idf.cts/v1/chat/completions";
+  const completionsUrl = pid ? `/api/v1/projects/${pid}/completions` : null;
+  const fullCompletionsUrl = pid ? `${containerUrl}${completionsUrl}` : null;
 
-  const curlExample = pid
-    ? `curl -X POST ${window.location.origin}${completionsUrl} \\\n  -H "Content-Type: application/json" \\\n  -H "Authorization: Bearer <your-api-token>" \\\n  -d '{\n  "prompt": "Explain the architecture",\n  "include_context": true,\n  "llm_url": "${llmUrl}",\n  "llm_token": "sk-..."\n}'`
+  const curlExample = fullCompletionsUrl
+    ? `curl -X POST ${fullCompletionsUrl} \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "prompt": "Explain the architecture",
+    "include_context": true,
+    "llm_url": "${llmUrl}",
+    "llm_token": "YOUR-TOKEN-HERE"
+  }'`
     : null;
-  const n8nExample = pid ? `{
-  "method": "POST",
-  "url": "${window.location.origin}${completionsUrl}",
-  "authentication": "genericCredentialType",
-  "genericAuthType": "httpBearerAuth",
-  "sendBody": true,
-  "bodyParameters": {
-    "parameters": [
-      { "name": "prompt", "value": "Explain the architecture" },
-      { "name": "include_context", "value": true },
-      { "name": "llm_url", "value": "${llmUrl}" },
-      { "name": "llm_token", "value": "sk-..." }
-    ]
-  }
-}` : null;
 
-  const mcpArgs = `mcp_server_standalone.py --intelligraph-url http://localhost:5050 --project-id ${pid || "{pid}"}`;
-  const claudeMcp = `{${JSON.stringify({
-  mcpServers: {
-    intelligraph: {
-      command: "python",
-      args: ["mcp_server_standalone.py", "--intelligraph-url", "http://localhost:5050", "--project-id", String(pid || "{pid}")],
-      cwd: "/path/to/your/project"
-    }
-  }
-}, null, 2)}}`;
-  const opencodeMcp = JSON.stringify({
-    $schema: "https://opencode.ai/config.json",
-    mcp: {
-      intelligraph: {
-        type: "local",
-        command: ["python", "mcp_server_standalone.py", "--intelligraph-url", "http://localhost:5050", "--project-id", String(pid || "{pid}")],
-        cwd: "/path/to/your/project"
-      }
-    }
-  }, null, 2);
+  // MCP config — auto-filled with real values
+  const mcpCommand = pid
+    ? `python mcp_server_standalone.py --intelligraph-url ${containerUrl} --project-id ${pid}`
+    : null;
+
+  const claudeMcp = pid
+    ? JSON.stringify({
+        mcpServers: {
+          intelligraph: {
+            command: "python",
+            args: ["mcp_server_standalone.py", "--intelligraph-url", containerUrl, "--project-id", String(pid)],
+          },
+        },
+      }, null, 2)
+    : null;
+
+  const opencodeMcp = pid
+    ? JSON.stringify({
+        $schema: "https://opencode.ai/config.json",
+        mcp: {
+          intelligraph: {
+            type: "local",
+            command: ["python", "mcp_server_standalone.py", "--intelligraph-url", containerUrl, "--project-id", String(pid)],
+          },
+        },
+      }, null, 2)
+    : null;
 
   const handleCopy = (key, text) => {
     copy(text);
@@ -60,74 +62,77 @@ export function GuidePanel({ activePid, activeProject }) {
     setTimeout(() => setCopied(null), 2000);
   };
 
+  const CodeBlock = ({ id, label, code }) => (
+    <div>
+      {label && <p className="text-[11px] font-bold text-muted uppercase tracking-wider mb-1.5">{label}</p>}
+      <div className="relative group">
+        <pre className="m-0 p-2.5 rounded-lg bg-black/30 text-[11px] font-mono text-text-secondary overflow-x-auto whitespace-pre-wrap break-all cursor-pointer"
+          onClick={() => handleCopy(id, code)}>{code}</pre>
+        <button onClick={() => handleCopy(id, code)}
+          className="absolute top-1.5 right-1.5 p-1 rounded bg-black/40 hover:bg-black/60 text-muted-subtle hover:text-text transition-colors">
+          {copied === id ? <Check size={12} className="text-green-400" /> : <Copy size={12} />}
+        </button>
+      </div>
+    </div>
+  );
+
   return (
     <div className="flex flex-col flex-1 min-h-0 p-6 overflow-y-auto space-y-6">
       <div className="flex items-center gap-2"><Server size={18} className="text-accent-light" /><h2 className="text-lg font-bold gradient-text">Guide</h2></div>
 
-      {/* ── API Endpoints (consolidated) ── */}
+      {/* ── No project selected banner ── */}
+      {!activeProject && (
+        <div className="glass rounded-xl p-4 border border-yellow-500/20 bg-yellow-500/5">
+          <p className="text-xs text-text-secondary m-0">Select a project on the left to see its API endpoints and MCP setup. Everything below auto-fills based on the active project.</p>
+        </div>
+      )}
+
+      {/* ── API Endpoints ── */}
       <Section title="API Endpoints" icon={Server}>
+        {activeProject && (
+          <div className="mb-3 p-2 rounded-lg bg-accent/5 border border-accent/10">
+            <p className="text-xs text-text-secondary m-0">
+              Project: <span className="text-text font-semibold">{activeProject.name}</span> &nbsp;|&nbsp; ID: <span className="text-accent-light font-mono">{pid}</span> &nbsp;|&nbsp; Status: <span className={isReady ? "text-green" : "text-yellow-400"}>{activeProject.status}</span>
+            </p>
+          </div>
+        )}
+
         {/* Project Completions */}
         <div className="space-y-3">
           <div>
-            <p className="text-[11px] font-bold text-muted uppercase tracking-wider mb-1.5">Project Completions</p>
             <p className="text-xs text-text-secondary m-0 leading-relaxed mb-2">
-              {activeProject ? (
-                <>Use this endpoint for n8n, CI/CD, or external automation targeting <span className="text-text font-semibold">{activeProject.name}</span>.</>
-              ) : (
-                <>Select a project to see its API endpoint.</>
-              )}
+              Send a question about your codebase and get an AI-powered answer with context from the code graph.
             </p>
           </div>
 
           {!activeProject ? null : !isReady ? (
-            <div>
-              <p className="text-xs text-muted-subtle m-0 mb-2">Project status: <span className="text-yellow-400 font-medium">{activeProject.status}</span>. Wait for cloning to finish.</p>
-              <pre className="m-0 p-2.5 rounded-lg bg-black/30 text-[11px] font-mono text-text-secondary overflow-x-auto opacity-50">{completionsUrl}</pre>
-            </div>
+            <p className="text-xs text-muted-subtle m-0">Project is still {activeProject.status}. Wait for it to finish before using the API.</p>
           ) : (
             <>
-              {/* Endpoint URL */}
-              <div>
-                <p className="text-[11px] font-bold text-muted uppercase tracking-wider mb-1.5">Endpoint</p>
-                <div className="relative group">
-                  <pre className="m-0 p-2.5 rounded-lg bg-black/30 text-[11px] font-mono text-text-secondary overflow-x-auto cursor-pointer select-all whitespace-pre-wrap break-all"
-                    onClick={() => handleCopy("endpoint", `POST ${completionsUrl}`)}>{completionsUrl}</pre>
-                  <button onClick={() => handleCopy("endpoint", `POST ${completionsUrl}`)}
-                    className="absolute top-1.5 right-1.5 p-1 rounded bg-black/40 hover:bg-black/60 text-muted-subtle hover:text-text transition-colors">
-                    {copied === "endpoint" ? <Check size={12} className="text-green-400" /> : <Copy size={12} />}
-                  </button>
-                </div>
-              </div>
+              <CodeBlock id="endpoint" label="Endpoint URL" code={`POST ${fullCompletionsUrl}`} />
 
               <details className="mt-2">
-                <summary className="text-[11px] font-bold text-muted cursor-pointer hover:text-text transition-colors">cURL &amp; n8n examples</summary>
-                <div className="mt-2 space-y-3">
-                  {/* cURL */}
-                  <div>
-                    <p className="text-[11px] font-bold text-muted uppercase tracking-wider mb-1.5">cURL</p>
-                    <div className="relative group">
-                      <pre className="m-0 p-2.5 rounded-lg bg-black/30 text-[11px] font-mono text-text-secondary overflow-x-auto text-[10px] leading-relaxed whitespace-pre-wrap break-all"
-                        onClick={() => handleCopy("curl", curlExample)}>{curlExample}</pre>
-                      <button onClick={() => handleCopy("curl", curlExample)}
-                        className="absolute top-1.5 right-1.5 p-1 rounded bg-black/40 hover:bg-black/60 text-muted-subtle hover:text-text transition-colors">
-                        {copied === "curl" ? <Check size={12} className="text-green-400" /> : <Copy size={12} />}
-                      </button>
-                    </div>
-                  </div>
+                <summary className="text-[11px] font-bold text-muted cursor-pointer hover:text-text transition-colors">cURL example</summary>
+                <div className="mt-2"><CodeBlock id="curl" code={curlExample} /></div>
+              </details>
 
-                  {/* n8n */}
-                  <div>
-                    <p className="text-[11px] font-bold text-muted uppercase tracking-wider mb-1.5">n8n HTTP Request (JSON)</p>
-                    <div className="relative group">
-                      <pre className="m-0 p-2.5 rounded-lg bg-black/30 text-[11px] font-mono text-text-secondary overflow-x-auto text-[10px] leading-relaxed whitespace-pre-wrap break-all"
-                        onClick={() => handleCopy("n8n", n8nExample)}>{n8nExample}</pre>
-                      <button onClick={() => handleCopy("n8n", n8nExample)}
-                        className="absolute top-1.5 right-1.5 p-1 rounded bg-black/40 hover:bg-black/60 text-muted-subtle hover:text-text transition-colors">
-                        {copied === "n8n" ? <Check size={12} className="text-green-400" /> : <Copy size={12} />}
-                      </button>
-                    </div>
-                  </div>
-                </div>
+              <details className="mt-2">
+                <summary className="text-[11px] font-bold text-muted cursor-pointer hover:text-text transition-colors">n8n example</summary>
+                <div className="mt-2"><CodeBlock id="n8n" code={JSON.stringify({
+                  method: "POST",
+                  url: fullCompletionsUrl,
+                  authentication: "genericCredentialType",
+                  genericAuthType: "httpBearerAuth",
+                  sendBody: true,
+                  bodyParameters: {
+                    parameters: [
+                      { name: "prompt", value: "Explain the architecture" },
+                      { name: "include_context", value: true },
+                      { name: "llm_url", value: llmUrl },
+                      { name: "llm_token", value: "YOUR-TOKEN-HERE" },
+                    ],
+                  },
+                }, null, 2)} /></div>
               </details>
             </>
           )}
@@ -136,27 +141,15 @@ export function GuidePanel({ activePid, activeProject }) {
         {/* Clone Repository */}
         <div className="mt-4 pt-4 border-t border-white/5">
           <p className="text-[11px] font-bold text-muted uppercase tracking-wider mb-1.5">Clone Repository</p>
-          <p className="text-xs text-text-secondary m-0 mb-2 leading-relaxed">General endpoint for scripting and automation.</p>
-          <div className="space-y-2">
-            <div className="relative group">
-              <pre className="m-0 p-2.5 rounded-lg bg-black/30 text-[11px] font-mono text-text-secondary overflow-x-auto cursor-pointer select-all"
-                onClick={() => handleCopy("clone", "POST /projects/clone")}>{`POST /projects/clone`}</pre>
-              <button onClick={() => handleCopy("clone", "POST /projects/clone")}
-                className="absolute top-1.5 right-1.5 p-1 rounded bg-black/40 hover:bg-black/60 text-muted-subtle hover:text-text transition-colors">
-                {copied === "clone" ? <Check size={12} className="text-green-400" /> : <Copy size={12} />}
-              </button>
-            </div>
-          </div>
+          <p className="text-xs text-text-secondary m-0 mb-2 leading-relaxed">Clone a new repo into Intelligraph via API.</p>
+          <CodeBlock id="clone" code={`POST ${containerUrl}/projects/clone`} />
           <details className="mt-2">
             <summary className="text-[11px] font-bold text-muted cursor-pointer hover:text-text transition-colors">Example payload</summary>
-            <div className="mt-2">
-              <p className="text-[10px] text-muted-subtle mb-1">Clone a private Bitbucket repo:</p>
-              <pre className="m-0 p-2 rounded-lg bg-black/30 text-[10px] font-mono text-text-secondary overflow-x-auto">{`{
-  "git_url": "https://bitbucket.example.com/scm/PROJ/repo.git",
-  "access_token": "BBDC-...",
-  "auth_provider": "bitbucket_datacenter"
-}`}</pre>
-            </div>
+            <div className="mt-2"><CodeBlock id="clonePayload" code={JSON.stringify({
+              git_url: "https://bitbucket.example.com/scm/PROJ/repo.git",
+              access_token: "BBDC-...",
+              auth_mode: "bitbucket_datacenter_bearer",
+            }, null, 2)} /></div>
           </details>
         </div>
       </Section>
@@ -164,58 +157,78 @@ export function GuidePanel({ activePid, activeProject }) {
       {/* ── MCP Server ── */}
       <Section title="MCP Server" icon={Download}>
         <p className="text-xs text-text-secondary m-0 mb-3 leading-relaxed">
-          Download the MCP server script and configure your AI coding tool to use Intelligraph's code-graph retrieval.
+          Connect your AI coding assistant (Claude Code or opencode) to Intelligraph. It can then search your codebase graph, find callers/callees, analyze impact, and more — right from your editor.
         </p>
 
-        {/* Prerequisites */}
-        <div className="mb-3 p-2.5 rounded-lg bg-accent/5 border border-accent/10">
-          <p className="text-[11px] font-bold text-accent-light uppercase tracking-wider mb-1">Prerequisites</p>
-          <ol className="text-xs text-text-secondary space-y-1 m-0 pl-4 list-decimal">
-            <li>Install dependencies: <code className="px-1 py-0.5 rounded bg-accent/10 text-accent-light text-[11px] font-mono">pip install mcp requests</code></li>
-            <li>Intelligraph container must be running and accessible</li>
-            <li>At least one project must be cloned (note its project ID)</li>
-          </ol>
-        </div>
+        {!pid ? (
+          <div className="p-3 rounded-lg bg-yellow-500/5 border border-yellow-500/20">
+            <p className="text-xs text-text-secondary m-0">Select a project first. The config below auto-fills with your project ID ({pid || "none yet"}) and container URL.</p>
+          </div>
+        ) : (
+          <>
+            {/* Step 1 */}
+            <div className="mb-4">
+              <p className="text-xs font-bold text-text mb-1">Step 1 — Install dependencies</p>
+              <p className="text-xs text-muted-subtle m-0 mb-2">Run this once on your machine:</p>
+              <CodeBlock id="pip" code="pip install mcp requests" />
+            </div>
 
-        {/* Claude Code */}
-        <div className="mb-4">
-          <p className="text-[11px] font-bold text-muted uppercase tracking-wider mb-1.5">Claude Code</p>
-          <p className="text-xs text-text-secondary m-0 mb-2 leading-relaxed">
-            For <b>project-specific</b> config, place <code className="px-1 py-0.5 rounded bg-accent/10 text-accent-light text-[11px] font-mono">.mcp.json</code> in your project root.
-            For <b>global</b> config, edit <code className="px-1 py-0.5 rounded bg-accent/10 text-accent-light text-[11px] font-mono">~/.claude.json</code> instead.
-          </p>
-          <p className="text-[10px] text-muted-subtle mb-2">
-            Tip: First <code className="text-accent-light">cd</code> into your project folder, then create <code className="text-accent-light">.mcp.json</code> there — Claude Code reads it from the current working directory.
-          </p>
-          <pre className="m-0 p-3 rounded-lg bg-black/30 text-[11px] font-mono text-text-secondary overflow-x-auto">{claudeMcp}</pre>
-        </div>
+            {/* Step 2 */}
+            <div className="mb-4">
+              <p className="text-xs font-bold text-text mb-1">Step 2 — Download the MCP server script</p>
+              <p className="text-xs text-muted-subtle m-0 mb-2">Save this file into your project folder (the folder where you run your AI assistant):</p>
+              <a href={endpoints.downloadMCPServer} download
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-accent/10 hover:bg-accent/20 text-accent-light text-xs font-medium transition-colors no-underline">
+                <Download size={14} /> Download mcp_server_standalone.py
+              </a>
+            </div>
 
-        {/* opencode */}
-        <div className="mb-4">
-          <p className="text-[11px] font-bold text-muted uppercase tracking-wider mb-1.5">opencode</p>
-          <p className="text-xs text-text-secondary m-0 mb-2 leading-relaxed">
-            Place <code className="px-1 py-0.5 rounded bg-accent/10 text-accent-light text-[11px] font-mono">opencode.json</code> in your project root (or <code className="px-1 py-0.5 rounded bg-accent/10 text-accent-light text-[11px] font-mono">~/.config/opencode/opencode.json</code> for global).
-          </p>
-          <pre className="m-0 p-3 rounded-lg bg-black/30 text-[11px] font-mono text-text-secondary overflow-x-auto">{opencodeMcp}</pre>
-        </div>
+            {/* Step 3 */}
+            <div className="mb-4">
+              <p className="text-xs font-bold text-text mb-1">Step 3 — Add config file</p>
+              <p className="text-xs text-muted-subtle m-0 mb-2">
+                Your project ID is <span className="text-accent-light font-mono font-bold">{pid}</span> and your container is at <span className="text-accent-light font-mono">{containerUrl}</span>. These are already filled in below — just copy and paste.
+              </p>
 
-        {/* Concrete path example */}
-        <div className="mb-3">
-          <p className="text-[11px] font-bold text-muted uppercase tracking-wider mb-1.5">Path Example</p>
-          <pre className="m-0 p-2.5 rounded-lg bg-black/30 text-[10px] font-mono text-text-secondary overflow-x-auto">{`# Example: cwd path
-"cwd": "C:/Users/kfir/my-project"
-# On Linux/macOS:
-"cwd": "/home/user/my-project"`}</pre>
-        </div>
+              <details open className="mt-2">
+                <summary className="text-[11px] font-bold text-muted cursor-pointer hover:text-text transition-colors">Claude Code</summary>
+                <div className="mt-2 space-y-2">
+                  <p className="text-xs text-text-secondary m-0">
+                    Create a file called <code className="px-1 py-0.5 rounded bg-accent/10 text-accent-light text-[11px] font-mono">.mcp.json</code> in your project folder. For global access, put it in <code className="px-1 py-0.5 rounded bg-accent/10 text-accent-light text-[11px] font-mono">~/.claude.json</code> instead.
+                  </p>
+                  <CodeBlock id="claudeMcp" code={claudeMcp} />
+                </div>
+              </details>
 
-        <a href={endpoints.downloadMCPServer} download
-          className="inline-flex items-center gap-1.5 mt-1 px-3 py-1.5 rounded-lg bg-accent/10 hover:bg-accent/20 text-accent-light text-xs font-medium transition-colors no-underline">
-          <Download size={14} /> Download MCP Server
-        </a>
+              <details className="mt-2">
+                <summary className="text-[11px] font-bold text-muted cursor-pointer hover:text-text transition-colors">opencode</summary>
+                <div className="mt-2 space-y-2">
+                  <p className="text-xs text-text-secondary m-0">
+                    Create a file called <code className="px-1 py-0.5 rounded bg-accent/10 text-accent-light text-[11px] font-mono">opencode.json</code> in your project folder. For global access, put it in <code className="px-1 py-0.5 rounded bg-accent/10 text-accent-light text-[11px] font-mono">~/.config/opencode/opencode.json</code>.
+                  </p>
+                  <CodeBlock id="opencodeMcp" code={opencodeMcp} />
+                </div>
+              </details>
+            </div>
+
+            {/* Step 4 */}
+            <div className="mb-2">
+              <p className="text-xs font-bold text-text mb-1">Step 4 — Use it</p>
+              <p className="text-xs text-text-secondary m-0 leading-relaxed">
+                Open your AI assistant in the project folder and ask questions like "search for authentication" or "who calls processPayment". The assistant will use Intelligraph's code graph to answer.
+              </p>
+            </div>
+
+            <details className="mt-3">
+              <summary className="text-[11px] font-bold text-muted cursor-pointer hover:text-text transition-colors">Or run manually (for testing)</summary>
+              <div className="mt-2"><CodeBlock id="mcpCmd" code={mcpCommand} /></div>
+            </details>
+          </>
+        )}
       </Section>
 
       {/* ── How it works ── */}
-      <Section title="How it works" icon={Server}>
+      <Section title="How it works" icon={FileCode}>
         <p className="text-xs text-text-secondary m-0 leading-relaxed">Uses the same <code className="px-1 py-0.5 rounded bg-accent/10 text-accent-light text-[11px] font-mono">retrieval.py</code> runtime as the web UI. Pipeline: ExecutionPlanner → NodeResolver → TraversalPlanner → NeighborhoodRanker → ChunkRetriever → ContextMerger.</p>
       </Section>
     </div>
