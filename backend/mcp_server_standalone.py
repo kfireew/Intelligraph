@@ -1,181 +1,212 @@
 """
-Intelligraph MCP server — standalone, uses same retrieval.py runtime as web UI.
-Run locally with your graph files. Claude Code connects via .mcp.json.
+Intelligraph MCP Server — stdio transport via official MCP SDK.
+
+Proxies code-graph retrieval to a running Intelligraph container.
+Works with Claude Code (.mcp.json) and opencode (opencode.json).
+
+Prerequisites:
+  pip install mcp requests
 
 Usage:
-  python mcp_server_standalone.py --crg-db .code-review-graph/graph.db --graphify graphify-out/graph.json
+  python mcp_server_standalone.py --intelligraph-url http://localhost:5050 --project-id 1
 
-Claude Code .mcp.json:
-{
-  "mcpServers": {
-    "intelligraph": {
-      "command": "python",
-      "args": ["mcp_server_standalone.py", "--crg-db", ".code-review-graph/graph.db", "--graphify", "graphify-out/graph.json"],
-      "cwd": "/path/to/your/project"
+Claude Code (.mcp.json, in project root):
+  {
+    "mcpServers": {
+      "intelligraph": {
+        "command": "python",
+        "args": ["mcp_server_standalone.py", "--intelligraph-url", "http://localhost:5050", "--project-id", "1"],
+        "cwd": "/path/to/your/project"
+      }
     }
   }
-}
+
+opencode (opencode.json, in project root or ~/.config/opencode/opencode.json):
+  {
+    "$schema": "https://opencode.ai/config.json",
+    "mcp": {
+      "intelligraph": {
+        "type": "local",
+        "command": ["python", "mcp_server_standalone.py", "--intelligraph-url", "http://localhost:5050", "--project-id", "1"],
+        "cwd": "/path/to/your/project"
+      }
+    }
+  }
 """
 
+import argparse
 import json
-import os
 import sys
 
-MCP_CONTEXT_CHARS = int(os.environ.get("MCP_CONTEXT_CHARS", "6000"))
+import requests
+from mcp.server import Server
+from mcp import types
+from mcp.server.stdio import stdio_server
 
-# Ensure the runtime module is importable
-RUNTIME_DIR = os.path.dirname(os.path.abspath(__file__))
-if RUNTIME_DIR not in sys.path:
-    sys.path.insert(0, RUNTIME_DIR)
+INTELLIGRAPH_URL = "http://localhost:5050"
+PROJECT_ID = None
 
-from retrieval import retrieve_context
+TOOLS = [
+    types.Tool(
+        name="search",
+        description="Search the codebase graph for symbols, files, or concepts matching a query.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "What to search for (symbol name, concept, file pattern)"},
+            },
+            "required": ["query"],
+        },
+    ),
+    types.Tool(
+        name="callers",
+        description="Find callers of a symbol — who calls this function/method/class.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Symbol name to find callers for"},
+            },
+            "required": ["name"],
+        },
+    ),
+    types.Tool(
+        name="callees",
+        description="Find callees of a symbol — what does this function/method call.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Symbol name to find callees for"},
+            },
+            "required": ["name"],
+        },
+    ),
+    types.Tool(
+        name="impact",
+        description="Analyze the impact of changing a symbol — what would break.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Symbol name to analyze impact for"},
+            },
+            "required": ["name"],
+        },
+    ),
+    types.Tool(
+        name="architecture",
+        description="Get an architecture overview of a component or the entire codebase.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string", "description": "Architecture question or component name"},
+            },
+            "required": ["prompt"],
+        },
+    ),
+    types.Tool(
+        name="tests",
+        description="Find test files related to a symbol or component.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Symbol name to find tests for"},
+            },
+            "required": ["name"],
+        },
+    ),
+]
 
-from flask import Flask, jsonify, request
 
-app = Flask(__name__)
-
-CRG_DB = None
-GRAPHIFY_DATA = None  # parsed graph.json in memory
-
-
-def load_data():
-    global GRAPHIFY_DATA
-    if args.graphify and os.path.exists(args.graphify):
-        with open(args.graphify, encoding="utf-8") as f:
-            GRAPHIFY_DATA = json.load(f)
+def _retrieve(query: str) -> dict:
+    """Call the Intelligraph container's retrieval endpoint."""
+    url = f"{INTELLIGRAPH_URL}/graph/retrieve-context"
+    r = requests.post(
+        url,
+        json={"prompt": query, "project_id": PROJECT_ID},
+        timeout=30,
+    )
+    r.raise_for_status()
+    return r.json()
 
 
-# ── Build project dict for retrieve_context ──
+def _format_result(result: dict, tool_name: str, user_query: str) -> str:
+    """Format the retrieval result as readable text for the LLM."""
+    context = result.get("context", "")
+    files = result.get("files", [])
+    strategy = result.get("strategy", "")
+    stats = result.get("context_stats", {})
 
-def _build_project():
-    """Build a project dict that retrieve_context can use."""
-    repo_dir = None
-    if args.graphify:
-        # graphify-out is inside the repo root, so go up one level
-        graphify_parent = os.path.dirname(args.graphify)
-        if os.path.basename(graphify_parent) == "graphify-out":
-            repo_dir = os.path.dirname(graphify_parent)
-        else:
-            # Walk up to find .git directory
-            candidate = graphify_parent
-            for _ in range(5):
-                if os.path.isdir(os.path.join(candidate, ".git")):
-                    repo_dir = candidate
-                    break
-                parent = os.path.dirname(candidate)
-                if parent == candidate:
-                    break
-                candidate = parent
-            if repo_dir is None:
-                repo_dir = graphify_parent
-    return {
-        "graphify_data": GRAPHIFY_DATA or {},
-        "crg_db_path": CRG_DB or "",
-        "repo_dir": repo_dir,
-        "_G": None,
+    lines = []
+    if context:
+        lines.append(context)
+    if files:
+        lines.append("\n## Relevant Files")
+        for f in files[:15]:
+            if isinstance(f, dict):
+                lines.append(f"- {f.get('path', f.get('name', 'unknown'))}")
+            else:
+                lines.append(f"- {f}")
+    if strategy and strategy != "default":
+        lines.append(f"\n*Strategy: {strategy}*")
+    if stats:
+        lines.append(f"*Stats: {json.dumps(stats)}*")
+    if not lines:
+        lines.append("No results found. The project may still be indexing or the query didn't match any symbols.")
+    return "\n".join(lines)
+
+
+def _dispatch_tool(name: str, arguments: dict) -> str:
+    """Map a tool call to a retrieval query and return formatted text."""
+    queries = {
+        "search": lambda a: a["query"],
+        "callers": lambda a: f"who calls {a['name']}",
+        "callees": lambda a: f"what does {a['name']} call",
+        "impact": lambda a: f"impact of {a['name']} what breaks",
+        "architecture": lambda a: a["prompt"],
+        "tests": lambda a: f"test {a['name']}",
     }
+    if name not in queries:
+        return f"Unknown tool: {name}"
+    query = queries[name](arguments)
+    result = _retrieve(query)
+    return _format_result(result, name, query)
 
 
-# ── MCP tools ──
-
-def tool_search(query, limit=15):
-    """Search codebase graph for symbols matching query."""
-    proj = _build_project()
-    result = retrieve_context(proj, query)
-    files = result.get("files", [])[:limit]
-    ctx = result.get("context", "")[:MCP_CONTEXT_CHARS]
-    return {"matches": files, "context": ctx}
+server = Server("intelligraph")
 
 
-def tool_callers(name, limit=15):
-    """Find callers of a symbol (incoming edges)."""
-    query = f"who calls {name}"
-    proj = _build_project()
-    result = retrieve_context(proj, query)
-    files = result.get("files", [])[:limit]
-    ctx = result.get("context", "")[:MCP_CONTEXT_CHARS]
-    return {"matches": files, "context": ctx}
+@server.list_tools()
+async def list_tools() -> list[types.Tool]:
+    return TOOLS
 
 
-def tool_callees(name, limit=15):
-    """Find callees of a symbol (outgoing edges)."""
-    query = f"what does {name} call"
-    proj = _build_project()
-    result = retrieve_context(proj, query)
-    files = result.get("files", [])[:limit]
-    ctx = result.get("context", "")[:MCP_CONTEXT_CHARS]
-    return {"matches": files, "context": ctx}
-
-
-def tool_impact(name, limit=15):
-    """Find what would break if a symbol were changed."""
-    query = f"impact of {name} what breaks"
-    proj = _build_project()
-    result = retrieve_context(proj, query)
-    files = result.get("files", [])[:limit]
-    ctx = result.get("context", "")[:MCP_CONTEXT_CHARS]
-    return {"matches": files, "context": ctx}
-
-
-def tool_architecture(prompt, limit=15):
-    """Get architecture overview of a component or the codebase."""
-    proj = _build_project()
-    result = retrieve_context(proj, prompt or "architecture overview")
-    files = result.get("files", [])[:limit]
-    ctx = result.get("context", "")[:MCP_CONTEXT_CHARS]
-    return {"matches": files, "context": ctx}
-
-
-def tool_tests(name, limit=15):
-    """Find test files related to a symbol."""
-    query = f"test {name}"
-    proj = _build_project()
-    result = retrieve_context(proj, query)
-    files = result.get("files", [])[:limit]
-    ctx = result.get("context", "")[:MCP_CONTEXT_CHARS]
-    return {"matches": files, "context": ctx}
-
-
-# ── Tool registry ──
-
-TOOLS = {
-    "search": tool_search,
-    "callers": tool_callers,
-    "callees": tool_callees,
-    "impact": tool_impact,
-    "architecture": tool_architecture,
-    "tests": tool_tests,
-}
-
-
-# ── JSON-RPC endpoint ──
-
-@app.route("/mcp", methods=["POST"])
-def mcp_handle():
-    data = request.get_json(silent=True) or {}
-    tool_name = data.get("tool", "")
-    params = data.get("params", {})
-    if tool_name not in TOOLS:
-        return jsonify({"error": f"unknown tool: {tool_name}"}), 400
+@server.call_tool()
+async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
     try:
-        result = TOOLS[tool_name](**params)
-        return jsonify(result)
+        text = _dispatch_tool(name, arguments)
+    except requests.exceptions.ConnectionError:
+        text = f"Cannot reach Intelligraph at {INTELLIGRAPH_URL}. Is the container running?"
+    except requests.exceptions.Timeout:
+        text = "Intelligraph request timed out (30s). The project may be large or still indexing."
     except Exception as e:
-        return jsonify({"error": str(e)[:500]}), 500
+        text = f"Error: {str(e)[:500]}"
+    return [types.TextContent(type="text", text=text)]
 
 
-# ── CLI ──
+async def main():
+    global INTELLIGRAPH_URL, PROJECT_ID
+    parser = argparse.ArgumentParser(description="Intelligraph MCP Server (stdio)")
+    parser.add_argument("--intelligraph-url", default="http://localhost:5050",
+                        help="Intelligraph container URL (default: http://localhost:5050)")
+    parser.add_argument("--project-id", type=int, required=True,
+                        help="Project ID in the Intelligraph container")
+    args = parser.parse_args()
+    INTELLIGRAPH_URL = args.intelligraph_url.rstrip("/")
+    PROJECT_ID = args.project_id
+
+    async with stdio_server() as (read_stream, write_stream):
+        await server.run(read_stream, write_stream, server.create_initialization_options())
+
 
 if __name__ == "__main__":
-    import argparse
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--crg-db", help="Path to .code-review-graph/graph.db")
-    parser.add_argument("--graphify", help="Path to graphify-out/graph.json")
-    parser.add_argument("--port", type=int, default=0)
-    global args
-    args = parser.parse_args()
-    CRG_DB = args.crg_db
-    load_data()
-    port = args.port or int(os.environ.get("MCP_PORT", 8765))
-    print(f"Intelligraph MCP running on port {port}", file=sys.stderr)
-    app.run(host="0.0.0.0", port=port)
+    import asyncio
+    asyncio.run(main())

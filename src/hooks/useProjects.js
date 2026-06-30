@@ -51,10 +51,19 @@ export function useProjects() {
     await fetchProjects();
   }, [activePid, fetchProjects]);
 
+  const pullProject = useCallback(async (pid) => {
+    setProjects((prev) => prev.map((p) => p.id === pid ? { ...p, status: "pulling" } : p));
+    try {
+      await projectsService.pull(pid);
+    } finally {
+      await fetchProjects();
+    }
+  }, [fetchProjects]);
+
   const activeProject = projects.find((p) => p.id === activePid) || null;
 
   return {
     projects, activePid, activeProject, loading,
-    fetchProjects, selectProject, cloneProject, renameProject, deleteProject,
+    fetchProjects, selectProject, cloneProject, renameProject, deleteProject, pullProject,
   };
 }

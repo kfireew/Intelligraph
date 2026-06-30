@@ -24,5 +24,7 @@ export const projectsService = {
     }),
   delete: (pid) =>
     requestJson(endpoints.projectDetail(pid), { method: "DELETE" }),
+  pull: (pid) =>
+    requestJson(endpoints.projectPull(pid), { method: "POST" }),
   getGraphData: (pid) => requestJson(endpoints.projectGraphData(pid)),
 };

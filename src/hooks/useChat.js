@@ -221,7 +221,6 @@ export function useChat({ activePid, llmUrl, llmToken, model, onMatchedNodes, on
         ],
         max_tokens: 4096,
         temperature: 0.2,
-        stream: true,
       };
 
       const stream = llmService.relayStream({ url: llmUrl, token: llmToken, payload, projectId: activePid });

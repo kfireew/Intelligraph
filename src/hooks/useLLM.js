@@ -73,8 +73,8 @@ export function useLLM() {
 
   const test = useCallback(async () => {
     const payload = {
-      model: modelRef.current || "google/gemini-2.0-flash-001",
-      messages: [{ role: "user", content: "Say connected" }],
+      model: modelRef.current || "gpt-4o-mini",
+      messages: [{ role: "user", content: "hi" }],
       max_tokens: 10,
       temperature: 0.1,
     };
@@ -85,6 +85,10 @@ export function useLLM() {
         body: JSON.stringify({ url: savedUrlRef.current, token: savedTokenRef.current, payload }),
       });
       const j = await r.json();
+      if (j.status === 405) {
+        setTestResult("Error: 405 method not allowed — the LLM endpoint rejected the request. Check the URL.");
+        return;
+      }
       const body = JSON.parse(j.body || "{}");
       const content = body.choices?.[0]?.message?.content;
       if (content) {

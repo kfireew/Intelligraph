@@ -75,6 +75,7 @@ export default function App() {
         onSwitchPanel={setActivePanel}
         onRename={projects.renameProject}
         onDelete={async (pid) => { await projects.deleteProject(pid); chat.clearChats(pid); }}
+        onPull={projects.pullProject}
       />
       <div className="flex flex-1 min-w-0 overflow-hidden h-full">
         <AnimatePresence mode="wait">

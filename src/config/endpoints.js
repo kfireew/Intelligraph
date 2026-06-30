@@ -8,6 +8,7 @@ export const endpoints = {
   projectStatus: (pid) => `/projects/${pid}/status`,
   projectGraphData: (pid) => `/projects/${pid}/graph-data`,
   projectDetail: (pid) => `/projects/${pid}`,
+  projectPull: (pid) => `/projects/${pid}/pull`,
 
   // LLM
   llmRelay: "/llm/relay",

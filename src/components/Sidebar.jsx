@@ -4,12 +4,14 @@ import {
   MessageSquare, Settings, Server,
   Plus, X, LogIn, LogOut, ChevronLeft,
   Loader2, CheckCircle2, AlertCircle, Clock,
+  RefreshCw,
 } from "lucide-react";
 
 const STATUS_ICONS = {
   ready: CheckCircle2,
   cloning: Loader2,
   building: Loader2,
+  pulling: Loader2,
   error: AlertCircle,
   pending_upload: Clock,
 };
@@ -18,6 +20,7 @@ const STATUS_COLORS = {
   ready: "text-green",
   cloning: "text-cyan animate-spin",
   building: "text-cyan animate-spin",
+  pulling: "text-green animate-spin",
   error: "text-red",
   pending_upload: "text-orange",
 };
@@ -31,7 +34,7 @@ const NAV_ITEMS = [
 export function Sidebar({
   projects, activePid, activePanel,
   auth, onSelectProject, onNewProject,
-  onSwitchPanel, onRename, onDelete,
+  onSwitchPanel, onRename, onDelete, onPull,
 }) {
   const [collapsed, setCollapsed] = useState(false);
   const [renaming, setRenaming] = useState(null);
@@ -114,6 +117,15 @@ export function Sidebar({
                   />
                 ) : (
                   <span className="flex-1 truncate font-medium">{p.name}</span>
+                )}
+                {p.git_url && p.status === "ready" && onPull && (
+                  <button
+                    className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:text-green hover:bg-green/10 transition-all flex-shrink-0 cursor-pointer"
+                    title="Pull latest"
+                    onClick={(e) => { e.stopPropagation(); onPull(p.id); }}
+                  >
+                    <RefreshCw size={11} />
+                  </button>
                 )}
                 <button
                   className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:text-red hover:bg-red/10 transition-all flex-shrink-0 cursor-pointer"

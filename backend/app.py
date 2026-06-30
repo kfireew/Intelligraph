@@ -242,9 +242,69 @@ ALLOWED_LLM_HOSTS = set(h.strip() for h in os.environ.get(
     "LLM_ALLOWED_HOSTS", "models.ai-services.idf.cts"
 ).split(",") if h.strip())
 
+def _llm_url_variants(llm_url):
+    """Generate URL variants to try when the primary URL returns 405.
+
+    Some LiteLLM deployments only accept /chat/completions (no /v1 prefix)
+    or /completions instead of /v1/chat/completions.
+    Returns a list of (url, is_completions_api) tuples.
+    """
+    base = llm_url.rstrip("/")
+    variants = [(base, False)]
+    # Try without /v1 prefix
+    no_v1 = re.sub(r"/v1/chat/completions/?$", "/chat/completions", base)
+    if no_v1 != base:
+        variants.append((no_v1, False))
+    # Try /completions (text completions API — different payload format)
+    as_completions = re.sub(r"/v1/chat/completions/?$", "/v1/completions", base)
+    if as_completions != base:
+        no_v1_completions = re.sub(r"/v1/completions/?$", "/completions", as_completions)
+        variants.append((as_completions, True))
+        variants.append((no_v1_completions, True))
+    return variants
+
+
+def _convert_to_completions_payload(payload):
+    """Convert chat completions payload to text completions format."""
+    messages = payload.get("messages", [])
+    # Flatten messages into a single prompt
+    parts = []
+    for msg in messages:
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+        if role == "system":
+            parts.append(f"[System]: {content}")
+        elif role == "user":
+            parts.append(content)
+        elif role == "assistant":
+            parts.append(f"[Assistant]: {content}")
+    prompt = "\n\n".join(parts)
+    return {
+        "model": payload.get("model", ""),
+        "prompt": prompt,
+        "max_tokens": payload.get("max_tokens", 4096),
+        "temperature": payload.get("temperature", 0.2),
+    }
+
+
+def _parse_completions_response(body):
+    """Convert text completions response to chat completions format."""
+    try:
+        data = json.loads(body) if isinstance(body, str) else body
+        text = data.get("choices", [{}])[0].get("text", "")
+        data["choices"] = [{"message": {"content": text, "role": "assistant"}, "index": 0, "finish_reason": "stop"}]
+        return json.dumps(data)
+    except Exception:
+        return body
+
+
 @app.route("/llm/relay", methods=["POST"])
 def llm_relay():
-    """Relay LLM requests — forwards user's LLM call through the pod."""
+    """Relay LLM requests — forwards user's LLM call through the pod.
+
+    Tries multiple URL variants if the primary returns 405 (method not allowed).
+    Some LiteLLM deployments use /chat/completions or /completions instead of /v1/chat/completions.
+    """
     data = request.get_json(force=True)
     llm_url = data.get("url", "").strip()
     llm_token = data.get("token", "").strip()
@@ -264,16 +324,35 @@ def llm_relay():
         headers["HTTP-Referer"] = "https://localhost"
         headers["X-Title"] = "Intelligraph"
 
-    try:
-        resp = requests.post(llm_url, json=payload, headers=headers, timeout=int(os.environ.get("INTELLIGRAPH_LLM_TIMEOUT", "120")), verify=LLM_SSL_VERIFY)
-        resp.encoding = "utf-8"
-        return jsonify({"status": resp.status_code, "body": resp.text})
-    except requests.exceptions.Timeout:
-        return jsonify({"error": "LLM request timed out"}), 504
-    except requests.exceptions.ConnectionError:
-        return jsonify({"error": "Cannot reach LLM provider"}), 503
-    except Exception as e:
-        return jsonify({"error": str(e)}), 502
+    timeout = int(os.environ.get("INTELLIGRAPH_LLM_TIMEOUT", "120"))
+    variants = _llm_url_variants(llm_url)
+    last_status = 0
+    last_body = ""
+
+    for url, is_completions_api in variants:
+        p = _convert_to_completions_payload(payload) if is_completions_api else payload
+        try:
+            resp = requests.post(url, json=p, headers=headers, timeout=timeout, verify=LLM_SSL_VERIFY)
+            resp.encoding = "utf-8"
+            last_status = resp.status_code
+            last_body = resp.text
+            if resp.status_code == 200:
+                if is_completions_api:
+                    last_body = _parse_completions_response(resp.text)
+                return jsonify({"status": resp.status_code, "body": last_body})
+            if resp.status_code != 405:
+                # Non-405 error — return immediately
+                return jsonify({"status": resp.status_code, "body": resp.text})
+            # 405 → try next variant
+        except requests.exceptions.Timeout:
+            return jsonify({"error": "LLM request timed out"}), 504
+        except requests.exceptions.ConnectionError:
+            return jsonify({"error": "Cannot reach LLM provider"}), 503
+        except Exception as e:
+            return jsonify({"error": str(e)}), 502
+
+    # All variants returned 405
+    return jsonify({"status": 405, "body": last_body or '{"detail":"method not allowed"}'})
 
 
 @app.route("/llm/relay/stream", methods=["POST"])
@@ -305,14 +384,31 @@ def llm_relay_stream():
         full_text = ""
         try:
             yield f"data: {json.dumps({'event': 'start', 'data': {}})}\n\n"
-            # Force stream=True on the upstream request for true SSE streaming
+            # Use HTTP stream=True for response streaming, but don't force stream param on LLM API
             p = dict(payload)
-            p.setdefault("stream", True)
-            resp = requests.post(llm_url, json=p, headers=headers, timeout=int(os.environ.get("INTELLIGRAPH_LLM_TIMEOUT", "120")), stream=True, verify=LLM_SSL_VERIFY)
-            if resp.status_code != 200:
-                resp.encoding = "utf-8"
-                yield f"data: {json.dumps({'event': 'error', 'data': {'message': f'LLM returned {resp.status_code}: {resp.text[:200]}'}})}\n\n"
+            p.pop("stream", None)  # remove stream param if present — non-streaming completion
+
+            # Try URL variants — some LiteLLM deployments return 405 for /v1/chat/completions
+            timeout = int(os.environ.get("INTELLIGRAPH_LLM_TIMEOUT", "120"))
+            variants = _llm_url_variants(llm_url)
+            resp = None
+            for url, is_completions_api in variants:
+                vp = _convert_to_completions_payload(p) if is_completions_api else p
+                resp = requests.post(url, json=vp, headers=headers, timeout=timeout, stream=True, verify=LLM_SSL_VERIFY)
+                if resp.status_code == 200:
+                    break
+                if resp.status_code != 405:
+                    break  # non-405 error — report it
+                # 405 → try next variant
+
+            if resp is None or resp.status_code != 200:
+                status = resp.status_code if resp is not None else 502
+                body = resp.text[:200] if resp is not None else "no response"
+                yield f"data: {json.dumps({'event': 'error', 'data': {'message': f'LLM returned {status}: {body}'}})}\n\n"
                 return
+
+            # Check if we used the completions API — need to parse differently
+            used_completions_api = any(v[1] for v in variants if v[0] == resp.url)
 
             content_type = resp.headers.get("content-type", "")
 
@@ -495,7 +591,8 @@ def list_projects():
     return jsonify([{"id": pid, "name": p.get("name"), "status": p.get("status"),
                     "nodes": p.get("nodes", 0), "edges": p.get("edges", 0),
                     "has_graphify": bool(p.get("graphify_data")),
-                    "has_crg": bool(p.get("crg_db_path") and os.path.exists(p.get("crg_db_path", "")))}
+                    "has_crg": bool(p.get("crg_db_path") and os.path.exists(p.get("crg_db_path", ""))),
+                    "git_url": p.get("git_url", "")}
                    for pid, p in _projects().items()])
 
 
@@ -642,92 +739,8 @@ def clone_project():
             _clean_remote_url(repo_dir)
             _save_project(pid, proj)
 
-            # graphify update — cap workers to prevent CPU saturation
-            graphify_env = {**os.environ, "GRAPHIFY_MAX_WORKERS": os.environ.get("GRAPHIFY_MAX_WORKERS", "4")}
-            try:
-                r = subprocess.run(["graphify", "update", "."], cwd=repo_dir,
-                                 capture_output=True, text=True, timeout=300, env=graphify_env)
-                if r.returncode != 0:
-                    app.logger.warning("graphify update failed (rc=%d): %s",
-                                       r.returncode, r.stderr[:200])
-            except subprocess.TimeoutExpired:
-                app.logger.warning("graphify update timed out after 300s — continuing with partial data")
-            except FileNotFoundError:
-                app.logger.warning("graphify CLI not found — skipping graph build")
-
-            # code-review-graph build — cap workers to prevent CPU saturation
-            crg_env = {**os.environ, "CRG_PARSE_WORKERS": os.environ.get("CRG_PARSE_WORKERS", "4")}
-            try:
-                r = subprocess.run(["code-review-graph", "build"], cwd=repo_dir,
-                                  capture_output=True, text=True, timeout=300, env=crg_env)
-                if r.returncode != 0:
-                    app.logger.warning("code-review-graph build failed (rc=%d): %s",
-                                       r.returncode, r.stderr[:200])
-            except subprocess.TimeoutExpired:
-                app.logger.warning("code-review-graph build timed out after 300s — continuing with partial data")
-            except FileNotFoundError:
-                app.logger.warning("code-review-graph CLI not found — skipping CRG build")
-
-            # Parse results
-            gf_path = os.path.join(repo_dir, "graphify-out", "graph.json")
-            crg_path = os.path.join(repo_dir, ".code-review-graph", "graph.db")
-
-            if os.path.exists(gf_path):
-                with open(gf_path) as f:
-                    proj["graphify_data"] = json.load(f)
-                proj["nodes"] = len(proj["graphify_data"].get("nodes", []))
-                proj["edges"] = len(proj["graphify_data"].get("links", []))
-
-            if os.path.exists(crg_path):
-                proj["crg_db_path"] = crg_path
-                import sqlite3
-                conn = sqlite3.connect(f"file:{crg_path}?mode=ro", uri=True)
-                cn = conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
-                ce = conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
-                conn.close()
-                proj["nodes"] = max(proj["nodes"], cn)
-                proj["crg_nodes"] = cn
-                proj["edges"] = max(proj["edges"], ce)
-            else:
-                app.logger.warning("CRG build did not produce output — skipping CRG analysis")
-
-            # Generate graph.html
-            if proj.get("graphify_data"):
-                try:
-                    import graphify
-                    import graphify.export as gf_export
-                    G = graphify.build_from_json(proj["graphify_data"])
-                    if G and G.number_of_nodes() > 0:
-                        comms = {}
-                        for nid, ndata in G.nodes(data=True):
-                            cid = ndata.get("community", 0)
-                            if cid not in comms:
-                                comms[cid] = []
-                            comms[cid].append(nid)
-                        html_path = f"{TEMP_DIR}/intelligraph-gf-html-{_user_key()}-{pid}-{int(time.time())}.html"
-                        gf_export.to_html(G, comms, html_path)
-                        proj["graph_html_path"] = html_path
-                except Exception as e:
-                    app.logger.warning("graph.html generation failed: %s", e, exc_info=True)
-
-            # Nx workspace detection
-            try:
-                from nx_adapter import extract_nx_context
-                nx_ctx = extract_nx_context(repo_dir)
-                if nx_ctx.get("available"):
-                    proj["nx_metadata"] = {k: v for k, v in nx_ctx.items() if k != "raw"}
-                    proj["nx_raw"] = nx_ctx.get("raw", {})
-                    proj["workspace_type"] = "nx"
-                    proj["nx_available"] = True
-                else:
-                    proj["workspace_type"] = "standard"
-                    proj["nx_available"] = False
-            except Exception as e:
-                proj["workspace_type"] = "standard"
-                proj["nx_available"] = False
-                app.logger.warning("Nx detection failed (non-fatal): %s", str(e)[:200])
-            if "nx_metadata" not in proj:
-                proj["nx_metadata"] = {}
+            # Build graphs (shared with pull endpoint)
+            _build_graphs(pid, proj, repo_dir)
 
             proj["status"] = "ready"
             proj["repo_dir"] = repo_dir
@@ -750,6 +763,158 @@ def clone_project():
         import traceback
         app.logger.warning("Clone error [%s]: %s\n%s", _user_key(), str(e)[:500], traceback.format_exc())
         return jsonify({"error": redact_secret(str(e)[:500], access_token)}), 500
+
+
+def _build_graphs(pid, proj, repo_dir):
+    """Run graphify + CRG build, parse results, generate HTML — shared by clone and pull."""
+    # graphify update
+    graphify_env = {**os.environ, "GRAPHIFY_MAX_WORKERS": os.environ.get("GRAPHIFY_MAX_WORKERS", "4")}
+    try:
+        r = subprocess.run(["graphify", "update", "."], cwd=repo_dir,
+                         capture_output=True, text=True, timeout=300, env=graphify_env)
+        if r.returncode != 0:
+            app.logger.warning("graphify update failed (rc=%d): %s", r.returncode, r.stderr[:200])
+    except subprocess.TimeoutExpired:
+        app.logger.warning("graphify update timed out after 300s — continuing with partial data")
+    except FileNotFoundError:
+        app.logger.warning("graphify CLI not found — skipping graph build")
+
+    # code-review-graph build
+    crg_env = {**os.environ, "CRG_PARSE_WORKERS": os.environ.get("CRG_PARSE_WORKERS", "4")}
+    try:
+        r = subprocess.run(["code-review-graph", "build"], cwd=repo_dir,
+                          capture_output=True, text=True, timeout=300, env=crg_env)
+        if r.returncode != 0:
+            app.logger.warning("code-review-graph build failed (rc=%d): %s", r.returncode, r.stderr[:200])
+    except subprocess.TimeoutExpired:
+        app.logger.warning("code-review-graph build timed out after 300s — continuing with partial data")
+    except FileNotFoundError:
+        app.logger.warning("code-review-graph CLI not found — skipping CRG build")
+
+    # Parse results
+    gf_path = os.path.join(repo_dir, "graphify-out", "graph.json")
+    crg_path = os.path.join(repo_dir, ".code-review-graph", "graph.db")
+
+    if os.path.exists(gf_path):
+        with open(gf_path) as f:
+            proj["graphify_data"] = json.load(f)
+        proj["nodes"] = len(proj["graphify_data"].get("nodes", []))
+        proj["edges"] = len(proj["graphify_data"].get("links", []))
+
+    if os.path.exists(crg_path):
+        proj["crg_db_path"] = crg_path
+        import sqlite3
+        conn = sqlite3.connect(f"file:{crg_path}?mode=ro", uri=True)
+        cn = conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
+        ce = conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
+        conn.close()
+        proj["nodes"] = max(proj["nodes"], cn)
+        proj["crg_nodes"] = cn
+        proj["edges"] = max(proj["edges"], ce)
+
+    # Generate graph.html
+    if proj.get("graphify_data"):
+        try:
+            import graphify
+            import graphify.export as gf_export
+            G = graphify.build_from_json(proj["graphify_data"])
+            if G and G.number_of_nodes() > 0:
+                comms = {}
+                for nid, ndata in G.nodes(data=True):
+                    cid = ndata.get("community", 0)
+                    if cid not in comms:
+                        comms[cid] = []
+                    comms[cid].append(nid)
+                html_path = f"{TEMP_DIR}/intelligraph-gf-html-{_user_key()}-{pid}-{int(time.time())}.html"
+                gf_export.to_html(G, comms, html_path)
+                proj["graph_html_path"] = html_path
+        except Exception as e:
+            app.logger.warning("graph.html generation failed: %s", e, exc_info=True)
+
+    # Nx workspace detection
+    try:
+        from nx_adapter import extract_nx_context
+        nx_ctx = extract_nx_context(repo_dir)
+        if nx_ctx.get("available"):
+            proj["nx_metadata"] = {k: v for k, v in nx_ctx.items() if k != "raw"}
+            proj["nx_raw"] = nx_ctx.get("raw", {})
+            proj["workspace_type"] = "nx"
+            proj["nx_available"] = True
+        else:
+            proj["workspace_type"] = "standard"
+            proj["nx_available"] = False
+    except Exception as e:
+        proj["workspace_type"] = "standard"
+        proj["nx_available"] = False
+        app.logger.warning("Nx detection failed (non-fatal): %s", str(e)[:200])
+    if "nx_metadata" not in proj:
+        proj["nx_metadata"] = {}
+
+
+@app.route("/projects/<int:pid>/pull", methods=["POST"])
+def pull_project(pid):
+    """Pull latest from git and rebuild graph + CRG for an existing cloned project."""
+    try:
+        proj = _projects().get(pid)
+        if not proj:
+            return jsonify({"error": "project not found"}), 404
+        repo_dir = proj.get("repo_dir")
+        git_url = proj.get("git_url", "")
+        if not repo_dir or not os.path.isdir(repo_dir):
+            return jsonify({"error": "repo_dir missing — cannot pull. Re-clone the project."}), 400
+        if not git_url:
+            return jsonify({"error": "not a cloned project (no git_url)"}), 400
+
+        proj["status"] = "pulling"
+        _save_project(pid, proj)
+
+        git_env = _git_env()
+        # Use stored access token if available for auth
+        access_token = session.get("oidc_access_token", "")
+        git_auth = _git_auth_args(access_token=access_token) if access_token else []
+
+        # git pull — fetch + reset to origin/HEAD (shallow clone has no local branch tracking)
+        r = subprocess.run(["git"] + git_auth + ["fetch", "--depth", "1", "origin"],
+                         capture_output=True, text=True, timeout=120, env=git_env, cwd=repo_dir)
+        if r.returncode != 0:
+            proj["status"] = "ready"
+            _save_project(pid, proj)
+            return jsonify({"error": "pull_failed", "message": redact_secret(r.stderr[:500], access_token)}), 500
+        r = subprocess.run(["git", "reset", "--hard", "origin/HEAD"],
+                         capture_output=True, text=True, timeout=60, env=git_env, cwd=repo_dir)
+        if r.returncode != 0:
+            proj["status"] = "ready"
+            _save_project(pid, proj)
+            return jsonify({"error": "pull_failed", "message": redact_secret(r.stderr[:500], access_token)}), 500
+
+        # Rebuild graphs (shared logic)
+        _build_graphs(pid, proj, repo_dir)
+
+        proj["status"] = "ready"
+        _save_project(pid, proj)
+        _projects()[pid] = proj
+
+        return jsonify({
+            "id": pid,
+            "name": proj.get("name"),
+            "status": proj.get("status"),
+            "nodes": proj.get("nodes", 0),
+            "edges": proj.get("edges", 0),
+            "has_graphify": bool(proj.get("graphify_data")),
+            "has_crg": bool(proj.get("crg_db_path") and os.path.exists(proj.get("crg_db_path", ""))),
+            "workspace_type": proj.get("workspace_type", "standard"),
+        })
+    except Exception as e:
+        import traceback
+        app.logger.warning("Pull error [%s]: %s\n%s", _user_key(), str(e)[:500], traceback.format_exc())
+        try:
+            proj = _projects().get(pid)
+            if proj:
+                proj["status"] = "ready"
+                _save_project(pid, proj)
+        except Exception:
+            pass
+        return jsonify({"error": str(e)[:500]}), 500
 
 
 @app.route("/projects/<int:pid>", methods=["GET"])
