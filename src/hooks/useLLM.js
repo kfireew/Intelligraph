@@ -72,6 +72,12 @@ export function useLLM() {
   }, []);
 
   const test = useCallback(async () => {
+    const url = llmUrl;
+    const token = llmToken;
+    if (!url || !token) {
+      setTestResult("Enter URL and token first");
+      return;
+    }
     const payload = {
       model: modelRef.current || "gpt-4o-mini",
       messages: [{ role: "user", content: "hi" }],
@@ -82,11 +88,11 @@ export function useLLM() {
       const r = await fetch("/llm/ask", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url: savedUrlRef.current, token: savedTokenRef.current, payload }),
+        body: JSON.stringify({ url, token, payload }),
       });
       const j = await r.json();
       if (j.status === 405) {
-        setTestResult("Error: 405 method not allowed — the LLM endpoint rejected the request. Check the URL.");
+        setTestResult("Error: 405 — the LLM rejected the request. Check the URL is correct.");
         return;
       }
       const body = JSON.parse(j.body || "{}");
@@ -103,7 +109,7 @@ export function useLLM() {
     } catch (e) {
       setTestResult("Failed: " + e.message);
     }
-  }, []);
+  }, [llmUrl, llmToken]);
 
   return {
     llmUrl, setLlmUrl, llmToken, setLlmToken,

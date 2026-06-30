@@ -255,6 +255,7 @@ def llm_ask():
 
     host = urlparse(llm_url).hostname
     if host not in ALLOWED_LLM_HOSTS:
+        app.logger.warning("LLM ask blocked host: %s (allowed: %s)", host, ALLOWED_LLM_HOSTS)
         return jsonify({"error": "provider not allowed"}), 403
 
     headers = {"Content-Type": "application/json"}
@@ -265,14 +266,21 @@ def llm_ask():
         headers["X-Title"] = "Intelligraph"
 
     try:
+        app.logger.info("LLM ask → URL=%s | model=%s | messages=%d | max_tokens=%s | stream_in_payload=%s",
+                        llm_url, payload.get("model"), len(payload.get("messages", [])),
+                        payload.get("max_tokens"), "stream" in payload)
         resp = requests.post(llm_url, json=payload, headers=headers, timeout=int(os.environ.get("INTELLIGRAPH_LLM_TIMEOUT", "120")), verify=LLM_SSL_VERIFY)
         resp.encoding = "utf-8"
+        app.logger.info("LLM ask ← status=%d | content-type=%s | body[:500]=%s",
+                        resp.status_code, resp.headers.get("content-type", ""), resp.text[:500])
         return jsonify({"status": resp.status_code, "body": resp.text})
     except requests.exceptions.Timeout:
         return jsonify({"error": "LLM request timed out"}), 504
-    except requests.exceptions.ConnectionError:
+    except requests.exceptions.ConnectionError as e:
+        app.logger.warning("LLM ask connection error: %s", str(e)[:300])
         return jsonify({"error": "Cannot reach LLM provider"}), 503
     except Exception as e:
+        app.logger.error("LLM ask unexpected error: %s", str(e)[:500], exc_info=True)
         return jsonify({"error": str(e)}), 502
 
 
@@ -549,6 +557,14 @@ def clone_project():
             # Build graphs (shared with pull endpoint)
             _build_graphs(pid, proj, repo_dir)
 
+            # Log what we got
+            gf_path = os.path.join(repo_dir, "graphify-out", "graph.json")
+            crg_path = os.path.join(repo_dir, ".code-review-graph", "graph.db")
+            html_in_repo = os.path.join(repo_dir, "graphify-out", "graph.html")
+            app.logger.info("Clone build done: pid=%d graph.json=%s graph.db=%s graph.html=%s graphify_data=%s nodes=%s",
+                            pid, os.path.exists(gf_path), os.path.exists(crg_path),
+                            os.path.exists(html_in_repo), bool(proj.get("graphify_data")), proj.get("nodes"))
+
             proj["status"] = "ready"
             proj["repo_dir"] = repo_dir
             _save_project(pid, proj)
@@ -780,11 +796,16 @@ def project_status(pid):
 def project_graph_data(pid):
     proj = _projects().get(pid)
     if not proj:
+        app.logger.warning("graph-data: project %d not found", pid)
         return jsonify({"graphify": None, "nodes": 0, "edges": 0}), 200
+    gf = proj.get("graphify_data")
+    app.logger.info("graph-data: pid=%d name=%s graphify_data=%s nodes=%s edges=%s crg_db=%s",
+                    pid, proj.get("name"), bool(gf), proj.get("nodes"), proj.get("edges"),
+                    proj.get("crg_db_path"))
     result = {"id": pid, "name": proj["name"], "status": proj.get("status"),
               "nodes": proj.get("nodes", 0), "edges": proj.get("edges", 0)}
-    if "graphify_data" in proj and proj["graphify_data"]:
-        result["graphify"] = proj["graphify_data"]
+    if gf:
+        result["graphify"] = gf
     crg_path = proj.get("crg_db_path")
     if crg_path and os.path.exists(crg_path):
         result["has_crg_db"] = True
@@ -811,10 +832,13 @@ def project_graph_html(pid):
     Works for cloned repos (reads graphify-out/graph.html) AND uploads (generates HTML from graphify_data JSON)."""
     proj = _projects().get(pid)
     if not proj:
+        app.logger.warning("graph-html: project %d not found", pid)
         return """<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{background:rgba(0,0,0,0.8);color:#c9d1d9;font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}p{text-align:center}</style></head><body><p>Project deleted or not found.<br>Select another project from the sidebar.</p></body></html>""", 200
 
     html = None
     repo_dir = proj.get("repo_dir")
+    app.logger.info("graph-html: pid=%d repo_dir=%s graphify_data=%s graph_html_path=%s",
+                    pid, repo_dir, bool(proj.get("graphify_data")), proj.get("graph_html_path"))
 
     # 1. Try cloned repo's pre-built graph.html
     if repo_dir:
@@ -823,8 +847,9 @@ def project_graph_html(pid):
             try:
                 with open(p, "r", encoding="utf-8") as f:
                     html = f.read()
-            except Exception:
-                pass
+                app.logger.info("graph-html: loaded from repo_dir graph.html (%d bytes)", len(html))
+            except Exception as e:
+                app.logger.warning("graph-html: failed to read %s: %s", p, e)
 
     # 2. Fallback: use pre-generated HTML from upload or generate from graphify_data
     if not html:

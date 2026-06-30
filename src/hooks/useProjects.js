@@ -26,12 +26,7 @@ export function useProjects() {
   const cloneProject = useCallback(async ({ gitUrl, name, accessToken, useLinkedCredentials, authProvider }) => {
     try {
       const p = await projectsService.clone({ gitUrl, name, accessToken, useLinkedCredentials, authProvider });
-      if (p.graphify_data && p.crg_db_path) {
-        p.graphify_data.has_crg_db = true;
-      }
-      if (p.graphify_data) await saveToIDB(`graphify-${p.id}`, p.graphify_data);
-      if (p.crg_db_path) await saveToIDB(`crg-${p.id}`, { path: p.crg_db_path, has_crg_db: true, nodes: p.crg_nodes });
-      if (p.graph_html_path) await saveToIDB(`html-${p.id}`, { path: p.graph_html_path, fileName: "graph.html" });
+      // Clone response is lightweight — graph data loads separately via /projects/<pid>/graph-data
       setActivePid(p.id);
       await fetchProjects();
       return p;

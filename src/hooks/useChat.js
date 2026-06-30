@@ -210,22 +210,28 @@ export function useChat({ activePid, llmUrl, llmToken, model, onMatchedNodes, on
         content: m.content.length > 200 ? m.content.slice(0, 200) + "..." : m.content,
       }));
 
+      const payload = {
+        model: model || undefined,
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          ...(richContext ? [{ role: "system", content: `Project context:\n${richContext}` }] : []),
+          ...historyMessages,
+          { role: "user", content: trimmed },
+        ],
+        max_tokens: 4096,
+        temperature: 0.2,
+      };
+
+      console.log("[useChat] LLM ask →", { url: llmUrl, model: payload.model, msgCount: payload.messages.length, maxTokens: payload.max_tokens, hasStream: "stream" in payload });
+
       const j = await llmService.relay({
         url: llmUrl,
         token: llmToken,
-        payload: {
-          model: model || undefined,
-          messages: [
-            { role: "system", content: SYSTEM_PROMPT },
-            ...(richContext ? [{ role: "system", content: `Project context:\n${richContext}` }] : []),
-            ...historyMessages,
-            { role: "user", content: trimmed },
-          ],
-          max_tokens: 4096,
-          temperature: 0.2,
-        },
+        payload,
         projectId: activePid,
       });
+
+      console.log("[useChat] LLM ask ←", { status: j.status, bodyLen: j.body?.length, bodyPreview: j.body?.slice(0, 300) });
 
       if (j.status !== 200) {
         const errBody = JSON.parse(j.body || "{}");
