@@ -91,6 +91,7 @@ def retrieve_chunks(ranked_files: list, proj: dict, task_policy: dict = None, ma
                 _vmsg("CHUNKER SPARSE FAIL pid=%s — error: %s", proj.get("id"), fetch_error)
             if fetched_dir:
                 _vmsg("CHUNKER SPARSE OK pid=%s — fetched to %s", proj.get("id"), fetched_dir)
+                proj["_sparse_fetch_ok"] = True
                 cleanup_after = fetched_dir
                 try:
                     from code_chunker import chunk_files

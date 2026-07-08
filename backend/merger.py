@@ -78,12 +78,7 @@ def merge_tasks(tasks: list, per_task_results: list, graphify_data: dict, nx_met
     if not tasks:
         return "", {}
 
-    parts = [
-        "You are an expert software architect helping a developer understand a codebase. "
-        "Give a direct, concise answer. Do not output your thinking process. "
-        "Use the provided context as your only source of truth. Mention specific file paths. "
-        "Do not invent files, functions, imports, or APIs."
-    ]
+    parts = []
 
     # 1. Deduplicate files across tasks
     all_files = _deduplicate_across_tasks(per_task_results)
@@ -124,7 +119,9 @@ def merge_tasks(tasks: list, per_task_results: list, graphify_data: dict, nx_met
     # Check if this is a narrow architecture query (has a specific target)
     has_specific_target = any(
         t.get("type") == "architecture" and t.get("target") and
-        len(t["target"]) > 3 and t["target"].lower() not in ("the project", "this project", "project", "this", "the")
+        len(t["target"]) > 3 and t["target"].lower() not in
+        ("the project", "this project", "project", "this", "the",
+         "architecture", "structure", "overview", "codebase", "app", "application", "system")
         for t in tasks
     )
 

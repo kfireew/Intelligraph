@@ -249,41 +249,30 @@ def retrieve_context(proj: dict, prompt: str, overrides: dict = None) -> dict:
                         intel_files.extend(search_results)
                         intel_mode = "search"
 
-                    # Also run the old CRG domain finder for architecture (backward compat)
-                    if ttype == "architecture":
-                        try:
-                            from crg_domain_finder import find_domain_files_with_crg, get_crg_db_path
-                            crg_path = get_crg_db_path(proj)
-                            if crg_path:
-                                max_files = 12
-                                if overrides and "file_count" in overrides:
-                                    max_files = overrides["file_count"]
-                                crg_domain_files = find_domain_files_with_crg(crg_path, prompt, repo_dir=proj.get("repo_dir"), max_files=max_files, graphify_data=graphify_data)
-                        except Exception:
-                            pass
                 except Exception as e:
                     log.warning("Intelligence provider %s failed: %s", provider.name, e)
 
             # Merge intelligence file results into ranked list
             if intel_files:
                 ranked = merge_intelligence_results(ranked, intel_files, provider_name=intel_providers[0].name)
-            elif crg_domain_files:
-                ranked = merge_graphify_and_crg_candidates(ranked, crg_domain_files)
 
             # Architecture rescue: ensure intelligence files have room in top N
-            if task["type"] == "architecture" and (intel_files or crg_domain_files):
-                combined_intel = intel_files + [{"file_path": cf["file_path"], "score": cf.get("score", 5)} for cf in crg_domain_files]
+            if task["type"] == "architecture" and intel_files:
                 min_slots, max_slots = 2, 5
                 if overrides and "crg_ratio" in overrides and "file_count" in overrides:
                     fc = overrides["file_count"]
                     min_slots = round(overrides["crg_ratio"] * fc * 0.7)
                     max_slots = round(overrides["crg_ratio"] * fc)
                 ranked, crg_rescue_info = apply_architecture_layer_rescue(
-                    ranked, combined_intel, min_crg_slots=min_slots, max_crg_slots=max_slots)
+                    ranked, intel_files, min_crg_slots=min_slots, max_crg_slots=max_slots)
 
             # Render intelligence metadata as context text
             if intel_metadata and intel_mode:
                 intel_context_text += render_intelligence_context(intel_metadata, intel_mode)
+
+            # If no metadata was rendered but search results exist, render those
+            if not intel_metadata and intel_files and intel_mode:
+                intel_context_text += render_intelligence_context(intel_files, intel_mode, max_chars=800)
 
         file_cap = 20
         if overrides and "file_count" in overrides:
@@ -349,9 +338,9 @@ def retrieve_context(proj: dict, prompt: str, overrides: dict = None) -> dict:
 
     # Build context_stats from merger stats + retrieval stats
     repo_dir = proj.get("repo_dir")
-    source_available = bool(repo_dir and os.path.isdir(repo_dir))
     raw_chunks = merger_stats.get("raw_chunks", 0)
     raw_code_chars = merger_stats.get("raw_code_chars", 0)
+    source_available = bool(repo_dir and os.path.isdir(repo_dir)) or proj.get("_sparse_fetch_ok", False)
     is_architecture = any(t.get("type") in ("architecture", "overview") for t in tasks)
     degraded = not source_available or (is_architecture and raw_chunks < 3 and raw_code_chars < 6000)
 
@@ -577,7 +566,7 @@ def apply_architecture_layer_rescue(
     crg_domain_files: list[dict],
     *,
     min_crg_slots: int = 2,
-    max_crg_slots: int = 5,
+    max_crg_slots: int = 5
 ) -> tuple:
     """Ensure CRG domain files have room in top 15 for architecture tasks.
 

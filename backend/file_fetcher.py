@@ -109,7 +109,21 @@ def fetch_files_sparse(git_url, file_paths, git_auth_args=None, git_env=None,
                 return None, "not_found"
             if "certificate" in stderr or "ssl" in stderr or "tls" in stderr:
                 return None, "ssl"
-            return None, "other"
+            # Retry once on transient failures (cold start, network hiccup)
+            log.info("Sparse clone retrying once after transient failure")
+            tmp_dir = tempfile.mkdtemp(prefix="intelligraph-sparse-retry-")
+            r = subprocess.run(
+                clone_cmd[:-1] + [tmp_dir],  # same cmd, new dir
+                capture_output=True, text=True,
+                timeout=timeout + 30, env=git_env,
+            )
+            if r.returncode != 0:
+                stderr = (r.stderr or "").lower()
+                log.warning("Sparse clone retry failed: %s", stderr[:300])
+                _rmtree_hard(tmp_dir)
+                if any(p in stderr for p in ("401", "403", "authentication", "access denied", "could not read", "authorization")):
+                    return None, "auth"
+                return None, "other"
 
         # 2. Configure sparse-checkout for just the requested files
         sparse_cmd = ["git", "sparse-checkout", "set", "--no-cone"] + unique_paths
