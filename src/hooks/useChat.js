@@ -204,7 +204,9 @@ export function useChat({ activePid, llmUrl, llmToken, model, onMatchedNodes, on
     let fullText = "";
     let pw = null;
     try {
-      const priorMessages = (activeConv?.messages || []).slice(-8);
+      const priorMessages = (activeConv?.messages || [])
+        .filter(m => !m.content.startsWith("(LLM error") && !m.content.startsWith("(LLM request failed") && !m.content.startsWith("(No response"))
+        .slice(-8);
       const historyMessages = priorMessages.map(m => ({
         role: m.role,
         content: m.content.length > 200 ? m.content.slice(0, 200) + "..." : m.content,

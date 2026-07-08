@@ -1,0 +1,10 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "intelligraph": {
+      "type": "local",
+      "command": ["python", "C:\\Users\\kfirm\\Downloads\\Intelligraph\\backend\\mcp_server_standalone.py", "--intelligraph-url", "http://127.0.0.1:5050", "--project-id", "1"],
+      "enabled": true
+    }
+  }
+}

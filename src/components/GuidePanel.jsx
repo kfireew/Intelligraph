@@ -13,7 +13,7 @@ export function GuidePanel({ activePid, activeProject }) {
 
   // Auto-fill from what the user already has
   const containerUrl = typeof window !== "undefined" ? window.location.origin : "http://localhost:5050";
-  const llmUrl = (typeof localStorage !== "undefined" && localStorage.getItem("llm-url")) || "https://models.ai-services.idf.cts/v1/chat/completions";
+  const llmUrl = ((typeof localStorage !== "undefined" && localStorage.getItem("llm-url")) || "https://models.ai-services.idf.cts/v1/chat/completions").trim().replace(/\/+$/, "");
   const completionsUrl = pid ? `/api/v1/projects/${pid}/completions` : null;
   const fullCompletionsUrl = pid ? `${containerUrl}${completionsUrl}` : null;
 

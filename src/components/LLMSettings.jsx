@@ -44,7 +44,7 @@ export function LLMSettings({ llmUrl, llmToken, model, models, modelsLoading, te
 
   const handleTest = () => {
     onSave(url, token);
-    onTest();
+    onTest(url.trim().replace(/\/+$/, ""), token);
   };
 
   const filtered = (models || []).filter((m) => {

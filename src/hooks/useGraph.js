@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { graphService } from "../services/graphService";
 
-export function useGraph(pid) {
+export function useGraph(pid, projectStatus) {
   const [graphData, setGraphData] = useState(null);
   const [status, setStatus] = useState("idle");
   const [selectedNode, setSelectedNode] = useState(null);
@@ -22,6 +22,11 @@ export function useGraph(pid) {
   }, []);
 
   useEffect(() => { if (pid) loadGraph(pid); }, [pid, loadGraph]);
+
+  // Re-fetch when project status transitions to "ready" (e.g. after queued build)
+  useEffect(() => {
+    if (pid && projectStatus === "ready") loadGraph(pid);
+  }, [pid, projectStatus, loadGraph]);
 
   const selectNode = useCallback((node) => setSelectedNode(node), []);
   const clearGraph = useCallback(() => {

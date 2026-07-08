@@ -24,10 +24,43 @@ from flask import (Flask, Response, jsonify, redirect, render_template,
                    request, send_file, send_from_directory, session,
                    stream_with_context, url_for)
 
+# ── Network mode: "closed" (default) or "open" ────────────────────
+# closed = internal LLM hosts, SSL verify off, git sslVerify off (for closed network)
+# open   = openrouter.ai + GitHub, SSL verify on, git sslVerify on (for public internet)
+# Individual settings can still be overridden via their own env vars.
+NETWORK_MODE = os.environ.get("INTELLIGRAPH_NETWORK_MODE", "closed").lower()
+
+if NETWORK_MODE == "open":
+    _DEFAULT_SSL_VERIFY = "true"
+    _DEFAULT_ALLOWED_HOSTS = "openrouter.ai"
+    _DEFAULT_GIT_SSL_VERIFY = "true"
+else:
+    _DEFAULT_SSL_VERIFY = "false"
+    _DEFAULT_ALLOWED_HOSTS = "models.ai-services.idf.cts"
+    _DEFAULT_GIT_SSL_VERIFY = "false"
+
 # ── SSL: closed-network internal CAs ────────────────────────────
-# Internal services (LLM, SSO) use certs signed by internal CAs.
-# Disable verification by default; override with LLM_SSL_VERIFY=true.
-LLM_SSL_VERIFY = os.environ.get("LLM_SSL_VERIFY", "false").lower() == "true"
+LLM_SSL_VERIFY = os.environ.get("LLM_SSL_VERIFY", _DEFAULT_SSL_VERIFY).lower() == "true"
+GIT_SSL_VERIFY = os.environ.get("INTELLIGRAPH_GIT_SSL_VERIFY", _DEFAULT_GIT_SSL_VERIFY).lower() == "true"
+
+# ── Verbose console logging ────────────────────────────────────
+# Prints step-by-step progress to stdout so you can see exactly where
+# the pipeline is (or where it got stuck). On by default.
+# Set INTELLIGRAPH_VERBOSE=false to silence.
+VERBOSE = os.environ.get("INTELLIGRAPH_VERBOSE", "true").lower() == "true"
+
+
+def _vmsg(msg, *args):
+    """Print a timestamped progress message to stdout (if VERBOSE)."""
+    if not VERBOSE:
+        return
+    ts = datetime.now().strftime("%H:%M:%S")
+    if args:
+        try:
+            msg = msg % args
+        except Exception:
+            pass
+    print(f"[{ts}] {msg}", flush=True)
 try:
     import urllib3
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -43,8 +76,49 @@ app = Flask(__name__, template_folder=TEMPLATES,
             static_folder=STATIC, static_url_path="/static")
 REPO_DIR = os.environ.get("INTELLIGRAPH_REPO_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "repos"))
 TEMP_DIR = os.environ.get("INTELLIGRAPH_TEMP", os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "temp"))
+ARTIFACTS_DIR = os.environ.get("INTELLIGRAPH_ARTIFACTS_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "artifacts"))
 os.makedirs(REPO_DIR, exist_ok=True)
 os.makedirs(TEMP_DIR, exist_ok=True)
+os.makedirs(ARTIFACTS_DIR, exist_ok=True)
+
+
+def _rmtree_hard(path):
+    """shutil.rmtree that handles Windows read-only .git files."""
+    import stat
+    def _on_error(func, p, exc_info):
+        try:
+            os.chmod(p, stat.S_IWRITE)
+            func(p)
+        except Exception:
+            pass
+    shutil.rmtree(path, onerror=_on_error)
+
+
+def _cleanup_orphans():
+    """Delete orphaned repo dirs and stale temp files on startup.
+    Called lazily on first project access to avoid blocking import."""
+    try:
+        # Clean orphaned repo dirs (dirs in REPO_DIR not referenced by any project)
+        if os.path.isdir(REPO_DIR):
+            for entry in os.listdir(REPO_DIR):
+                d = os.path.join(REPO_DIR, entry)
+                if os.path.isdir(d):
+                    _rmtree_hard(d)
+        # Clean stale temp files older than 24h
+        if os.path.isdir(TEMP_DIR):
+            cutoff = time.time() - 86400
+            for entry in os.listdir(TEMP_DIR):
+                p = os.path.join(TEMP_DIR, entry)
+                try:
+                    if os.path.isfile(p) and os.path.getmtime(p) < cutoff:
+                        os.unlink(p)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+# ── Nx MCP: if enabled, keep repo_dir after build (Nx needs node_modules live) ──
+KEEP_REPO_AFTER_BUILD = os.environ.get("INTELLIGRAPH_ENABLE_NX_MCP", "false").lower() == "true"
 # ── SQLite persistence (optional) ──
 INTELLIGRAPH_DB = os.environ.get("INTELLIGRAPH_DB", os.path.join(TEMP_DIR, "intelligraph.db"))
 
@@ -60,6 +134,7 @@ def _get_db():
     conn.execute("CREATE TABLE IF NOT EXISTS projects (id INTEGER, user_key TEXT, data TEXT, PRIMARY KEY(user_key, id))")
     conn.execute("CREATE TABLE IF NOT EXISTS chats (id TEXT PRIMARY KEY, user_key TEXT, project_id INTEGER, role TEXT, content TEXT, created_at TEXT)")
     conn.execute("CREATE TABLE IF NOT EXISTS uploads (user_key TEXT, project_id INTEGER, type TEXT, data TEXT, UNIQUE(user_key, project_id, type))")
+    conn.execute("CREATE TABLE IF NOT EXISTS fetch_tokens (project_id INTEGER PRIMARY KEY, token TEXT, created_at TEXT)")
     return conn
 
 _db = None  # lazy init
@@ -70,16 +145,19 @@ def _db_conn():
         _db = _get_db()
     return _db
 
-def _save_project(pid, proj):
-    """Persist project to SQLite."""
+def _save_project(pid, proj, uk=None):
+    """Persist project to SQLite. If uk (user_key) is not provided,
+    derives it from the current request context (will fail in background threads)."""
     try:
+        if uk is None:
+            uk = _user_key()
         conn = _db_conn()
-        safe = {k: v for k, v in proj.items() if k not in ("_G", "graph_html_path")}
+        safe = {k: v for k, v in proj.items() if k not in ("_G", "graph_html_path", "_fetch_token")}
         safe["_has_graphify"] = bool(proj.get("graphify_data"))
         safe["_has_crg"] = bool(proj.get("crg_db_path"))
         safe["_has_html"] = bool(proj.get("graph_html_path"))
         conn.execute("INSERT OR REPLACE INTO projects(id, user_key, data) VALUES(?, ?, ?)",
-                     (pid, _user_key(), json.dumps(safe)))
+                     (pid, uk, json.dumps(safe)))
         conn.commit()
     except Exception as e:
         app.logger.warning("DB save failed: %s", e)
@@ -98,6 +176,53 @@ def _load_projects(uk=None):
                 _projects()[row["id"]] = data
     except Exception as e:
         app.logger.warning("DB load failed: %s", e)
+
+def _store_fetch_token(pid, token):
+    """Store a git access token for sparse-fetch (obfuscated, SQLite).
+    Token is XOR'd with a per-install key - not real encryption, but
+    avoids plaintext in DB dumps. Closed-network only."""
+    if not token:
+        return
+    try:
+        key = app.secret_key
+        obf = _xor_obfuscate(token, key)
+        conn = _db_conn()
+        conn.execute(
+            "INSERT OR REPLACE INTO fetch_tokens(project_id, token, created_at) VALUES(?, ?, ?)",
+            (pid, obf, datetime.now(timezone.utc).isoformat())
+        )
+        conn.commit()
+    except Exception as e:
+        app.logger.warning("Failed to store fetch token: %s", e)
+
+def _load_fetch_token(pid):
+    """Load and de-obfuscate the stored fetch token for a project."""
+    try:
+        conn = _db_conn()
+        row = conn.execute("SELECT token FROM fetch_tokens WHERE project_id=?", (pid,)).fetchone()
+        if row and row["token"]:
+            return _xor_obfuscate(row["token"], app.secret_key)
+    except Exception as e:
+        app.logger.warning("Failed to load fetch token: %s", e)
+    return None
+
+def _delete_fetch_token(pid):
+    """Delete fetch token when project is deleted."""
+    try:
+        conn = _db_conn()
+        conn.execute("DELETE FROM fetch_tokens WHERE project_id=?", (pid,))
+        conn.commit()
+    except Exception:
+        pass
+
+def _xor_obfuscate(text, key):
+    """Simple XOR obfuscation. Not cryptographic security - just avoids plaintext."""
+    if not text or not key:
+        return text
+    result = []
+    for i, ch in enumerate(text):
+        result.append(chr(ord(ch) ^ ord(key[i % len(key)])))
+    return "".join(result)
 
 app.secret_key = os.environ.get("SECRET_KEY", "intelligraph-dev-key-do-not-use-in-production")
 
@@ -118,11 +243,16 @@ def _user_key():
     u = get_user()
     if u and u.get("source") == "oidc":
         uk = session.get("oidc_sub", u["name"])
-    else:
+    elif OIDC_ISSUER:
+        # OIDC configured but not authenticated - keep session-based for multi-user
         uk = session.get("_anon_key") or _init_anon()
+    else:
+        # No OIDC - single-user mode, use stable key so clearing cookies
+        # doesn't orphan projects
+        uk = "local"
     # Load persisted projects on first access for this user
     if uk not in _PROJECTS:
-        _load_projects()
+        _load_projects(uk)
     return uk
 
 
@@ -239,14 +369,16 @@ def auth_me():
 # ── LLM relay ────────────────────────────────────────────────────
 
 ALLOWED_LLM_HOSTS = set(h.strip() for h in os.environ.get(
-    "LLM_ALLOWED_HOSTS", "models.ai-services.idf.cts"
+    "LLM_ALLOWED_HOSTS", _DEFAULT_ALLOWED_HOSTS
 ).split(",") if h.strip())
+
+VIZ_NODE_LIMIT = int(os.environ.get("INTELLIGRAPH_VIZ_NODE_LIMIT", "5000"))
 
 @app.route("/llm/ask", methods=["POST"])
 def llm_ask():
-    """Relay LLM requests — forwards user's LLM call through the pod."""
+    """Relay LLM requests - forwards user's LLM call through the pod."""
     data = request.get_json(force=True)
-    llm_url = data.get("url", "").strip()
+    llm_url = data.get("url", "").strip().rstrip("/")
     llm_token = data.get("token", "").strip()
     payload = data.get("payload", {})
 
@@ -255,32 +387,28 @@ def llm_ask():
 
     host = urlparse(llm_url).hostname
     if host not in ALLOWED_LLM_HOSTS:
-        app.logger.warning("LLM ask blocked host: %s (allowed: %s)", host, ALLOWED_LLM_HOSTS)
+        print(f"[LLM] BLOCKED host={host} allowed={ALLOWED_LLM_HOSTS}", flush=True)
         return jsonify({"error": "provider not allowed"}), 403
 
     headers = {"Content-Type": "application/json"}
     if llm_token:
         headers["Authorization"] = f"Bearer {llm_token}"
-    if host == "openrouter.ai":
-        headers["HTTP-Referer"] = "https://localhost"
-        headers["X-Title"] = "Intelligraph"
 
     try:
-        app.logger.info("LLM ask → URL=%s | model=%s | messages=%d | max_tokens=%s | stream_in_payload=%s",
-                        llm_url, payload.get("model"), len(payload.get("messages", [])),
-                        payload.get("max_tokens"), "stream" in payload)
+        print(f"[LLM] -> URL={llm_url}", flush=True)
+        print(f"[LLM] -> model={payload.get('model')!r} msgs={len(payload.get('messages', []))} max_tokens={payload.get('max_tokens')} stream={'stream' in payload} temp={payload.get('temperature')}", flush=True)
+        print(f"[LLM] -> payload_json={json.dumps(payload)[:800]}", flush=True)
         resp = requests.post(llm_url, json=payload, headers=headers, timeout=int(os.environ.get("INTELLIGRAPH_LLM_TIMEOUT", "120")), verify=LLM_SSL_VERIFY)
         resp.encoding = "utf-8"
-        app.logger.info("LLM ask ← status=%d | content-type=%s | body[:500]=%s",
-                        resp.status_code, resp.headers.get("content-type", ""), resp.text[:500])
+        print(f"[LLM] <- status={resp.status_code} ct={resp.headers.get('content-type','')} body={resp.text[:500]}", flush=True)
         return jsonify({"status": resp.status_code, "body": resp.text})
     except requests.exceptions.Timeout:
         return jsonify({"error": "LLM request timed out"}), 504
     except requests.exceptions.ConnectionError as e:
-        app.logger.warning("LLM ask connection error: %s", str(e)[:300])
+        print(f"[LLM] CONN_ERR {str(e)[:300]}", flush=True)
         return jsonify({"error": "Cannot reach LLM provider"}), 503
     except Exception as e:
-        app.logger.error("LLM ask unexpected error: %s", str(e)[:500], exc_info=True)
+        print(f"[LLM] ERROR {str(e)[:500]}", flush=True)
         return jsonify({"error": str(e)}), 502
 
 
@@ -329,7 +457,7 @@ def llm_models():
 
 # ── Intent classification ────────────────────────────────────────
 
-# ── Intent classification REMOVED — client-side only via intentDetector.js ──
+# ── Intent classification REMOVED - client-side only via intentDetector.js ──
 
 FILE_PATH_PATTERN = re.compile(
     r"(?<![\w/.-])(?:[A-Za-z0-9_@.-]+/)*[A-Za-z0-9_@.-]+"
@@ -419,14 +547,14 @@ def _git_auth_args(access_token=None):
     Returns list like:
       ["-c", "http.sslVerify=false", "-c", "http.extraHeader=Authorization: Bearer <token>"]
     """
-    args = ["-c", "http.sslVerify=false"]
+    args = ["-c", f"http.sslVerify={'true' if GIT_SSL_VERIFY else 'false'}"]
     if access_token:
         args += ["-c", f"http.extraHeader=Authorization: Bearer {access_token}"]
     return args
 
 
 def _git_env():
-    """Minimal git env — no token in here, just suppress interactive prompts."""
+    """Minimal git env - no token in here, just suppress interactive prompts."""
     return {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
 
 
@@ -473,8 +601,16 @@ def clone_project():
         pid = _next_pid()
         proj = {"name": name, "git_url": git_url, "status": "cloning", "nodes": 0, "edges": 0}
 
+        _vmsg("CLONE START pid=%d name=%s url=%s type=%s", pid, name, git_url, clone_type)
+
         if not git_url and clone_type != "upload":
             return jsonify({"error": "git_url required (GitHub or Bitbucket)"}), 400
+
+        if clone_type == "upload" or (not git_url and clone_type == "upload"):
+            proj["status"] = "pending_upload"
+            _projects()[pid] = proj
+            _save_project(pid, proj)
+            _vmsg("CLONE UPLOAD pid=%d - waiting for file upload", pid)
 
         if clone_type in ("bitbucket", "git") and git_url:
             proj["status"] = "cloning"
@@ -487,10 +623,12 @@ def clone_project():
             use_bearer = auth_mode == "bitbucket_datacenter_bearer"
 
             if use_bearer and access_token is None:
+                _vmsg("CLONE FAIL pid=%d - bearer mode but no token", pid)
                 return jsonify({"error": "missing_repo_credentials", "message": "Provide a Bitbucket Data Center HTTP access token for Bearer auth."}), 400
 
             # ── Dry-run: return redacted command shape, no git calls ──
             if data.get("dry_run"):
+                _vmsg("CLONE DRY-RUN pid=%d - returning command shape only", pid)
                 _projects().pop(pid, None)
                 redacted_token = access_token if (use_bearer and access_token) else None
                 git_auth = _git_auth_args(access_token=redacted_token)
@@ -512,14 +650,13 @@ def clone_project():
                 return jsonify(result)
 
             # ── Auth mode ──
-            # Build git -c args (matches working manual command)
+            _vmsg("CLONE AUTH pid=%d - use_bearer=%s", pid, use_bearer)
             git_auth = _git_auth_args(access_token=access_token if use_bearer else None)
             git_env = _git_env()
 
-            # Clone URL stays clean — token goes in http.extraHeader, not the URL
+            # Clone URL stays clean - token goes in http.extraHeader, not the URL
             clone_url = git_url
             if not use_bearer and "bitbucket" in git_url.lower():
-                # Backward compat: URL-embedding fallback
                 use_token = access_token or session.get("oidc_access_token", "")
                 if use_token:
                     try:
@@ -529,10 +666,14 @@ def clone_project():
                     except (ValueError, IndexError):
                         app.logger.warning("Could not parse git URL for token embedding")
 
+            # ── Preflight: ls-remote ──
+            _vmsg("CLONE PREFLIGHT pid=%d - git ls-remote %s", pid, git_url)
             r = subprocess.run(["git"] + git_auth + ["ls-remote", clone_url],
                              capture_output=True, text=True, timeout=30, env=git_env)
             if r.returncode != 0:
+                _vmsg("CLONE PREFLIGHT FAIL pid=%d - rc=%d stderr=%s", pid, r.returncode, (r.stderr or "")[:200])
                 _projects().pop(pid, None)
+                _rmtree_hard(repo_dir)
                 err = (r.stderr or "").lower()
                 if use_bearer and ("401" in err or "403" in err or "authentication" in err or "access denied" in err or "could not read" in err):
                     return jsonify({"error": "bitbucket_auth_failed", "message": "Bitbucket rejected the Bearer token. Check repo read permission."}), 401
@@ -541,36 +682,65 @@ def clone_project():
                 if "certificate" in err or "tls" in err or "ssl" in err or "verify" in err:
                     return jsonify({"error": "git_tls_ca_untrusted", "message": "Git SSL certificate verification error (http.sslVerify=false is set). The Bitbucket server SSL certificate may be misconfigured. Contact your infrastructure team."}), 500
                 return jsonify({"error": "clone_failed", "message": redact_secret(r.stderr[:500], access_token)}), 500
+            _vmsg("CLONE PREFLIGHT OK pid=%d", pid)
 
-            # ── Clone (same -c flags) ──
+            # ── Clone ──
+            _vmsg("CLONE GIT pid=%d - git clone --depth 1 %s", pid, git_url)
             proj["status"] = "building"
             r = subprocess.run(["git"] + git_auth + ["clone", "--depth", "1", clone_url, repo_dir],
                              capture_output=True, text=True, timeout=120, env=git_env)
             if r.returncode != 0:
+                _vmsg("CLONE GIT FAIL pid=%d - rc=%d stderr=%s", pid, r.returncode, (r.stderr or "")[:200])
                 _projects().pop(pid, None)
+                _rmtree_hard(repo_dir)
                 return jsonify({"error": "clone_failed", "message": redact_secret(r.stderr[:500], access_token)}), 500
+            _vmsg("CLONE GIT OK pid=%d - repo at %s", pid, repo_dir)
 
             # Scrub any leaked token from remote origin
             _clean_remote_url(repo_dir)
-            _save_project(pid, proj)
 
-            # Build graphs (shared with pull endpoint)
-            _build_graphs(pid, proj, repo_dir)
+            # Store fetch token for on-demand sparse fetch (obfuscated in SQLite)
+            fetch_token = access_token or session.get("oidc_access_token", "")
+            if fetch_token:
+                _store_fetch_token(pid, fetch_token)
+                _vmsg("CLONE TOKEN STORED pid=%d - saved for sparse fetch", pid)
 
-            # Log what we got
-            gf_path = os.path.join(repo_dir, "graphify-out", "graph.json")
-            crg_path = os.path.join(repo_dir, ".code-review-graph", "graph.db")
-            html_in_repo = os.path.join(repo_dir, "graphify-out", "graph.html")
-            app.logger.info("Clone build done: pid=%d graph.json=%s graph.db=%s graph.html=%s graphify_data=%s nodes=%s",
-                            pid, os.path.exists(gf_path), os.path.exists(crg_path),
-                            os.path.exists(html_in_repo), bool(proj.get("graphify_data")), proj.get("nodes"))
-
-            proj["status"] = "ready"
             proj["repo_dir"] = repo_dir
+            proj["status"] = "queued"
             _save_project(pid, proj)
+
+            # Capture user_key for worker thread (Flask session not available there)
+            uk = _user_key()
+
+            # ── Enqueue build (async via build queue, or sync in TESTING mode) ──
+            def _build_job(pid=pid, proj=proj, repo_dir=repo_dir, uk=uk):
+                _vmsg("BUILD START pid=%d - graphify + CRG", pid)
+                _build_graphs(pid, proj, repo_dir, user_key=uk)
+                proj["status"] = "ready"
+                _save_project(pid, proj, uk=uk)
+                _vmsg("BUILD DONE pid=%d - status=ready nodes=%s edges=%s", pid, proj.get("nodes", 0), proj.get("edges", 0))
+
+            if app.config.get("TESTING"):
+                _build_job()
+            else:
+                from build_queue import build_queue
+                build_queue.submit(_build_job)
+                _vmsg("BUILD QUEUED pid=%d - enqueued to build_queue", pid)
+
+            # Return immediately - frontend polls /status until ready
+            return jsonify({
+                "id": pid,
+                "name": proj.get("name"),
+                "status": proj.get("status"),
+                "nodes": proj.get("nodes", 0),
+                "edges": proj.get("edges", 0),
+                "has_graphify": bool(proj.get("graphify_data")),
+                "has_crg": bool(proj.get("crg_db_path") and os.path.exists(proj.get("crg_db_path", ""))),
+                "workspace_type": proj.get("workspace_type", "standard"),
+            })
 
         _projects()[pid] = proj
-        # Return lightweight response — graph data is fetched separately via /graph-data
+        # Return lightweight response - graph data is fetched separately via /graph-data
         return jsonify({
             "id": pid,
             "name": proj.get("name"),
@@ -588,33 +758,63 @@ def clone_project():
         return jsonify({"error": redact_secret(str(e)[:500], access_token)}), 500
 
 
-def _build_graphs(pid, proj, repo_dir):
-    """Run graphify + CRG build, parse results, generate HTML — shared by clone and pull."""
-    # graphify update
-    graphify_env = {**os.environ, "GRAPHIFY_MAX_WORKERS": os.environ.get("GRAPHIFY_MAX_WORKERS", "4")}
+def _tail_log(path, lines=5):
+    """Read the last N lines of a log file (for error reporting)."""
     try:
-        r = subprocess.run(["graphify", "update", "."], cwd=repo_dir,
-                         capture_output=True, text=True, timeout=300, env=graphify_env)
-        if r.returncode != 0:
-            app.logger.warning("graphify update failed (rc=%d): %s", r.returncode, r.stderr[:200])
-    except subprocess.TimeoutExpired:
-        app.logger.warning("graphify update timed out after 300s — continuing with partial data")
-    except FileNotFoundError:
-        app.logger.warning("graphify CLI not found — skipping graph build")
+        with open(path, "r", errors="replace") as f:
+            all_lines = f.readlines()
+            return "".join(all_lines[-lines:])[:500]
+    except Exception:
+        return "(log unavailable)"
 
-    # code-review-graph build
-    crg_env = {**os.environ, "CRG_PARSE_WORKERS": os.environ.get("CRG_PARSE_WORKERS", "4")}
+
+def _build_graphs(pid, proj, repo_dir, user_key=None):
+    """Run graphify + CRG build, parse results, generate HTML - shared by clone and pull.
+    
+    user_key: passed from caller to avoid accessing Flask session in worker threads.
+    """
+    # graphify update - stream output to temp log file (avoids RAM buffering)
+    _vmsg("GRAPHIFY START pid=%d - graphify update . (cwd=%s)", pid, repo_dir)
+    graphify_env = {**os.environ, "GRAPHIFY_MAX_WORKERS": os.environ.get("GRAPHIFY_MAX_WORKERS", "4")}
+    gf_log = os.path.join(TEMP_DIR, f"graphify-{pid}-{int(time.time())}.log")
     try:
-        r = subprocess.run(["code-review-graph", "build"], cwd=repo_dir,
-                          capture_output=True, text=True, timeout=300, env=crg_env)
+        with open(gf_log, "w") as logf:
+            r = subprocess.run(["graphify", "update", "."], cwd=repo_dir,
+                             stdout=logf, stderr=subprocess.STDOUT, timeout=300, env=graphify_env)
         if r.returncode != 0:
-            app.logger.warning("code-review-graph build failed (rc=%d): %s", r.returncode, r.stderr[:200])
+            _vmsg("GRAPHIFY WARN pid=%d - rc=%d (continuing with partial data)", pid, r.returncode)
+            app.logger.warning("graphify update failed (rc=%d): %s", r.returncode, _tail_log(gf_log))
+        else:
+            _vmsg("GRAPHIFY OK pid=%d", pid)
     except subprocess.TimeoutExpired:
-        app.logger.warning("code-review-graph build timed out after 300s — continuing with partial data")
+        _vmsg("GRAPHIFY TIMEOUT pid=%d - 300s exceeded (continuing)", pid)
+        app.logger.warning("graphify update timed out after 300s - continuing with partial data")
     except FileNotFoundError:
-        app.logger.warning("code-review-graph CLI not found — skipping CRG build")
+        _vmsg("GRAPHIFY SKIP pid=%d - graphify CLI not found", pid)
+        app.logger.warning("graphify CLI not found - skipping graph build")
+
+    # code-review-graph build - stream output to temp log file
+    _vmsg("CRG START pid=%d - code-review-graph build (cwd=%s)", pid, repo_dir)
+    crg_env = {**os.environ, "CRG_PARSE_WORKERS": os.environ.get("CRG_PARSE_WORKERS", "4")}
+    crg_log = os.path.join(TEMP_DIR, f"crg-{pid}-{int(time.time())}.log")
+    try:
+        with open(crg_log, "w") as logf:
+            r = subprocess.run(["code-review-graph", "build"], cwd=repo_dir,
+                              stdout=logf, stderr=subprocess.STDOUT, timeout=300, env=crg_env)
+        if r.returncode != 0:
+            _vmsg("CRG WARN pid=%d - rc=%d (continuing with partial data)", pid, r.returncode)
+            app.logger.warning("code-review-graph build failed (rc=%d): %s", r.returncode, _tail_log(crg_log))
+        else:
+            _vmsg("CRG OK pid=%d", pid)
+    except subprocess.TimeoutExpired:
+        _vmsg("CRG TIMEOUT pid=%d - 300s exceeded (continuing)", pid)
+        app.logger.warning("code-review-graph build timed out after 300s - continuing with partial data")
+    except FileNotFoundError:
+        _vmsg("CRG SKIP pid=%d - code-review-graph CLI not found", pid)
+        app.logger.warning("code-review-graph CLI not found - skipping CRG build")
 
     # Parse results
+    _vmsg("PARSE START pid=%d - reading graph.json + graph.db", pid)
     gf_path = os.path.join(repo_dir, "graphify-out", "graph.json")
     crg_path = os.path.join(repo_dir, ".code-review-graph", "graph.db")
 
@@ -623,6 +823,9 @@ def _build_graphs(pid, proj, repo_dir):
             proj["graphify_data"] = json.load(f)
         proj["nodes"] = len(proj["graphify_data"].get("nodes", []))
         proj["edges"] = len(proj["graphify_data"].get("links", []))
+        _vmsg("PARSE graph.json pid=%d - nodes=%d edges=%d", pid, proj["nodes"], proj["edges"])
+    else:
+        _vmsg("PARSE graph.json pid=%d - NOT FOUND", pid)
 
     if os.path.exists(crg_path):
         proj["crg_db_path"] = crg_path
@@ -634,9 +837,13 @@ def _build_graphs(pid, proj, repo_dir):
         proj["nodes"] = max(proj["nodes"], cn)
         proj["crg_nodes"] = cn
         proj["edges"] = max(proj["edges"], ce)
+        _vmsg("PARSE graph.db pid=%d - crg_nodes=%d crg_edges=%d", pid, cn, ce)
+    else:
+        _vmsg("PARSE graph.db pid=%d - NOT FOUND", pid)
 
-    # Generate graph.html
-    if proj.get("graphify_data"):
+    # Generate graph.html - skip if graphify CLI already wrote one (saves ~1GB RAM on large repos)
+    pre_built_html = os.path.join(repo_dir, "graphify-out", "graph.html") if repo_dir else None
+    if proj.get("graphify_data") and not (pre_built_html and os.path.exists(pre_built_html)):
         try:
             import graphify
             import graphify.export as gf_export
@@ -648,13 +855,13 @@ def _build_graphs(pid, proj, repo_dir):
                     if cid not in comms:
                         comms[cid] = []
                     comms[cid].append(nid)
-                html_path = f"{TEMP_DIR}/intelligraph-gf-html-{_user_key()}-{pid}-{int(time.time())}.html"
-                gf_export.to_html(G, comms, html_path)
+                html_path = f"{TEMP_DIR}/intelligraph-gf-html-{user_key or 'unknown'}-{pid}-{int(time.time())}.html"
+                gf_export.to_html(G, comms, html_path, node_limit=VIZ_NODE_LIMIT)
                 proj["graph_html_path"] = html_path
         except Exception as e:
             app.logger.warning("graph.html generation failed: %s", e, exc_info=True)
 
-    # Nx workspace detection
+    # Nx workspace detection (uses global nx binary from Docker image - no npm install needed)
     try:
         from nx_adapter import extract_nx_context
         nx_ctx = extract_nx_context(repo_dir)
@@ -673,45 +880,120 @@ def _build_graphs(pid, proj, repo_dir):
     if "nx_metadata" not in proj:
         proj["nx_metadata"] = {}
 
+    # ── Relocate artifacts + delete repo_dir (saves disk + RAM) ──
+    _relocate_artifacts(pid, proj, repo_dir)
+
+
+def _relocate_artifacts(pid, proj, repo_dir):
+    """Move graph.json, graph.db, graph.html to ARTIFACTS_DIR and delete repo_dir.
+
+    Skipped when KEEP_REPO_AFTER_BUILD=True (Nx MCP needs node_modules live).
+    """
+    if not repo_dir or not os.path.isdir(repo_dir):
+        _vmsg("RELOCATE SKIP pid=%d - repo_dir missing or not a dir", pid)
+        return
+
+    _vmsg("RELOCATE START pid=%d - moving artifacts to %s", pid, ARTIFACTS_DIR)
+    artifacts_proj_dir = os.path.join(ARTIFACTS_DIR, str(pid))
+    os.makedirs(artifacts_proj_dir, exist_ok=True)
+
+    # Move graph.json
+    gf_src = os.path.join(repo_dir, "graphify-out", "graph.json")
+    if os.path.exists(gf_src):
+        gf_dst = os.path.join(artifacts_proj_dir, "graph.json")
+        shutil.move(gf_src, gf_dst)
+        proj["graphify_path"] = gf_dst
+        _vmsg("RELOCATE graph.json pid=%d - moved to %s", pid, gf_dst)
+
+    # Move graph.db
+    crg_src = os.path.join(repo_dir, ".code-review-graph", "graph.db")
+    if os.path.exists(crg_src):
+        crg_dst = os.path.join(artifacts_proj_dir, "graph.db")
+        shutil.move(crg_src, crg_dst)
+        proj["crg_db_path"] = crg_dst
+        _vmsg("RELOCATE graph.db pid=%d - moved to %s", pid, crg_dst)
+
+    # Move graph.html (pre-built by graphify CLI)
+    html_src = os.path.join(repo_dir, "graphify-out", "graph.html")
+    if os.path.exists(html_src):
+        html_dst = os.path.join(artifacts_proj_dir, "graph.html")
+        shutil.move(html_src, html_dst)
+        proj["graph_html_path"] = html_dst
+        _vmsg("RELOCATE graph.html pid=%d - moved to %s", pid, html_dst)
+
+    # Delete repo_dir unless Nx MCP needs it
+    if KEEP_REPO_AFTER_BUILD:
+        _vmsg("RELOCATE SKIP DELETE pid=%d - keeping repo_dir (NX_MCP=true)", pid)
+        app.logger.info("Keeping repo_dir (INTELLIGRAPH_ENABLE_NX_MCP=true): %s", repo_dir)
+    else:
+        _vmsg("RELOCATE DELETE pid=%d - removing repo_dir %s", pid, repo_dir)
+        _rmtree_hard(repo_dir)
+        proj["repo_dir"] = None
+        _vmsg("RELOCATE DONE pid=%d - artifacts at %s, repo_dir deleted", pid, artifacts_proj_dir)
+        app.logger.info("Repo dir deleted after artifact relocation: pid=%d artifacts=%s", pid, artifacts_proj_dir)
+
 
 @app.route("/projects/<int:pid>/pull", methods=["POST"])
 def pull_project(pid):
-    """Pull latest from git and rebuild graph + CRG for an existing cloned project."""
+    """Pull latest from git and rebuild graph + CRG for an existing cloned project.
+    
+    If repo_dir was deleted (post-build cleanup), creates a fresh temp clone.
+    """
     try:
         proj = _projects().get(pid)
         if not proj:
             return jsonify({"error": "project not found"}), 404
         repo_dir = proj.get("repo_dir")
         git_url = proj.get("git_url", "")
-        if not repo_dir or not os.path.isdir(repo_dir):
-            return jsonify({"error": "repo_dir missing — cannot pull. Re-clone the project."}), 400
         if not git_url:
             return jsonify({"error": "not a cloned project (no git_url)"}), 400
 
+        _vmsg("PULL START pid=%d name=%s url=%s", pid, proj.get("name"), git_url)
         proj["status"] = "pulling"
         _save_project(pid, proj)
 
         git_env = _git_env()
         # Use stored access token if available for auth
-        access_token = session.get("oidc_access_token", "")
+        access_token = session.get("oidc_access_token", "") or _load_fetch_token(pid) or ""
         git_auth = _git_auth_args(access_token=access_token) if access_token else []
 
-        # git pull — fetch + reset to origin/HEAD (shallow clone has no local branch tracking)
-        r = subprocess.run(["git"] + git_auth + ["fetch", "--depth", "1", "origin"],
-                         capture_output=True, text=True, timeout=120, env=git_env, cwd=repo_dir)
-        if r.returncode != 0:
-            proj["status"] = "ready"
-            _save_project(pid, proj)
-            return jsonify({"error": "pull_failed", "message": redact_secret(r.stderr[:500], access_token)}), 500
-        r = subprocess.run(["git", "reset", "--hard", "origin/HEAD"],
-                         capture_output=True, text=True, timeout=60, env=git_env, cwd=repo_dir)
-        if r.returncode != 0:
-            proj["status"] = "ready"
-            _save_project(pid, proj)
-            return jsonify({"error": "pull_failed", "message": redact_secret(r.stderr[:500], access_token)}), 500
+        # If repo_dir was deleted after build, re-clone to a fresh temp dir
+        if not repo_dir or not os.path.isdir(repo_dir):
+            _vmsg("PULL RE-CLONE pid=%d - repo_dir was deleted, re-cloning", pid)
+            repo_dir = os.path.join(REPO_DIR, f"{_user_key()}-{pid}-pull-{uuid.uuid4().hex[:12]}")
+            os.makedirs(repo_dir)
+            r = subprocess.run(["git"] + git_auth + ["clone", "--depth", "1", git_url, repo_dir],
+                             capture_output=True, text=True, timeout=120, env=git_env)
+            if r.returncode != 0:
+                _vmsg("PULL RE-CLONE FAIL pid=%d - %s", pid, (r.stderr or "")[:200])
+                proj["status"] = "ready"
+                _save_project(pid, proj)
+                _rmtree_hard(repo_dir)
+                return jsonify({"error": "pull_failed", "message": redact_secret(r.stderr[:500], access_token)}), 500
+            proj["repo_dir"] = repo_dir
+            _vmsg("PULL RE-CLONE OK pid=%d - repo at %s", pid, repo_dir)
+        else:
+            _vmsg("PULL FETCH pid=%d - git fetch + reset (repo_dir exists)", pid)
+            r = subprocess.run(["git"] + git_auth + ["fetch", "--depth", "1", "origin"],
+                             capture_output=True, text=True, timeout=120, env=git_env, cwd=repo_dir)
+            if r.returncode != 0:
+                _vmsg("PULL FETCH FAIL pid=%d - %s", pid, (r.stderr or "")[:200])
+                proj["status"] = "ready"
+                _save_project(pid, proj)
+                return jsonify({"error": "pull_failed", "message": redact_secret(r.stderr[:500], access_token)}), 500
+            r = subprocess.run(["git", "reset", "--hard", "origin/HEAD"],
+                             capture_output=True, text=True, timeout=60, env=git_env, cwd=repo_dir)
+            if r.returncode != 0:
+                _vmsg("PULL RESET FAIL pid=%d - %s", pid, (r.stderr or "")[:200])
+                proj["status"] = "ready"
+                _save_project(pid, proj)
+                return jsonify({"error": "pull_failed", "message": redact_secret(r.stderr[:500], access_token)}), 500
+            _vmsg("PULL FETCH OK pid=%d", pid)
 
         # Rebuild graphs (shared logic)
-        _build_graphs(pid, proj, repo_dir)
+        _vmsg("PULL BUILD pid=%d - rebuilding graphs", pid)
+        uk = _user_key()
+        _build_graphs(pid, proj, repo_dir, user_key=uk)
 
         proj["status"] = "ready"
         _save_project(pid, proj)
@@ -768,17 +1050,25 @@ def rename_project(pid):
 
 @app.route("/projects/<int:pid>", methods=["DELETE"])
 def delete_project(pid):
+    _vmsg("DELETE START pid=%d", pid)
     proj = _projects().pop(pid, None)
+    # Clean up repo_dir (if still alive)
     if proj and proj.get("repo_dir"):
-        import shutil
-        shutil.rmtree(proj["repo_dir"], ignore_errors=True)
+        _vmsg("DELETE pid=%d - removing repo_dir %s", pid, proj["repo_dir"])
+        _rmtree_hard(proj["repo_dir"])
+    # Clean up relocated artifacts
     if proj:
+        artifacts_proj_dir = os.path.join(ARTIFACTS_DIR, str(pid))
+        _vmsg("DELETE pid=%d - removing artifacts %s", pid, artifacts_proj_dir)
+        _rmtree_hard(artifacts_proj_dir)
+        _delete_fetch_token(pid)
         try:
             conn = _db_conn()
             conn.execute("DELETE FROM projects WHERE id=? AND user_key=?", (pid, _user_key()))
             conn.commit()
         except Exception as e:
             app.logger.warning("DB delete failed: %s", e)
+    _vmsg("DELETE DONE pid=%d", pid)
     return jsonify({"status": "deleted"})
 
 
@@ -796,12 +1086,10 @@ def project_status(pid):
 def project_graph_data(pid):
     proj = _projects().get(pid)
     if not proj:
-        app.logger.warning("graph-data: project %d not found", pid)
+        print(f"[GRAPH-DATA] project {pid} not found", flush=True)
         return jsonify({"graphify": None, "nodes": 0, "edges": 0}), 200
     gf = proj.get("graphify_data")
-    app.logger.info("graph-data: pid=%d name=%s graphify_data=%s nodes=%s edges=%s crg_db=%s",
-                    pid, proj.get("name"), bool(gf), proj.get("nodes"), proj.get("edges"),
-                    proj.get("crg_db_path"))
+    print(f"[GRAPH-DATA] pid={pid} name={proj.get('name')} graphify_data={bool(gf)} nodes={proj.get('nodes')} edges={proj.get('edges')} crg_db={proj.get('crg_db_path')}", flush=True)
     result = {"id": pid, "name": proj["name"], "status": proj.get("status"),
               "nodes": proj.get("nodes", 0), "edges": proj.get("edges", 0)}
     if gf:
@@ -840,8 +1128,18 @@ def project_graph_html(pid):
     app.logger.info("graph-html: pid=%d repo_dir=%s graphify_data=%s graph_html_path=%s",
                     pid, repo_dir, bool(proj.get("graphify_data")), proj.get("graph_html_path"))
 
-    # 1. Try cloned repo's pre-built graph.html
-    if repo_dir:
+    # 1. Try relocated artifact (post-build cleanup)
+    graph_html_path = proj.get("graph_html_path")
+    if graph_html_path and os.path.exists(graph_html_path):
+        try:
+            with open(graph_html_path, "r", encoding="utf-8") as f:
+                html = f.read()
+            app.logger.info("graph-html: loaded from artifact path (%d bytes)", len(html))
+        except Exception as e:
+            app.logger.warning("graph-html: failed to read %s: %s", graph_html_path, e)
+
+    # 2. Try cloned repo's pre-built graph.html (if repo_dir still alive)
+    if not html and repo_dir:
         p = os.path.join(repo_dir, "graphify-out", "graph.html")
         if os.path.exists(p):
             try:
@@ -851,7 +1149,7 @@ def project_graph_html(pid):
             except Exception as e:
                 app.logger.warning("graph-html: failed to read %s: %s", p, e)
 
-    # 2. Fallback: use pre-generated HTML from upload or generate from graphify_data
+    # 3. Fallback: generate from graphify_data JSON
     if not html:
         cached = proj.get("graph_html_path")
         if cached and os.path.exists(cached):
@@ -872,7 +1170,7 @@ def project_graph_html(pid):
                         comms[cid] = []
                     comms[cid].append(nid)
                 tmp_path = f"{TEMP_DIR}/intelligraph-gf-html-{_user_key()}-{pid}.html"
-                gf_export.to_html(G, comms, tmp_path)
+                gf_export.to_html(G, comms, tmp_path, node_limit=VIZ_NODE_LIMIT)
                 if os.path.exists(tmp_path):
                     proj["graph_html_path"] = tmp_path
                     with open(tmp_path, "r", encoding="utf-8") as f:
@@ -884,6 +1182,12 @@ def project_graph_html(pid):
 
     if not html:
         return """<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{background:rgba(0,0,0,0.8);color:#c9d1d9;font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}p{text-align:center;max-width:400px;line-height:1.6}a{color:#5b7fff}code{background:#21262d;padding:2px 6px;border-radius:4px;font-size:12px}</style></head><body><p>No graph data available.<br>Go to <b>Upload</b> tab and upload:<br><code>graph.json</code> + <code>graph.db</code> + <code>graph.html</code></p></body></html>""", 404
+
+    # Replace vis-network CDN with local copy for closed-network support
+    html = html.replace(
+        "https://unpkg.com/vis-network@9.1.6/standalone/umd/vis-network.min.js",
+        "/static/vis-network.min.js"
+    )
 
     # Inject Intelligraph dark theme CSS overrides
     THEME_OVERRIDES = """
@@ -899,7 +1203,7 @@ body {
 #graph canvas, #graph svg, #graph > div {
     background: rgba(0,0,0,0.8) !important;
 }
-/* ── Sidebar (graph internal nav) — restored ── */
+/* ── Sidebar (graph internal nav) - restored ── */
 #sidebar {
     background: rgba(0,0,0,0.85) !important;
     border-right: 1px solid #21262d !important;
@@ -966,6 +1270,11 @@ body {
 def _get_graphify_path(proj):
     """Return filesystem path to a project's graph.json, writing in-memory
     data to a temp file for upload-based projects."""
+    # Relocated artifact (post-build cleanup)
+    gf_path = proj.get("graphify_path")
+    if gf_path and os.path.exists(gf_path):
+        return gf_path
+    # Original repo_dir location (if repo not yet deleted)
     repo_dir = proj.get("repo_dir")
     if repo_dir:
         gf = os.path.join(repo_dir, "graphify-out", "graph.json")
@@ -996,12 +1305,22 @@ def graph_retrieve_context():
 
     proj = _projects().get(project_id) if project_id else None
     if not proj:
+        _vmsg("RETRIEVE SKIP pid=%s - project not found", project_id)
         return jsonify({"context": "", "files": [], "strategy": "no_project", "plan": {}}), 200
 
+    # Ensure id is set so downstream modules (retriever sparse fetch) can load tokens
+    proj["id"] = project_id
+
+    _vmsg("RETRIEVE START pid=%s prompt=%s", project_id, prompt[:100])
     from retrieval import retrieve_context
     try:
         result = retrieve_context(proj, prompt)
+        _vmsg("RETRIEVE DONE pid=%s strategy=%s files=%d context_len=%d",
+               project_id, result.get("strategy", "?"),
+               len(result.get("files", [])),
+               len(result.get("context", "")))
     except Exception as e:
+        _vmsg("RETRIEVE ERROR pid=%s - %s", project_id, str(e)[:300])
         app.logger.warning("retrieve_context failed: %s", e, exc_info=True)
         result = {"context": "", "files": [], "strategy": "retrieval_error", "plan": {},
                   "matched_nodes": [], "context_stats": {"error": str(e)[:200]}}
@@ -1061,7 +1380,7 @@ def project_completions(pid):
         return jsonify({"error": "project not found"}), 404
 
     # LLM provider: request body > env vars > default
-    llm_url = data.get("llm_url") or os.environ.get("INTELLIGRAPH_LLM_URL") or ""
+    llm_url = (data.get("llm_url") or os.environ.get("INTELLIGRAPH_LLM_URL") or "").strip().rstrip("/")
     llm_token = data.get("llm_token") or os.environ.get("INTELLIGRAPH_LLM_TOKEN") or ""
     model = data.get("model") or os.environ.get("INTELLIGRAPH_LLM_MODEL") or "gpt-4o-mini"
 
@@ -1185,12 +1504,14 @@ def serve_react_assets(filename):
 def status():
     pid = request.args.get("project_id", type=int)
     proj = _projects().get(pid) if pid else None
+    from build_queue import build_queue
     return jsonify({
         "oidc_configured": bool(OIDC_ISSUER),
         "downloads": {"mcp_server": "/download/mcp-server",
                       "graph_builder": "/download/graph-builder"},
         "project": proj,
         "projects": list(_projects().keys()),
+        "build_queue_depth": build_queue.depth,
     })
 
 @app.route("/diagnostics")
@@ -1233,6 +1554,8 @@ def diagnostics():
     result["status"]["repo_dir_exists"] = os.path.exists(REPO_DIR)
     result["status"]["temp_dir"] = TEMP_DIR
     result["status"]["temp_dir_exists"] = os.path.exists(TEMP_DIR)
+    result["status"]["artifacts_dir"] = ARTIFACTS_DIR
+    result["status"]["artifacts_dir_exists"] = os.path.exists(ARTIFACTS_DIR)
 
     result["healthy"] = len(result["errors"]) == 0
     return jsonify(result)
@@ -1258,6 +1581,10 @@ if __name__ == "__main__":
 
     # (_projects_ref wired at module level above)
 
+    _cleanup_orphans()
+
+    print(f"Network:   {NETWORK_MODE} (SSL verify={'on' if LLM_SSL_VERIFY else 'off'}, git SSL={'on' if GIT_SSL_VERIFY else 'off'})")
+    print(f"LLM hosts: {ALLOWED_LLM_HOSTS}")
     print(f"OIDC:      {'configured' if OIDC_ISSUER else 'disabled'}")
     print(f"Downloads: /download/mcp-server, /download/graph-builder")
     print(f"LLM relay: /llm/ask")

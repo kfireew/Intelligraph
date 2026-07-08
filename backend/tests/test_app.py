@@ -21,6 +21,15 @@ def client():
     flask_app.secret_key = "test-key"
     app_module._PROJECTS.clear()
     app_module._NEXT_PID.clear()
+    # Reset DB connection and clear persisted state
+    app_module._db = None
+    try:
+        conn = app_module._db_conn()
+        conn.execute("DELETE FROM projects")
+        conn.execute("DELETE FROM fetch_tokens")
+        conn.commit()
+    except Exception:
+        pass
     with flask_app.test_client() as c:
         c.get("/auth/me")
         yield c

@@ -19,7 +19,8 @@ import { useLLM } from "./hooks/useLLM";
 export default function App() {
   const auth = useAuth();
   const projects = useProjects();
-  const graph = useGraph(projects.activePid);
+  const activeProject = projects.projects.find(p => p.id === projects.activePid);
+  const graph = useGraph(projects.activePid, activeProject?.status);
   const llm = useLLM();
   const [matchedNodes, setMatchedNodes] = useState([]);
   const [orbHovered, setOrbHovered] = useState(false);
@@ -60,7 +61,7 @@ export default function App() {
   const handleLLMFetchModels = useCallback((fetchUrl, fetchToken) => {
     llm.fetchModels(fetchUrl || llm.llmUrl, fetchToken || llm.llmToken);
   }, [llm]);
-  const handleLLMTest = useCallback(() => { llm.test(); }, [llm]);
+  const handleLLMTest = useCallback((url, token) => { llm.test(url, token); }, [llm]);
 
   const isLoading = graph.status === "loading" || projects.loading;
 

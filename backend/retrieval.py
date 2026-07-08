@@ -65,31 +65,11 @@ def retrieve_context(proj: dict, prompt: str) -> dict:
     node_map = _build_node_map(graphify_data)
     nx_metadata = proj.get("nx_metadata") or {}
 
-    # ── Re-clone fallback: restore missing repo_dir ──
+    # ── Re-clone fallback DISABLED ──
+    # repo_dir is now deleted after build to save disk/RAM. On-demand sparse
+    # fetch in retriever.py handles file access during chat. The old full
+    # re-clone on every chat request was too expensive.
     repo_dir = proj.get("repo_dir")
-    if repo_dir and not os.path.isdir(repo_dir):
-        git_url = proj.get("git_url")
-        if git_url:
-            log.warning("repo_dir missing (%s) — attempting re-clone from %s", repo_dir, git_url)
-            try:
-                import subprocess
-                os.makedirs(repo_dir, exist_ok=True)
-                r = subprocess.run(
-                    ["git", "clone", "--depth", "1", git_url, repo_dir],
-                    capture_output=True, text=True, timeout=120,
-                )
-                if r.returncode != 0:
-                    log.warning("re-clone failed: %s", r.stderr[:200])
-                    proj["repo_dir"] = None
-                    import shutil
-                    shutil.rmtree(repo_dir, ignore_errors=True)
-                else:
-                    log.info("re-clone succeeded — repo_dir restored")
-            except Exception as e:
-                log.warning("re-clone exception: %s", str(e)[:200])
-                proj["repo_dir"] = None
-                import shutil
-                shutil.rmtree(repo_dir, ignore_errors=True)
 
     # 1. ExecutionPlanner: decompose query into task plan
     from planner import plan_query

@@ -34,8 +34,7 @@ export function CloneModal({ onClone, onClose, loading }) {
     <AnimatePresence>
       <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
         className="fixed inset-0 z-50 flex items-center justify-center p-6"
-        style={{ background: "rgba(0,0,0,0.6)", backdropFilter: "blur(6px)" }}
-        onClick={onClose}>
+        style={{ background: "rgba(0,0,0,0.6)", backdropFilter: "blur(6px)" }}>
         <motion.div initial={{ scale: 0.85, opacity: 0 }} animate={{ scale: 1, opacity: 1 }}
           exit={{ scale: 0.85, opacity: 0 }}
           transition={{ type: "spring", stiffness: 400, damping: 25 }}

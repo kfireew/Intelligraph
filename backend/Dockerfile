@@ -18,5 +18,8 @@ EXPOSE 5050
 
 ENV PORT=5050
 ENV PYTHONUNBUFFERED=1
+ENV INTELLIGRAPH_NETWORK_MODE=closed
+# For public internet (GitHub + OpenRouter), set:
+#   INTELLIGRAPH_NETWORK_MODE=open
 
 CMD ["sh", "-c", "python app.py --host 0.0.0.0 --port ${PORT}"]

@@ -36,6 +36,7 @@ opencode (opencode.json, in project root or ~/.config/opencode/opencode.json):
 
 import argparse
 import json
+import os
 import sys
 
 import requests
@@ -45,6 +46,7 @@ from mcp.server.stdio import stdio_server
 
 INTELLIGRAPH_URL = "http://localhost:5050"
 PROJECT_ID = None
+SSL_VERIFY = os.environ.get("LLM_SSL_VERIFY", "false").lower() == "true"
 
 TOOLS = [
     types.Tool(
@@ -123,6 +125,7 @@ def _retrieve(query: str) -> dict:
         url,
         json={"prompt": query, "project_id": PROJECT_ID},
         timeout=30,
+        verify=SSL_VERIFY,
     )
     r.raise_for_status()
     return r.json()
@@ -199,10 +202,12 @@ async def main():
                         help="Intelligraph container URL (default: http://localhost:5050)")
     parser.add_argument("--project-id", type=int, required=True,
                         help="Project ID in the Intelligraph container")
+    parser.add_argument("--project-name", default=None,
+                        help="Project name to use (alternative to --project-id)")
     args = parser.parse_args()
     INTELLIGRAPH_URL = args.intelligraph_url.rstrip("/")
     PROJECT_ID = args.project_id
-
+    
     async with stdio_server() as (read_stream, write_stream):
         await server.run(read_stream, write_stream, server.create_initialization_options())
 

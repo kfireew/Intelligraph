@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef } from "react";
+import { llmService } from "../services/llmService";
 
 function normalizeModels(items) {
   if (!Array.isArray(items)) return [];
@@ -12,7 +13,7 @@ function normalizeModels(items) {
 
 export function useLLM() {
   const [llmUrl, setLlmUrl] = useState(
-    () => localStorage.getItem("llm-url") || "https://models.ai-services.idf.cts/v1/chat/completions"
+    () => (localStorage.getItem("llm-url") || "https://models.ai-services.idf.cts/v1/chat/completions").trim().replace(/\/+$/, "")
   );
   const [llmToken, setLlmToken] = useState(
     () => localStorage.getItem("llm-token") || ""
@@ -56,12 +57,13 @@ export function useLLM() {
   }, []);
 
   const save = useCallback((url, token) => {
-    setLlmUrl(url);
+    const cleanUrl = (url || "").trim().replace(/\/+$/, "");
+    setLlmUrl(cleanUrl);
     setLlmToken(token);
-    localStorage.setItem("llm-url", url);
+    localStorage.setItem("llm-url", cleanUrl);
     localStorage.setItem("llm-token", token);
     setTestResult("");
-    savedUrlRef.current = url;
+    savedUrlRef.current = cleanUrl;
     savedTokenRef.current = token;
   }, []);
 
@@ -71,28 +73,22 @@ export function useLLM() {
     localStorage.setItem("llm-model", m);
   }, []);
 
-  const test = useCallback(async () => {
-    const url = llmUrl;
-    const token = llmToken;
+  const test = useCallback(async (urlOverride, tokenOverride) => {
+    const url = (urlOverride || llmUrl || "").trim().replace(/\/+$/, "");
+    const token = tokenOverride || llmToken;
     if (!url || !token) {
       setTestResult("Enter URL and token first");
       return;
     }
     const payload = {
-      model: modelRef.current || "gpt-4o-mini",
+      model: modelRef.current || undefined,
       messages: [{ role: "user", content: "hi" }],
-      max_tokens: 10,
-      temperature: 0.1,
     };
     try {
-      const r = await fetch("/llm/ask", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url, token, payload }),
-      });
-      const j = await r.json();
-      if (j.status === 405) {
-        setTestResult("Error: 405 — the LLM rejected the request. Check the URL is correct.");
+      const j = await llmService.relay({ url, token, payload });
+      if (j.status !== 200) {
+        const errBody = JSON.parse(j.body || "{}");
+        setTestResult(`Error: ${j.status} — ${errBody.error?.message || errBody.detail || j.body?.slice(0, 100) || "rejected"}`);
         return;
       }
       const body = JSON.parse(j.body || "{}");

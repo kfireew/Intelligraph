@@ -1,5 +1,5 @@
 flask>=3.0
-graphifyy>=0.8.0
+graphifyy>=0.9.4
 code-review-graph>=2.3.0
 networkx>=3.0
 numpy>=1.24

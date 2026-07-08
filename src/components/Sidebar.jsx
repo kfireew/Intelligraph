@@ -12,6 +12,7 @@ const STATUS_ICONS = {
   cloning: Loader2,
   building: Loader2,
   pulling: Loader2,
+  queued: Clock,
   error: AlertCircle,
   pending_upload: Clock,
 };
@@ -21,6 +22,7 @@ const STATUS_COLORS = {
   cloning: "text-cyan animate-spin",
   building: "text-cyan animate-spin",
   pulling: "text-green animate-spin",
+  queued: "text-orange",
   error: "text-red",
   pending_upload: "text-orange",
 };
@@ -116,7 +118,10 @@ export function Sidebar({
                     onClick={(e) => e.stopPropagation()}
                   />
                 ) : (
-                  <span className="flex-1 truncate font-medium">{p.name}</span>
+                  <>
+                    <span className="flex-1 truncate font-medium">{p.name}</span>
+                    <span className="text-[9px] text-muted flex-shrink-0 opacity-50">#{p.id}</span>
+                  </>
                 )}
                 {p.git_url && p.status === "ready" && onPull && (
                   <button
