@@ -16,3 +16,6 @@ mcp>=1.0
 fastmcp>=3.0
 python-multipart>=0.0.5
 cryptography>=43.0
+semantic-router>=0.0.20
+sentence-transformers>=2.2
+numpy>=2.0

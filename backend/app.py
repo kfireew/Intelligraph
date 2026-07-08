@@ -1696,6 +1696,55 @@ def graph_retrieve_context():
     return jsonify(result)
 
 
+@app.route("/graph/crg", methods=["POST"])
+def graph_crg():
+    """Direct CRG intelligence endpoint for MCP server and external tools.
+
+    Body: { project_id, mode, query }
+    mode: "search" | "architecture" | "impact" | "flows"
+    query: symbol name or search text
+
+    Returns structured CRG data (symbols, communities, blast-radius, flows).
+    """
+    data = request.get_json(force=True) or {}
+    project_id = data.get("project_id")
+    mode = data.get("mode", "search")
+    query = (data.get("query") or "").strip()
+
+    if not project_id:
+        return jsonify({"error": "project_id required"}), 400
+
+    proj = (_projects().get(project_id) or _get_shared_project(project_id)) if project_id else None
+    if not proj:
+        return jsonify({"error": "project not found"}), 404
+    proj["id"] = project_id
+
+    try:
+        from crg_intelligence import get_providers
+        providers = get_providers(proj)
+        if not providers:
+            return jsonify({"error": "CRG not available for this project", "results": []}), 200
+
+        provider = providers[0]
+        if mode == "search":
+            results = provider.search(query, max_results=20)
+        elif mode == "architecture":
+            results = provider.architecture()
+        elif mode == "impact":
+            results = provider.impact(query, max_depth=2)
+        elif mode == "flows":
+            results = provider.flows(query)
+        else:
+            return jsonify({"error": f"unknown mode: {mode}"}), 400
+
+        _vmsg("CRG ENDPOINT: pid=%s mode=%s query=%s -> %d results", project_id, mode, query[:50], len(results))
+        return jsonify({"mode": mode, "query": query, "results": results})
+    except Exception as e:
+        _vmsg("CRG ENDPOINT ERROR: %s", str(e)[:300])
+        app.logger.warning("graph_crg failed: %s", e, exc_info=True)
+        return jsonify({"error": str(e)[:200]}), 500
+
+
 @app.route("/api/v1/projects/<int:pid>/completions", methods=["POST"])
 def project_completions(pid):
     """Stateless completion endpoint for n8n/external automation.

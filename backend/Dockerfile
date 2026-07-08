@@ -7,9 +7,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends git && \
 WORKDIR /app
 
 COPY wheels/ wheels/
-RUN pip install --no-index --find-links=wheels/ flask requests graphify code-review-graph cryptography
+# Note: semantic-router, sentence-transformers, torch wheels must be in wheels/ for closed network
+# For closed network: pip download semantic-router sentence-transformers torch --dest wheels/
+RUN pip install --no-index --find-links=wheels/ flask requests graphify code-review-graph cryptography semantic-router sentence-transformers numpy
 
-COPY app.py bb_auth.py mcp_server.py mcp_server_standalone.py graph_builder.py ./
+COPY app.py bb_auth.py mcp_server.py mcp_server_standalone.py graph_builder.py crg_intelligence.py crg_domain_finder.py semantic_planner.py planner.py retrieval.py retriever.py merger.py resolver.py traversal.py ranker.py file_fetcher.py tune.py ./
+COPY models/ models/
 COPY templates/ templates/
 COPY static/ static/
 RUN mkdir -p downloads /tmp/intelliscan

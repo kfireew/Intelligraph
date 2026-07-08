@@ -7,9 +7,14 @@ a prioritized list of tasks. Each task carries its own policy
 
 Input:  prompt
 Output: { tasks: [{ id, type, target, depth, compression, operations }, ...] }
+
+Intent routing uses semantic-router (embedding-based) when available,
+falling back to regex patterns if the model is not loaded.
 """
 
 import re
+
+# ── Regex patterns (fallback when semantic-router unavailable) ──
 
 _INTENT_PATTERNS = [
     (r"test|coverage", "tests"),
@@ -23,8 +28,9 @@ _INTENT_PATTERNS = [
 
 _WHAT_IS_PATTERNS = [r"^what is", r"^where is", r"^which file", r"^find the"]
 
-def detect_intent(prompt: str) -> dict:
-    """Detect query intent. Returns {intent, target}."""
+
+def _OLD_detect_intent(prompt: str) -> dict:
+    """Regex-based intent detection. Used as fallback."""
     lower = (prompt or "").lower()
     for pattern, intent in _INTENT_PATTERNS:
         if re.search(pattern, lower):
@@ -34,43 +40,16 @@ def detect_intent(prompt: str) -> dict:
             return {"intent": "what_is", "target": lower}
     return {"intent": "what_is", "target": lower}
 
-# ── Live Nx detection (for Nx MCP bridge) ──
-# These patterns identify questions that require live Nx CLI tooling,
-# not static workspace metadata. Static Nx questions use nx_architecture.
 
-_LIVE_NX_PATTERNS = [
-    r"what target|which target|run what|show targets|available targets",
-    r"what (command|generator|scaffold)",
-    r"affected|what would be affected",
-    r"npx nx|nx help|show local nx",
-    r"list generators|what generators",
-]
-
-
-def detect_live_nx_question(prompt: str) -> bool:
-    """Check if a prompt is asking for live Nx tooling (not static metadata)."""
-    lower = (prompt or "").lower()
-    # Live Nx questions are usually about running/using nx, not about architecture
-    for pattern in _LIVE_NX_PATTERNS:
-        if re.search(pattern, lower):
-            return True
-    return False
-
-from retrieval import task_policy
-
-# Known compound patterns that produce multiple tasks
+# Known compound patterns that produce multiple tasks (regex fallback)
 _COMPOUND_PATTERNS = [
-    # "how X works and what breaks if Y"
     (r".*(?:how|explain)\s+.*(?:and|also|then).*(?:what\s+breaks|impact|affect).*", ["how_works", "impact"]),
-    # "architecture and security of X"
     (r".*(?:architecture|structure|overview).*(?:and|also).*(?:security|safety|risk).*", ["architecture", "security"]),
-    # "what is X and how does it work"
     (r".*(?:what\s+is|find|where).*(?:and|also).*(?:how|explain).*", ["what_is", "how_works"]),
-    # "find the bug in X and fix it"
     (r".*(?:bug|error|issue|problem).*(?:and|also|then).*(?:fix|patch|solve|resolve).*", ["debug", "refactor"]),
 ]
 
-# Single-intent extraction per task type
+# Single-intent extraction per task type (regex fallback)
 _TASK_EXTRACTORS = {
     "architecture":  r"(?:architecture|structure|overview|components|organization|design)\s*(?:of|for)?\s*(.+)?",
     "how_works":     r"(?:how|explain).*(?:does|work|implement|called|used)\s*(?:(?:the|a|an)\s+)?(.+)",
@@ -86,15 +65,14 @@ _TASK_EXTRACTORS = {
 }
 
 
-def extract_target(prompt: str, task_type: str) -> str:
-    """Extract a target symbol or phrase from prompt for a task type."""
+def _OLD_extract_target(prompt: str, task_type: str) -> str:
+    """Regex-based target extraction. Used as fallback."""
     pattern = _TASK_EXTRACTORS.get(task_type)
     if not pattern:
         return prompt[:80].rstrip("?").strip()
     m = re.search(pattern, prompt, re.IGNORECASE)
     if m and m.group(1) and m.group(1).strip().rstrip("?").strip():
         return m.group(1).strip().rstrip("?").strip()[:80]
-    # Fallback: try to extract the noun phrase between "how does" and "work"
     if task_type == "how_works":
         m2 = re.search(r"(?:how|explain)\s+(?:does\s+)?(?:the\s+|a\s+|an\s+)?(.+?)(?:\s+work|\?)", prompt, re.IGNORECASE)
         if m2 and m2.group(1).strip():
@@ -102,11 +80,103 @@ def extract_target(prompt: str, task_type: str) -> str:
     return prompt[:80].rstrip("?").strip()
 
 
+# ── Public API (preserved for backward compat) ──
+
+def detect_intent(prompt: str) -> dict:
+    """Detect query intent. Returns {intent, target}.
+
+    Tries semantic-router first, falls back to regex.
+    """
+    routes = _semantic_route(prompt)
+    if routes:
+        return {"intent": routes[0]["intent"], "target": routes[0]["target"]}
+    return _OLD_detect_intent(prompt)
+
+
+def extract_target(prompt: str, task_type: str) -> str:
+    """Extract a target symbol or phrase from prompt for a task type.
+
+    Uses semantic-router target if available, falls back to regex.
+    """
+    routes = _semantic_route(prompt)
+    for r in routes:
+        if r["intent"] == task_type and r.get("target"):
+            return r["target"]
+    return _OLD_extract_target(prompt, task_type)
+
+
+# ── Live Nx detection (stays regex — very specific patterns) ──
+
+_LIVE_NX_PATTERNS = [
+    r"what target|which target|run what|show targets|available targets",
+    r"what (command|generator|scaffold)",
+    r"affected|what would be affected",
+    r"npx nx|nx help|show local nx",
+    r"list generators|what generators",
+]
+
+
+def detect_live_nx_question(prompt: str) -> bool:
+    """Check if a prompt is asking for live Nx tooling (not static metadata)."""
+    lower = (prompt or "").lower()
+    for pattern in _LIVE_NX_PATTERNS:
+        if re.search(pattern, lower):
+            return True
+    return False
+
+
+from retrieval import task_policy
+
+# ── Semantic router integration ──
+
+_semantic_cache = {}
+
+
+def _semantic_route(prompt: str) -> list[dict]:
+    """Try semantic-router, return list of {intent, target, score} or []."""
+    if prompt in _semantic_cache:
+        return _semantic_cache[prompt]
+    try:
+        from semantic_planner import route_query
+        results = route_query(prompt)
+        if results:
+            _semantic_cache[prompt] = results
+            return results
+    except Exception:
+        pass
+    return []
+
+
 def plan_query(prompt: str) -> dict:
     """Decompose query into task plan.
-    
+
+    Uses semantic-router for intent detection + target extraction.
+    Falls back to regex patterns if semantic-router is unavailable.
+
     Returns { tasks: [{ id, type, target, depth, compression, operations }] }
     """
+    # Try semantic-router first
+    routes = _semantic_route(prompt)
+
+    if routes:
+        tasks = []
+        for i, r in enumerate(routes):
+            intent = r["intent"]
+            policy = task_policy(intent)
+            target = r.get("target") or _OLD_extract_target(prompt, intent)
+            tasks.append({
+                "id": i + 1,
+                "type": intent,
+                "target": target,
+                "depth": policy["depth"],
+                "compression": policy["compression"],
+                "operations": _operations_for(intent),
+                "requires_live_nx": False,
+                "nx_capability": None,
+            })
+        return {"tasks": tasks}
+
+    # ── Regex fallback ──
     prompt_lower = prompt.lower()
 
     # 1. Check for compound patterns first
@@ -115,7 +185,7 @@ def plan_query(prompt: str) -> dict:
             tasks = []
             for i, intent in enumerate(intents):
                 policy = task_policy(intent)
-                target = extract_target(prompt, intent)
+                target = _OLD_extract_target(prompt, intent)
                 tasks.append({
                     "id": i + 1,
                     "type": intent,
@@ -153,10 +223,10 @@ def plan_query(prompt: str) -> dict:
             "nx_capability": nx_cap,
         }]}
 
-    intent_info = detect_intent(prompt)
+    intent_info = _OLD_detect_intent(prompt)
     intent = intent_info["intent"]
     policy = task_policy(intent)
-    target = extract_target(prompt, intent)
+    target = _OLD_extract_target(prompt, intent)
 
     return {
         "tasks": [{
