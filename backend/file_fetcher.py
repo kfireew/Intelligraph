@@ -53,8 +53,13 @@ def fetch_files_sparse(git_url, file_paths, git_auth_args=None, git_env=None,
         timeout:       Total timeout for the clone+checkout.
 
     Returns:
-        Path to a temp directory containing the fetched files, or None on failure.
-        Caller MUST shutil.rmtree() after use.
+        (tmp_dir, error_type) where error_type is one of:
+        - None on success (tmp_dir is the path)
+        - "auth" if git auth failed (expired/invalid token, 401/403)
+        - "timeout" if the operation timed out
+        - "not_found" if repo not found
+        - "other" for other failures
+        On error, tmp_dir is None and has been cleaned up.
     """
     if not git_url or not file_paths:
         return None
@@ -95,9 +100,16 @@ def fetch_files_sparse(git_url, file_paths, git_auth_args=None, git_env=None,
             timeout=timeout, env=git_env,
         )
         if r.returncode != 0:
-            log.warning("Sparse clone failed: %s", (r.stderr or "")[:300])
+            stderr = (r.stderr or "").lower()
+            log.warning("Sparse clone failed: %s", stderr[:300])
             _rmtree_hard(tmp_dir)
-            return None
+            if any(p in stderr for p in ("401", "403", "authentication", "access denied", "could not read", "authorization")):
+                return None, "auth"
+            if "not found" in stderr or "does not exist" in stderr:
+                return None, "not_found"
+            if "certificate" in stderr or "ssl" in stderr or "tls" in stderr:
+                return None, "ssl"
+            return None, "other"
 
         # 2. Configure sparse-checkout for just the requested files
         sparse_cmd = ["git", "sparse-checkout", "set", "--no-cone"] + unique_paths
@@ -110,7 +122,7 @@ def fetch_files_sparse(git_url, file_paths, git_auth_args=None, git_env=None,
         if r.returncode != 0:
             log.warning("Sparse-checkout set failed: %s", (r.stderr or "")[:300])
             _rmtree_hard(tmp_dir)
-            return None
+            return None, "other"
 
         # 3. Checkout — materializes only the sparse-set files
         checkout_cmd = ["git"] + git_auth_args + ["checkout", "HEAD"]
@@ -121,22 +133,25 @@ def fetch_files_sparse(git_url, file_paths, git_auth_args=None, git_env=None,
             timeout=timeout, env=git_env,
         )
         if r.returncode != 0:
-            log.warning("Sparse checkout failed: %s", (r.stderr or "")[:300])
+            stderr = (r.stderr or "").lower()
+            log.warning("Sparse checkout failed: %s", stderr[:300])
             _rmtree_hard(tmp_dir)
-            return None
+            if any(p in stderr for p in ("401", "403", "authentication", "access denied")):
+                return None, "auth"
+            return None, "other"
 
         log.info("Sparse fetch OK: %d files from %s", len(unique_paths), git_url)
-        return tmp_dir
+        return tmp_dir, None
 
     except subprocess.TimeoutExpired:
         log.warning("Sparse fetch timed out after %ds for %s", timeout, git_url)
         _rmtree_hard(tmp_dir)
-        return None
+        return None, "timeout"
     except FileNotFoundError:
         log.warning("git not found — cannot sparse fetch")
         _rmtree_hard(tmp_dir)
-        return None
+        return None, "other"
     except Exception as e:
         log.warning("Sparse fetch exception: %s", str(e)[:300])
         _rmtree_hard(tmp_dir)
-        return None
+        return None, "other"

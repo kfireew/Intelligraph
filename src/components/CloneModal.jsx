@@ -2,11 +2,13 @@ import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { X, GitBranch, Loader2 } from "lucide-react";
 
-export function CloneModal({ onClone, onClose, loading }) {
+export function CloneModal({ onClone, onClose, loading, auth }) {
   const [gitUrl, setUrl] = useState("");
   const [name, setName] = useState("");
   const [status, setStatus] = useState("");
   const [accessToken, setAccessToken] = useState("");
+
+  const needLogin = auth && auth.oidcConfigured && !auth.authenticated;
 
   const clearSensitiveState = () => {
     setAccessToken("");
@@ -45,6 +47,17 @@ export function CloneModal({ onClone, onClose, loading }) {
             <h2 className="text-base font-bold gradient-text m-0">Clone Repository</h2>
             <button onClick={onClose} className="text-muted hover:text-red transition-colors p-0.5"><X size={18} /></button>
           </div>
+          {needLogin ? (
+            <div className="py-6 text-center">
+              <p className="text-sm text-muted mb-4">SSO login required to clone repositories.</p>
+              <button onClick={auth.login}
+                className="px-5 py-2 rounded-lg text-xs font-bold text-white"
+                style={{ background: "linear-gradient(135deg, #8b5cf6, #d946ef)" }}>
+                Login with SSO
+              </button>
+            </div>
+          ) : (
+          <>
           <div className="mb-4">
             <label className="block text-[11px] font-bold text-muted uppercase tracking-wider mb-1.5">Git URL</label>
             <input type="text" value={gitUrl} onChange={(e) => setUrl(e.target.value)}
@@ -84,6 +97,8 @@ export function CloneModal({ onClone, onClose, loading }) {
               {loading ? <Loader2 size={14} className="animate-spin" /> : "Clone"}
             </button>
           </div>
+          </>
+          )}
         </motion.div>
       </motion.div>
     </AnimatePresence>

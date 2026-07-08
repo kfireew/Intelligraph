@@ -31,6 +31,7 @@ export default function App() {
     llmToken: llm.llmToken, model: llm.model,
     onMatchedNodes: setMatchedNodes,
     onAnswerComplete: () => setAnswerComplete((c) => c + 1),
+    onTokenExpired: projects.markTokenExpired,
   });
 
   const [activePanel, setActivePanel] = useState("chat");
@@ -77,6 +78,10 @@ export default function App() {
         onRename={projects.renameProject}
         onDelete={async (pid) => { await projects.deleteProject(pid); chat.clearChats(pid); }}
         onPull={projects.pullProject}
+        tokenExpired={projects.tokenExpired}
+        onShare={projects.shareProject}
+        onJoin={projects.joinProject}
+        onUpdateToken={projects.updateToken}
       />
       <div className="flex flex-1 min-w-0 overflow-hidden h-full">
         <AnimatePresence mode="wait">
@@ -115,10 +120,11 @@ export default function App() {
         </AnimatePresence>
       </div>
       <GraphPanel activePid={projects.activePid} answerComplete={answerComplete}
+        projectStatus={activeProject?.status}
         onHoverChange={setOrbHovered} />
       {showCloneModal && (
         <CloneModal loading={cloneLoading} onClose={() => setShowCloneModal(false)}
-          onClone={handleClone} />
+          onClone={handleClone} auth={auth} />
       )}
       {isLoading && <LoadingOverlay title="Loading" />}
     </AppShell>

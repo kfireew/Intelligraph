@@ -6,6 +6,7 @@ export function useProjects() {
   const [projects, setProjects] = useState([]);
   const [activePid, setActivePid] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [tokenExpired, setTokenExpired] = useState(new Set());
   const pollRef = useRef(null);
   const pollingPids = useRef(new Set());
 
@@ -98,15 +99,56 @@ export function useProjects() {
     try {
       await projectsService.pull(pid);
       startPolling(pid);
+    } catch (e) {
+      if (e.message && e.message.includes("token_expired_or_invalid")) {
+        setTokenExpired((prev) => new Set([...prev, pid]));
+      }
     } finally {
       await fetchProjects();
     }
   }, [fetchProjects, startPolling]);
 
+  const updateToken = useCallback(async (pid, token) => {
+    try {
+      await projectsService.updateToken(pid, token);
+      setTokenExpired((prev) => { const n = new Set(prev); n.delete(pid); return n; });
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }, []);
+
+  const shareProject = useCallback(async (pid) => {
+    try {
+      const result = await projectsService.share(pid);
+      return result.share_key || null;
+    } catch (e) {
+      return null;
+    }
+  }, []);
+
+  const joinProject = useCallback(async (shareKey, bitbucketToken) => {
+    try {
+      const result = await projectsService.join(shareKey, bitbucketToken);
+      if (result.project_id) {
+        setActivePid(result.project_id);
+        await fetchProjects();
+      }
+      return result;
+    } catch (e) {
+      throw e;
+    }
+  }, [fetchProjects]);
+
+  const markTokenExpired = useCallback((pid) => {
+    setTokenExpired((prev) => new Set([...prev, pid]));
+  }, []);
+
   const activeProject = projects.find((p) => p.id === activePid) || null;
 
   return {
-    projects, activePid, activeProject, loading,
+    projects, activePid, activeProject, loading, tokenExpired,
     fetchProjects, selectProject, cloneProject, renameProject, deleteProject, pullProject,
+    updateToken, shareProject, joinProject, markTokenExpired,
   };
 }

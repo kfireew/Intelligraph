@@ -1,0 +1,102 @@
+[
+  {
+    "prompt": "How does the retrieval pipeline work?",
+    "expected_files": ["backend/retrieval.py", "backend/retriever.py", "backend/merger.py", "backend/planner.py"],
+    "task_type": "architecture"
+  },
+  {
+    "prompt": "Explain the architecture of this project",
+    "expected_files": ["backend/app.py", "backend/retrieval.py", "backend/build_queue.py"],
+    "task_type": "architecture"
+  },
+  {
+    "prompt": "What is the main entry point of this app?",
+    "expected_files": ["backend/app.py"],
+    "task_type": "what_is"
+  },
+  {
+    "prompt": "How does the graph builder work?",
+    "expected_files": ["backend/graph_builder.py"],
+    "task_type": "how_works"
+  },
+  {
+    "prompt": "What does build_graph do and what calls it?",
+    "expected_files": ["backend/graph_builder.py"],
+    "task_type": "callers"
+  },
+  {
+    "prompt": "What does retrieve_context call?",
+    "expected_files": ["backend/retrieval.py"],
+    "task_type": "callees"
+  },
+  {
+    "prompt": "What would break if I changed retrieve_chunks?",
+    "expected_files": ["backend/retriever.py", "backend/retrieval.py"],
+    "task_type": "impact"
+  },
+  {
+    "prompt": "How does the MCP server work?",
+    "expected_files": ["backend/mcp_server_standalone.py"],
+    "task_type": "how_works"
+  },
+  {
+    "prompt": "What does the build queue do?",
+    "expected_files": ["backend/build_queue.py"],
+    "task_type": "what_is"
+  },
+  {
+    "prompt": "How does sparse file fetch work?",
+    "expected_files": ["backend/file_fetcher.py"],
+    "task_type": "how_works"
+  },
+  {
+    "prompt": "What handles user authentication?",
+    "expected_files": ["backend/app.py", "backend/bb_auth.py"],
+    "task_type": "how_works"
+  },
+  {
+    "prompt": "How does token encryption work?",
+    "expected_files": ["backend/app.py"],
+    "task_type": "what_is"
+  },
+  {
+    "prompt": "What does the frontend sidebar component do?",
+    "expected_files": ["src/components/Sidebar.jsx"],
+    "task_type": "what_is"
+  },
+  {
+    "prompt": "How does project polling work in the frontend?",
+    "expected_files": ["src/hooks/useProjects.js"],
+    "task_type": "how_works"
+  },
+  {
+    "prompt": "What calls the LLM relay endpoint?",
+    "expected_files": ["backend/app.py", "src/hooks/useChat.js"],
+    "task_type": "callers"
+  },
+  {
+    "prompt": "What would break if I changed the merger?",
+    "expected_files": ["backend/merger.py", "backend/retrieval.py"],
+    "task_type": "impact"
+  },
+  {
+    "prompt": "How does the share key system work?",
+    "expected_files": ["backend/app.py"],
+    "task_type": "how_works"
+  },
+  {
+    "prompt": "What does the clone endpoint do?",
+    "expected_files": ["backend/app.py", "backend/bb_auth.py"],
+    "task_type": "what_is"
+  },
+  {
+    "prompt": "How does the CRG domain finder work?",
+    "expected_files": ["backend/crg_domain_finder.py"],
+    "task_type": "how_works"
+  },
+  {
+    "prompt": "What is the context budget and how is it allocated?",
+    "expected_files": ["backend/merger.py"],
+    "task_type": "what_is"
+  }
+]

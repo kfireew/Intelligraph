@@ -42,7 +42,7 @@ function autoTitle(text) {
   return t.length > 50 ? t.slice(0, 47) + "\u2026" : t;
 }
 
-export function useChat({ activePid, llmUrl, llmToken, model, onMatchedNodes, onAnswerComplete, onSendMessage }) {
+export function useChat({ activePid, llmUrl, llmToken, model, onMatchedNodes, onAnswerComplete, onSendMessage, onTokenExpired }) {
   const [conversations, setConversations] = useState([]);
   const [activeConvId, setActiveConvId] = useState(null);
   const [status, setStatus] = useState("idle");
@@ -185,6 +185,9 @@ export function useChat({ activePid, llmUrl, llmToken, model, onMatchedNodes, on
         if (!resp.ok) return { context: "", matchedNodes: [] };
         const data = await resp.json();
         matchedNodes = data.matched_nodes || [];
+        if (data.token_status === "expired_or_invalid" && onTokenExpired) {
+          onTokenExpired(activePid);
+        }
         return { context: data.context || "", matchedNodes };
       } catch {
         return { context: "", matchedNodes: [] };

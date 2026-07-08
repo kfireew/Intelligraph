@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends git && \
 WORKDIR /app
 
 COPY wheels/ wheels/
-RUN pip install --no-index --find-links=wheels/ flask requests graphify code-review-graph
+RUN pip install --no-index --find-links=wheels/ flask requests graphify code-review-graph cryptography
 
 COPY app.py bb_auth.py mcp_server.py mcp_server_standalone.py graph_builder.py ./
 COPY templates/ templates/
@@ -19,6 +19,8 @@ EXPOSE 5050
 ENV PORT=5050
 ENV PYTHONUNBUFFERED=1
 ENV INTELLIGRAPH_NETWORK_MODE=closed
+ENV INTELLIGRAPH_REQUIRE_SSO=true
+# SECRET_KEY must be set at runtime (min 32 chars) when REQUIRE_SSO=true
 # For public internet (GitHub + OpenRouter), set:
 #   INTELLIGRAPH_NETWORK_MODE=open
 

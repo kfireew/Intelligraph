@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { motion } from "framer-motion";
 import { X, GitBranch } from "lucide-react";
 
-export function GraphPanel({ activePid, answerComplete, onHoverChange }) {
+export function GraphPanel({ activePid, answerComplete, projectStatus, onHoverChange }) {
   const [expanded, setExpanded] = useState(false);
   const [pulse, setPulse] = useState(false);
   const prevRef = useRef(0);
@@ -45,7 +45,7 @@ export function GraphPanel({ activePid, answerComplete, onHoverChange }) {
         <div className="graph-glow" />
         <div className="graph-iframe-container">
           {graphUrl ? (
-            <iframe src={graphUrl} className="graph-iframe" title="Codebase Graph" sandbox="allow-scripts allow-same-origin" />
+            <iframe key={activePid + '-' + (projectStatus || 'unknown')} src={graphUrl} className="graph-iframe" title="Codebase Graph" sandbox="allow-scripts allow-same-origin" />
           ) : (
             <div className="graph-empty"><GitBranch size={24} className="text-accent-light" />
               <p className="text-sm text-muted mt-3">Select a project</p></div>

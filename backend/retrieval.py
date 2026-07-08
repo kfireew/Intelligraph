@@ -43,7 +43,7 @@ from planner import detect_intent  # task_policy is defined above, not imported
 
 # ── Main entry point ──
 
-def retrieve_context(proj: dict, prompt: str) -> dict:
+def retrieve_context(proj: dict, prompt: str, overrides: dict = None) -> dict:
     """Main retrieval pipeline.
     
     Uses the full Phase 5 module architecture:
@@ -51,11 +51,12 @@ def retrieve_context(proj: dict, prompt: str) -> dict:
     → NeighborhoodRanker → ChunkRetriever → ContextMerger
     
     Args:
-        proj:   Project dict with graphify_data, repo_dir, etc.
-        prompt: User's natural language query.
+        proj:       Project dict with graphify_data, repo_dir, etc.
+        prompt:     User's natural language query.
+        overrides:  Optional tuning overrides {file_count, crg_ratio, depth}.
     
     Returns:
-        { context: str, files: [str], strategy: str, plan: {} }
+        { context: str, files: [str], strategy: str, plan: {}, token_status: str }
     """
     if not proj or not proj.get("graphify_data"):
         return {"context": "", "files": [], "strategy": "no_data", "plan": {}}
@@ -187,6 +188,9 @@ def retrieve_context(proj: dict, prompt: str) -> dict:
         # ── ChunkRetriever: fetch code ──
         from retriever import retrieve_chunks
         policy = task_policy(task["type"])
+        # Apply depth override
+        if overrides and "depth" in overrides:
+            policy = {**policy, "depth": overrides["depth"]}
 
         # ── CRG Domain Discovery (architecture/overview tasks only) ──
         crg_domain_files = []
@@ -196,17 +200,28 @@ def retrieve_context(proj: dict, prompt: str) -> dict:
                 from crg_domain_finder import find_domain_files_with_crg, get_crg_db_path
                 crg_path = get_crg_db_path(proj)
                 if crg_path:
-                    crg_domain_files = find_domain_files_with_crg(crg_path, prompt, repo_dir=proj.get("repo_dir"), max_files=12, graphify_data=graphify_data)
+                    max_files = 12
+                    if overrides and "file_count" in overrides:
+                        max_files = overrides["file_count"]
+                    crg_domain_files = find_domain_files_with_crg(crg_path, prompt, repo_dir=proj.get("repo_dir"), max_files=max_files, graphify_data=graphify_data)
                     # Merge CRG domain files into ranking with combined scores
                     ranked = merge_graphify_and_crg_candidates(ranked, crg_domain_files)
-                    # Rescue: swap in CRG files if none in top 15
-                    ranked, crg_rescue_info = apply_architecture_layer_rescue(ranked, crg_domain_files)
+                    # Rescue: swap in CRG files if none in top N
+                    min_slots, max_slots = 2, 5
+                    if overrides and "crg_ratio" in overrides and "file_count" in overrides:
+                        fc = overrides["file_count"]
+                        min_slots = round(overrides["crg_ratio"] * fc * 0.7)
+                        max_slots = round(overrides["crg_ratio"] * fc)
+                    ranked, crg_rescue_info = apply_architecture_layer_rescue(ranked, crg_domain_files, min_crg_slots=min_slots, max_crg_slots=max_slots)
             except Exception as e:
                 import logging as _l
                 _l.getLogger(__name__).warning("CRG domain discovery failed: %s", e)
 
         chunks = retrieve_chunks(ranked, proj, policy)
-        task_files = [r["file_path"] for r in ranked[:20]]
+        file_cap = 20
+        if overrides and "file_count" in overrides:
+            file_cap = overrides["file_count"]
+        task_files = [r["file_path"] for r in ranked[:file_cap]]
         all_files.update(task_files)
 
         per_task_results.append({
@@ -217,6 +232,9 @@ def retrieve_context(proj: dict, prompt: str) -> dict:
             "crg_domain_files": crg_domain_files,
             "crg_rescue_info": crg_rescue_info,
         })
+
+    # Propagate token status from proj to result (set by retriever on auth failure)
+    token_status = proj.get("_token_status")
 
     # 3. ContextMerger: deduplicate, rank, budget, assemble
     from merger import merge_tasks
@@ -291,6 +309,7 @@ def retrieve_context(proj: dict, prompt: str) -> dict:
         },
         "matched_nodes": matched_nodes_dedup[:50],
         "context_stats": context_stats,
+        "token_status": token_status,
     }
 
 

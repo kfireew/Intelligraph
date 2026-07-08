@@ -26,5 +26,17 @@ export const projectsService = {
     requestJson(endpoints.projectDetail(pid), { method: "DELETE" }),
   pull: (pid) =>
     requestJson(endpoints.projectPull(pid), { method: "POST" }),
+  updateToken: (pid, token) =>
+    requestJson(endpoints.projectToken(pid), {
+      method: "POST",
+      body: JSON.stringify({ token }),
+    }),
+  share: (pid) =>
+    requestJson(endpoints.projectShare(pid), { method: "POST" }),
+  join: (shareKey, bitbucketToken) =>
+    requestJson(endpoints.shareJoin, {
+      method: "POST",
+      body: JSON.stringify({ share_key: shareKey, bitbucket_token: bitbucketToken }),
+    }),
   getGraphData: (pid) => requestJson(endpoints.projectGraphData(pid)),
 };

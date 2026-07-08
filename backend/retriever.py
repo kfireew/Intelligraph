@@ -79,11 +79,16 @@ def retrieve_chunks(ranked_files: list, proj: dict, task_policy: dict = None) ->
                 _vmsg("CHUNKER SPARSE pid=%s — no token (public repo?)", proj.get("id"))
             git_env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
 
-            fetched_dir = fetch_files_sparse(
+            fetched_dir, fetch_error = fetch_files_sparse(
                 git_url, file_paths,
                 git_auth_args=git_auth_args,
                 git_env=git_env,
             )
+            if fetch_error == "auth":
+                _vmsg("CHUNKER SPARSE AUTH FAIL pid=%s — token expired or invalid", proj.get("id"))
+                proj["_token_status"] = "expired_or_invalid"
+            elif fetch_error:
+                _vmsg("CHUNKER SPARSE FAIL pid=%s — error: %s", proj.get("id"), fetch_error)
             if fetched_dir:
                 _vmsg("CHUNKER SPARSE OK pid=%s — fetched to %s", proj.get("id"), fetched_dir)
                 cleanup_after = fetched_dir
@@ -148,9 +153,10 @@ def _load_fetch_token(proj):
     pid = proj.get("id")
     if not pid:
         return None
+    uk = proj.get("_user_key")
     try:
         import app as app_module
-        return app_module._load_fetch_token(pid)
+        return app_module._load_fetch_token(pid, uk=uk)
     except Exception:
         return None
 

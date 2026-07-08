@@ -119,6 +119,27 @@ def _cleanup_orphans():
 
 # ── Nx MCP: if enabled, keep repo_dir after build (Nx needs node_modules live) ──
 KEEP_REPO_AFTER_BUILD = os.environ.get("INTELLIGRAPH_ENABLE_NX_MCP", "false").lower() == "true"
+
+# ── SSO enforcement ──────────────────────────────────────────────
+# When true, mutating actions (clone, share, join, pull, delete) require SSO login.
+# Read-only routes (GET /projects, graph-html, status) remain open so the UI loads.
+REQUIRE_SSO = os.environ.get("INTELLIGRAPH_REQUIRE_SSO", "true").lower() == "true"
+
+# Routes that require authentication when REQUIRE_SSO is true
+_SSO_PROTECTED_METHODS = {"POST", "DELETE", "PATCH", "PUT"}
+_SSO_PROTECTED_PREFIXES = (
+    "/projects/clone",
+    "/projects/<int:pid>/share",
+    "/share/join",
+    "/projects/<int:pid>/pull",
+    "/projects/<int:pid>/token",
+)
+# Routes that are always open (auth, health, static, read-only)
+_SSO_OPEN_PREFIXES = (
+    "/auth/", "/status", "/diagnostics", "/assets/", "/static/",
+    "/download/", "/projects/<int:pid>/graph-html",
+    "/projects/<int:pid>/graph-data", "/projects/<int:pid>/crg-db",
+)
 # ── SQLite persistence (optional) ──
 INTELLIGRAPH_DB = os.environ.get("INTELLIGRAPH_DB", os.path.join(TEMP_DIR, "intelligraph.db"))
 
@@ -134,7 +155,11 @@ def _get_db():
     conn.execute("CREATE TABLE IF NOT EXISTS projects (id INTEGER, user_key TEXT, data TEXT, PRIMARY KEY(user_key, id))")
     conn.execute("CREATE TABLE IF NOT EXISTS chats (id TEXT PRIMARY KEY, user_key TEXT, project_id INTEGER, role TEXT, content TEXT, created_at TEXT)")
     conn.execute("CREATE TABLE IF NOT EXISTS uploads (user_key TEXT, project_id INTEGER, type TEXT, data TEXT, UNIQUE(user_key, project_id, type))")
-    conn.execute("CREATE TABLE IF NOT EXISTS fetch_tokens (project_id INTEGER PRIMARY KEY, token TEXT, created_at TEXT)")
+    # Per-user fetch tokens (was per-project; migrated for shared projects)
+    conn.execute("CREATE TABLE IF NOT EXISTS fetch_tokens_v2 (project_id INTEGER, user_key TEXT, token TEXT, created_at TEXT, PRIMARY KEY(project_id, user_key))")
+    conn.execute("CREATE TABLE IF NOT EXISTS project_members (project_id INTEGER, user_key TEXT, joined_at TEXT, PRIMARY KEY(project_id, user_key))")
+    conn.execute("CREATE TABLE IF NOT EXISTS project_share_keys (project_id INTEGER, share_key TEXT PRIMARY KEY, created_at TEXT)")
+    _migrate_fetch_tokens(conn)
     return conn
 
 _db = None  # lazy init
@@ -144,6 +169,82 @@ def _db_conn():
     if _db is None:
         _db = _get_db()
     return _db
+
+# ── Token encryption (Fernet / AES-128-CBC + HMAC-SHA256) ──────────
+_ENCRYPTION_SALT = b"intelligraph-token-encryption-v1"
+_fernet = None
+
+def _get_fernet():
+    """Get or lazily create the Fernet instance for token encryption."""
+    global _fernet
+    if _fernet is None:
+        from hashlib import pbkdf2_hmac
+        import base64
+        from cryptography.fernet import Fernet
+        secret = app.secret_key.encode() if isinstance(app.secret_key, str) else app.secret_key
+        key = base64.urlsafe_b64encode(pbkdf2_hmac("sha256", secret, _ENCRYPTION_SALT, 200_000, 32))
+        _fernet = Fernet(key)
+    return _fernet
+
+def _encrypt_token(token):
+    """Encrypt a token using Fernet (AES-128-CBC + HMAC-SHA256)."""
+    if not token:
+        return None
+    try:
+        return _get_fernet().encrypt(token.encode()).decode()
+    except Exception as e:
+        app.logger.warning("Token encryption failed: %s", e)
+        return None
+
+def _decrypt_token(encrypted):
+    """Decrypt a Fernet-encrypted token."""
+    if not encrypted:
+        return None
+    try:
+        return _get_fernet().decrypt(encrypted.encode()).decode()
+    except Exception:
+        return None
+
+def _migrate_fetch_tokens(conn):
+    """One-time migration: old fetch_tokens table (per-project, XOR) → fetch_tokens_v2 (per-user, Fernet)."""
+    try:
+        # Check if old table exists
+        tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+        if "fetch_tokens" not in tables:
+            return
+        # Check if migration already done
+        migrated = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='fetch_tokens_migrated'").fetchone()
+        if migrated:
+            return
+        rows = conn.execute("SELECT project_id, token, created_at FROM fetch_tokens").fetchall()
+        for row in rows:
+            try:
+                # Old method: XOR with secret key
+                old_key = app.secret_key
+                plain = _xor_obfuscate(row["token"], old_key)
+                # New: encrypt with Fernet
+                encrypted = _encrypt_token(plain)
+                conn.execute(
+                    "INSERT OR REPLACE INTO fetch_tokens_v2(project_id, user_key, token, created_at) VALUES(?, ?, ?, ?)",
+                    (row["project_id"], "local", encrypted, row["created_at"] or datetime.now(timezone.utc).isoformat())
+                )
+            except Exception:
+                pass
+        conn.execute("CREATE TABLE fetch_tokens_migrated (done INTEGER PRIMARY KEY)")
+        conn.execute("INSERT INTO fetch_tokens_migrated VALUES (1)")
+        conn.commit()
+        _vmsg("TOKEN MIGRATION: migrated %d tokens from XOR→Fernet", len(rows))
+    except Exception as e:
+        app.logger.warning("Token migration failed: %s", e)
+
+def _xor_obfuscate(text, key):
+    """Legacy XOR obfuscation (used only for one-time migration)."""
+    if not text or not key:
+        return text
+    result = []
+    for i, ch in enumerate(text):
+        result.append(chr(ord(ch) ^ ord(key[i % len(key)])))
+    return "".join(result)
 
 def _save_project(pid, proj, uk=None):
     """Persist project to SQLite. If uk (user_key) is not provided,
@@ -163,68 +264,121 @@ def _save_project(pid, proj, uk=None):
         app.logger.warning("DB save failed: %s", e)
 
 def _load_projects(uk=None):
-    """Load projects from SQLite on startup."""
+    """Load projects from SQLite on startup (owned + shared)."""
     if uk is None:
         return
     try:
         _PROJECTS.setdefault(uk, {})
         conn = _db_conn()
+        # Owned projects
         rows = conn.execute("SELECT id, data FROM projects WHERE user_key = ?", (uk,)).fetchall()
         for row in rows:
             data = json.loads(row["data"])
             if row["id"] not in _projects():
                 _projects()[row["id"]] = data
+        # Shared projects (member of but not owner)
+        shared_rows = conn.execute(
+            "SELECT pm.project_id, p.data FROM project_members pm "
+            "JOIN projects p ON pm.project_id = p.id "
+            "WHERE pm.user_key = ? AND p.user_key != ?",
+            (uk, uk)
+        ).fetchall()
+        for row in shared_rows:
+            data = json.loads(row["data"])
+            if row["project_id"] not in _projects():
+                _projects()[row["project_id"]] = data
+                _vmsg("SHARED LOAD user=%s pid=%d", uk, row["project_id"])
     except Exception as e:
         app.logger.warning("DB load failed: %s", e)
 
-def _store_fetch_token(pid, token):
-    """Store a git access token for sparse-fetch (obfuscated, SQLite).
-    Token is XOR'd with a per-install key - not real encryption, but
-    avoids plaintext in DB dumps. Closed-network only."""
+
+def _get_shared_project(pid):
+    """Get a project that the current user has access to via share membership.
+    Looks in all user_keys' projects if not in own."""
+    # Already in current user's projects?
+    proj = _projects().get(pid)
+    if proj:
+        return proj
+    # Check if user is a member of this shared project
+    try:
+        conn = _db_conn()
+        uk = _user_key()
+        row = conn.execute(
+            "SELECT p.data FROM project_members pm "
+            "JOIN projects p ON pm.project_id = p.id "
+            "WHERE pm.project_id = ? AND pm.user_key = ?",
+            (pid, uk)
+        ).fetchone()
+        if row:
+            data = json.loads(row["data"])
+            _projects()[pid] = data  # cache it
+            return data
+    except Exception:
+        pass
+    return None
+
+def _store_fetch_token(pid, token, uk=None):
+    """Store a git access token for sparse-fetch (Fernet-encrypted, per-user)."""
     if not token:
         return
     try:
-        key = app.secret_key
-        obf = _xor_obfuscate(token, key)
+        if uk is None:
+            uk = _user_key()
+        encrypted = _encrypt_token(token)
+        if not encrypted:
+            return
         conn = _db_conn()
         conn.execute(
-            "INSERT OR REPLACE INTO fetch_tokens(project_id, token, created_at) VALUES(?, ?, ?)",
-            (pid, obf, datetime.now(timezone.utc).isoformat())
+            "INSERT OR REPLACE INTO fetch_tokens_v2(project_id, user_key, token, created_at) VALUES(?, ?, ?, ?)",
+            (pid, uk, encrypted, datetime.now(timezone.utc).isoformat())
         )
         conn.commit()
     except Exception as e:
         app.logger.warning("Failed to store fetch token: %s", e)
 
-def _load_fetch_token(pid):
-    """Load and de-obfuscate the stored fetch token for a project."""
+def _load_fetch_token(pid, uk=None):
+    """Load and decrypt the stored fetch token for a project+user."""
     try:
+        if uk is None:
+            uk = _user_key()
         conn = _db_conn()
-        row = conn.execute("SELECT token FROM fetch_tokens WHERE project_id=?", (pid,)).fetchone()
+        row = conn.execute("SELECT token FROM fetch_tokens_v2 WHERE project_id=? AND user_key=?", (pid, uk)).fetchone()
         if row and row["token"]:
-            return _xor_obfuscate(row["token"], app.secret_key)
+            return _decrypt_token(row["token"])
     except Exception as e:
         app.logger.warning("Failed to load fetch token: %s", e)
     return None
 
-def _delete_fetch_token(pid):
-    """Delete fetch token when project is deleted."""
+def _delete_fetch_token(pid, uk=None):
+    """Delete fetch token(s) for a project. If uk is given, only that user's token."""
     try:
         conn = _db_conn()
-        conn.execute("DELETE FROM fetch_tokens WHERE project_id=?", (pid,))
+        if uk is None:
+            conn.execute("DELETE FROM fetch_tokens_v2 WHERE project_id=?", (pid,))
+        else:
+            conn.execute("DELETE FROM fetch_tokens_v2 WHERE project_id=? AND user_key=?", (pid, uk))
         conn.commit()
     except Exception:
         pass
 
-def _xor_obfuscate(text, key):
-    """Simple XOR obfuscation. Not cryptographic security - just avoids plaintext."""
-    if not text or not key:
-        return text
-    result = []
-    for i, ch in enumerate(text):
-        result.append(chr(ord(ch) ^ ord(key[i % len(key)])))
-    return "".join(result)
+_DEFAULT_SECRET_KEY = "intelligraph-dev-key-do-not-use-in-production"
+app.secret_key = os.environ.get("SECRET_KEY", _DEFAULT_SECRET_KEY)
 
-app.secret_key = os.environ.get("SECRET_KEY", "intelligraph-dev-key-do-not-use-in-production")
+# Validate SECRET_KEY when SSO is enforced (production mode)
+if REQUIRE_SSO:
+    _sk = os.environ.get("SECRET_KEY", "")
+    if not _sk or _sk == _DEFAULT_SECRET_KEY:
+        print("FATAL: SECRET_KEY must be set when INTELLIGRAPH_REQUIRE_SSO=true", flush=True)
+        sys.exit(1)
+    if len(_sk) < 32:
+        print("FATAL: SECRET_KEY must be at least 32 characters when SSO is enforced", flush=True)
+        sys.exit(1)
+else:
+    _sk = os.environ.get("SECRET_KEY", "")
+    if not _sk or _sk == _DEFAULT_SECRET_KEY:
+        _sk = secrets.token_hex(32)
+        app.secret_key = _sk
+        _vmsg("WARNING: SECRET_KEY not set — generated random key. Tokens will not survive restart.")
 
 OIDC_ISSUER = os.environ.get("OIDC_ISSUER", "")
 OIDC_CLIENT_ID = os.environ.get("OIDC_CLIENT_ID", "")
@@ -294,6 +448,31 @@ def get_user():
         val = request.headers.get(h)
         if val:
             return {"name": val, "source": "sso-proxy"}
+    return None
+
+
+@app.before_request
+def _sso_guard():
+    """Require SSO login for mutating actions when INTELLIGRAPH_REQUIRE_SSO=true."""
+    if not REQUIRE_SSO:
+        return None
+    if not OIDC_ISSUER:
+        return None  # SSO not configured, can't enforce
+    if request.method not in _SSO_PROTECTED_METHODS:
+        return None  # read-only methods allowed
+    path = request.path
+    # Check if this path is protected
+    for prefix in _SSO_OPEN_PREFIXES:
+        if path.startswith(prefix.replace("<int:pid>", "").replace("<pid>", "")):
+            return None
+    # If it's a mutating /projects/ route, require auth
+    u = get_user()
+    if not u:
+        if request.path.startswith("/api/"):
+            return jsonify({"error": "login_required", "message": "SSO login required for this action.",
+                            "login_url": "/auth/login"}), 401
+        return jsonify({"error": "login_required", "message": "SSO login required for this action.",
+                        "login_url": "/auth/login"}), 401
     return None
 
 
@@ -699,10 +878,10 @@ def clone_project():
             # Scrub any leaked token from remote origin
             _clean_remote_url(repo_dir)
 
-            # Store fetch token for on-demand sparse fetch (obfuscated in SQLite)
+            # Store fetch token for on-demand sparse fetch (Fernet-encrypted in SQLite)
             fetch_token = access_token or session.get("oidc_access_token", "")
             if fetch_token:
-                _store_fetch_token(pid, fetch_token)
+                _store_fetch_token(pid, fetch_token, uk=_user_key())
                 _vmsg("CLONE TOKEN STORED pid=%d - saved for sparse fetch", pid)
 
             proj["repo_dir"] = repo_dir
@@ -953,8 +1132,8 @@ def pull_project(pid):
         _save_project(pid, proj)
 
         git_env = _git_env()
-        # Use stored access token if available for auth
-        access_token = session.get("oidc_access_token", "") or _load_fetch_token(pid) or ""
+        # Use stored access token if available for auth (per-user)
+        access_token = session.get("oidc_access_token", "") or _load_fetch_token(pid, uk=_user_key()) or ""
         git_auth = _git_auth_args(access_token=access_token) if access_token else []
 
         # If repo_dir was deleted after build, re-clone to a fresh temp dir
@@ -969,6 +1148,9 @@ def pull_project(pid):
                 proj["status"] = "ready"
                 _save_project(pid, proj)
                 _rmtree_hard(repo_dir)
+                err_lower = (r.stderr or "").lower()
+                if any(p in err_lower for p in ("401", "403", "authentication", "access denied", "could not read", "authorization")):
+                    return jsonify({"error": "token_expired_or_invalid", "message": "Your Bitbucket access token has expired or is invalid. Please update it."}), 401
                 return jsonify({"error": "pull_failed", "message": redact_secret(r.stderr[:500], access_token)}), 500
             proj["repo_dir"] = repo_dir
             _vmsg("PULL RE-CLONE OK pid=%d - repo at %s", pid, repo_dir)
@@ -980,6 +1162,9 @@ def pull_project(pid):
                 _vmsg("PULL FETCH FAIL pid=%d - %s", pid, (r.stderr or "")[:200])
                 proj["status"] = "ready"
                 _save_project(pid, proj)
+                err_lower = (r.stderr or "").lower()
+                if any(p in err_lower for p in ("401", "403", "authentication", "access denied", "could not read", "authorization")):
+                    return jsonify({"error": "token_expired_or_invalid", "message": "Your Bitbucket access token has expired or is invalid. Please update it."}), 401
                 return jsonify({"error": "pull_failed", "message": redact_secret(r.stderr[:500], access_token)}), 500
             r = subprocess.run(["git", "reset", "--hard", "origin/HEAD"],
                              capture_output=True, text=True, timeout=60, env=git_env, cwd=repo_dir)
@@ -1024,7 +1209,7 @@ def pull_project(pid):
 
 @app.route("/projects/<int:pid>", methods=["GET"])
 def get_project(pid):
-    proj = _projects().get(pid)
+    proj = _projects().get(pid) or _get_shared_project(pid)
     if not proj:
         return jsonify({"error": "project not found"}), 404
     return jsonify({"id": pid, "name": proj.get("name"), "status": proj.get("status"),
@@ -1050,26 +1235,200 @@ def rename_project(pid):
 
 @app.route("/projects/<int:pid>", methods=["DELETE"])
 def delete_project(pid):
+    """Remove the project from the current user's view.
+    If no more members remain, clean up artifacts + DB rows for good."""
     _vmsg("DELETE START pid=%d", pid)
+    uk = _user_key()
     proj = _projects().pop(pid, None)
-    # Clean up repo_dir (if still alive)
-    if proj and proj.get("repo_dir"):
-        _vmsg("DELETE pid=%d - removing repo_dir %s", pid, proj["repo_dir"])
-        _rmtree_hard(proj["repo_dir"])
-    # Clean up relocated artifacts
-    if proj:
+
+    # Remove current user's membership
+    try:
+        conn = _db_conn()
+        conn.execute("DELETE FROM project_members WHERE project_id=? AND user_key=?", (pid, uk))
+        conn.execute("DELETE FROM fetch_tokens_v2 WHERE project_id=? AND user_key=?", (pid, uk))
+        conn.commit()
+    except Exception:
+        pass
+
+    # Check if any members remain
+    remaining_members = 0
+    try:
+        row = conn.execute("SELECT COUNT(*) as cnt FROM project_members WHERE project_id=?", (pid,)).fetchone()
+        remaining_members = row["cnt"] if row else 0
+    except Exception:
+        pass
+
+    # Also check if the owner still has it (owner might not be in project_members)
+    try:
+        owner_row = conn.execute("SELECT 1 FROM projects WHERE id=? AND user_key=?", (pid, uk)).fetchone()
+        if owner_row and remaining_members == 0:
+            remaining_members = 1  # owner still has it
+    except Exception:
+        pass
+
+    if remaining_members == 0:
+        # Last user out — clean up everything
+        _vmsg("DELETE LAST MEMBER pid=%d - full cleanup", pid)
+        if proj and proj.get("repo_dir"):
+            _vmsg("DELETE pid=%d - removing repo_dir %s", pid, proj["repo_dir"])
+            _rmtree_hard(proj["repo_dir"])
         artifacts_proj_dir = os.path.join(ARTIFACTS_DIR, str(pid))
         _vmsg("DELETE pid=%d - removing artifacts %s", pid, artifacts_proj_dir)
         _rmtree_hard(artifacts_proj_dir)
-        _delete_fetch_token(pid)
+        _delete_fetch_token(pid)  # cleans all remaining tokens
         try:
-            conn = _db_conn()
-            conn.execute("DELETE FROM projects WHERE id=? AND user_key=?", (pid, _user_key()))
+            conn.execute("DELETE FROM projects WHERE id=?", (pid,))
+            conn.execute("DELETE FROM project_share_keys WHERE project_id=?", (pid,))
+            conn.execute("DELETE FROM project_members WHERE project_id=?", (pid,))
+            conn.execute("DELETE FROM fetch_tokens_v2 WHERE project_id=?", (pid,))
             conn.commit()
         except Exception as e:
             app.logger.warning("DB delete failed: %s", e)
+    else:
+        _vmsg("DELETE pid=%d - %d members remain, keeping project alive", pid, remaining_members)
     _vmsg("DELETE DONE pid=%d", pid)
     return jsonify({"status": "deleted"})
+
+
+@app.route("/projects/<int:pid>/token", methods=["POST"])
+def update_project_token(pid):
+    """Update the Bitbucket HTTP access token for the current user.
+    Verifies the token with git ls-remote before storing."""
+    proj = _projects().get(pid) or _get_shared_project(pid)
+    if not proj:
+        return jsonify({"error": "project not found"}), 404
+    data = request.get_json(force=True) or {}
+    token = (data.get("token") or "").strip()
+    if not token:
+        return jsonify({"error": "token required"}), 400
+    git_url = proj.get("git_url", "")
+    if not git_url:
+        return jsonify({"error": "not a cloned project"}), 400
+
+    # Verify token with git ls-remote preflight
+    _ssl = "true" if GIT_SSL_VERIFY else "false"
+    git_auth = ["-c", f"http.sslVerify={_ssl}", "-c", f"http.extraHeader=Authorization: Bearer {token}"]
+    git_env = _git_env()
+    r = subprocess.run(["git"] + git_auth + ["ls-remote", git_url],
+                       capture_output=True, text=True, timeout=30, env=git_env)
+    if r.returncode != 0:
+        err_lower = (r.stderr or "").lower()
+        if any(p in err_lower for p in ("401", "403", "authentication", "access denied")):
+            return jsonify({"error": "bitbucket_auth_failed", "message": "Bitbucket rejected the token."}), 401
+        return jsonify({"error": "preflight_failed", "message": redact_secret(r.stderr[:300], token)}), 500
+
+    # Store token (Fernet-encrypted, per-user)
+    _store_fetch_token(pid, token, uk=_user_key())
+    _vmsg("TOKEN UPDATED pid=%d user=%s", pid, _user_key())
+    return jsonify({"status": "ok", "message": "Token updated successfully"})
+
+
+# ── Share key endpoints ──────────────────────────────────────────
+
+def _generate_share_key(pid):
+    """Generate a share key: <pid>-<8 random chars>."""
+    return f"{pid}-{secrets.token_urlsafe(6)}"
+
+
+@app.route("/projects/<int:pid>/share", methods=["POST"])
+def create_share_link(pid):
+    """Generate a share key for a project. Returns the key to share with others."""
+    proj = _projects().get(pid)
+    if not proj:
+        return jsonify({"error": "project not found"}), 404
+    share_key = _generate_share_key(pid)
+    try:
+        conn = _db_conn()
+        # Remove old share keys for this project
+        conn.execute("DELETE FROM project_share_keys WHERE project_id=?", (pid,))
+        conn.execute(
+            "INSERT INTO project_share_keys(project_id, share_key, created_at) VALUES(?, ?, ?)",
+            (pid, share_key, datetime.now(timezone.utc).isoformat())
+        )
+        conn.commit()
+        _vmsg("SHARE CREATED pid=%d key=%s", pid, share_key)
+    except Exception as e:
+        return jsonify({"error": "share_failed", "message": str(e)[:200]}), 500
+    return jsonify({"share_key": share_key, "project_id": pid, "project_name": proj.get("name", "")})
+
+
+@app.route("/share/join", methods=["POST"])
+def join_shared_project():
+    """Join a shared project using a share key.
+    Requires SSO auth + a Bitbucket HTTP access token (for private repos)."""
+    data = request.get_json(force=True) or {}
+    share_key = (data.get("share_key") or "").strip()
+    bitbucket_token = (data.get("bitbucket_token") or data.get("token") or "").strip()
+    if not share_key:
+        return jsonify({"error": "share_key required"}), 400
+
+    # Look up the share key
+    try:
+        conn = _db_conn()
+        row = conn.execute(
+            "SELECT project_id FROM project_share_keys WHERE share_key = ?", (share_key,)
+        ).fetchone()
+        if not row:
+            return jsonify({"error": "invalid_share_key", "message": "Share key not found or revoked."}), 404
+        pid = row["project_id"]
+    except Exception as e:
+        return jsonify({"error": "lookup_failed", "message": str(e)[:200]}), 500
+
+    # Get the project data
+    try:
+        proj_row = conn.execute("SELECT user_key, data FROM projects WHERE id = ?", (pid,)).fetchone()
+        if not proj_row:
+            return jsonify({"error": "project_not_found"}), 404
+        proj = json.loads(proj_row["data"])
+        git_url = proj.get("git_url", "")
+    except Exception:
+        return jsonify({"error": "project_load_failed"}), 500
+
+    uk = _user_key()
+    # Already a member?
+    try:
+        existing = conn.execute(
+            "SELECT 1 FROM project_members WHERE project_id=? AND user_key=?", (pid, uk)
+        ).fetchone()
+        if existing:
+            return jsonify({"status": "already_member", "project_id": pid, "message": "You already have access to this project."})
+    except Exception:
+        pass
+
+    # If it's a Bitbucket repo, verify the user's token
+    if bitbucket_token and git_url:
+        _ssl = "true" if GIT_SSL_VERIFY else "false"
+        git_auth = ["-c", f"http.sslVerify={_ssl}", "-c", f"http.extraHeader=Authorization: Bearer {bitbucket_token}"]
+        git_env = _git_env()
+        r = subprocess.run(["git"] + git_auth + ["ls-remote", git_url],
+                           capture_output=True, text=True, timeout=30, env=git_env)
+        if r.returncode != 0:
+            err_lower = (r.stderr or "").lower()
+            if any(p in err_lower for p in ("401", "403", "authentication", "access denied")):
+                return jsonify({"error": "bitbucket_auth_failed", "message": "Bitbucket rejected the token. Check repo read permission."}), 401
+            return jsonify({"error": "preflight_failed", "message": redact_secret(r.stderr[:300], bitbucket_token)}), 500
+        # Store the user's token (Fernet-encrypted, per-user)
+        _store_fetch_token(pid, bitbucket_token, uk=uk)
+
+    # Add membership
+    try:
+        conn.execute(
+            "INSERT OR REPLACE INTO project_members(project_id, user_key, joined_at) VALUES(?, ?, ?)",
+            (pid, uk, datetime.now(timezone.utc).isoformat())
+        )
+        conn.commit()
+    except Exception as e:
+        return jsonify({"error": "join_failed", "message": str(e)[:200]}), 500
+
+    # Load project into user's session
+    _projects()[pid] = proj
+    _vmsg("SHARE JOIN user=%s pid=%d", uk, pid)
+    return jsonify({
+        "status": "joined",
+        "project_id": pid,
+        "project_name": proj.get("name", ""),
+        "git_url": git_url,
+    })
 
 
 @app.route("/projects/<int:pid>/status")
@@ -1303,18 +1662,28 @@ def graph_retrieve_context():
     if not prompt:
         return jsonify({"context": "", "files": [], "strategy": "no_prompt", "plan": {}}), 200
 
-    proj = _projects().get(project_id) if project_id else None
+    proj = (_projects().get(project_id) or _get_shared_project(project_id)) if project_id else None
     if not proj:
         _vmsg("RETRIEVE SKIP pid=%s - project not found", project_id)
         return jsonify({"context": "", "files": [], "strategy": "no_project", "plan": {}}), 200
 
-    # Ensure id is set so downstream modules (retriever sparse fetch) can load tokens
+    # Ensure id + user_key are set so downstream modules (retriever sparse fetch) can load tokens
     proj["id"] = project_id
+    proj["_user_key"] = _user_key()
 
     _vmsg("RETRIEVE START pid=%s prompt=%s", project_id, prompt[:100])
     from retrieval import retrieve_context
+    # Optional tuning overrides (used by tune.py sweep)
+    overrides = {}
+    for k in ("file_count", "crg_ratio", "depth"):
+        v = request.args.get(k) or data.get(k)
+        if v is not None:
+            try:
+                overrides[k] = int(v) if k != "crg_ratio" else float(v)
+            except (ValueError, TypeError):
+                pass
     try:
-        result = retrieve_context(proj, prompt)
+        result = retrieve_context(proj, prompt, overrides=overrides if overrides else None)
         _vmsg("RETRIEVE DONE pid=%s strategy=%s files=%d context_len=%d",
                project_id, result.get("strategy", "?"),
                len(result.get("files", [])),

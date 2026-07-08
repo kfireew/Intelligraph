@@ -4,7 +4,7 @@ import {
   MessageSquare, Settings, Server,
   Plus, X, LogIn, LogOut, ChevronLeft,
   Loader2, CheckCircle2, AlertCircle, Clock,
-  RefreshCw,
+  RefreshCw, Share2, KeyRound, AlertTriangle,
 } from "lucide-react";
 
 const STATUS_ICONS = {
@@ -37,9 +37,18 @@ export function Sidebar({
   projects, activePid, activePanel,
   auth, onSelectProject, onNewProject,
   onSwitchPanel, onRename, onDelete, onPull,
+  tokenExpired, onShare, onJoin, onUpdateToken,
 }) {
   const [collapsed, setCollapsed] = useState(false);
   const [renaming, setRenaming] = useState(null);
+  const [showJoin, setShowJoin] = useState(false);
+  const [joinKey, setJoinKey] = useState("");
+  const [joinToken, setJoinToken] = useState("");
+  const [joinError, setJoinError] = useState("");
+  const [joinLoading, setJoinLoading] = useState(false);
+  const [shareModal, setShareModal] = useState(null); // { pid, key }
+  const [renewingPid, setRenewingPid] = useState(null);
+  const [renewToken, setRenewToken] = useState("");
 
   const handleRenameSubmit = useCallback((pid) => {
     const input = document.getElementById(`rename-input-${pid}`);
@@ -48,6 +57,39 @@ export function Sidebar({
     }
     setRenaming(null);
   }, [onRename]);
+
+  const handleShare = async (pid) => {
+    if (!onShare) return;
+    const key = await onShare(pid);
+    if (key) {
+      setShareModal({ pid, key });
+    }
+  };
+
+  const handleJoin = async () => {
+    if (!joinKey.trim()) return;
+    setJoinLoading(true);
+    setJoinError("");
+    try {
+      await onJoin(joinKey.trim(), joinToken.trim() || undefined);
+      setShowJoin(false);
+      setJoinKey("");
+      setJoinToken("");
+    } catch (e) {
+      setJoinError(e.message || "Join failed");
+    } finally {
+      setJoinLoading(false);
+    }
+  };
+
+  const handleRenew = async (pid) => {
+    if (!renewToken.trim() || !onUpdateToken) return;
+    const ok = await onUpdateToken(pid, renewToken.trim());
+    if (ok) {
+      setRenewingPid(null);
+      setRenewToken("");
+    }
+  };
 
   return (
     <motion.aside
@@ -132,6 +174,15 @@ export function Sidebar({
                     <RefreshCw size={11} />
                   </button>
                 )}
+                {p.git_url && p.status === "ready" && onShare && (
+                  <button
+                    className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:text-accent hover:bg-accent/10 transition-all flex-shrink-0 cursor-pointer"
+                    title="Share project"
+                    onClick={(e) => { e.stopPropagation(); handleShare(p.id); }}
+                  >
+                    <Share2 size={11} />
+                  </button>
+                )}
                 <button
                   className="opacity-0 group-hover:opacity-100 p-0.5 rounded hover:text-red hover:bg-red/10 transition-all flex-shrink-0 cursor-pointer"
                   onClick={(e) => { e.stopPropagation(); onDelete(p.id); }}
@@ -141,6 +192,90 @@ export function Sidebar({
               </motion.div>
             );
           })}
+        </div>
+      )}
+
+      {/* Token expiry badge + renewal */}
+      {!collapsed && tokenExpired && tokenExpired.size > 0 && (
+        <div className="px-3 pb-2 space-y-1">
+          {Array.from(tokenExpired).map((expid) => {
+            const proj = projects.find((p) => p.id === expid);
+            if (!proj) return null;
+            return (
+              <div key={expid} className="rounded-lg border border-orange/30 bg-orange/5 p-2">
+                <div className="flex items-center gap-1.5 text-[10px] text-orange mb-1">
+                  <AlertTriangle size={11} />
+                  <span className="font-bold">Token expired: {proj.name}</span>
+                </div>
+                {renewingPid === expid ? (
+                  <div className="flex gap-1">
+                    <input
+                      type="password" value={renewToken}
+                      onChange={(e) => setRenewToken(e.target.value)}
+                      placeholder="New BBDC-... token"
+                      className="flex-1 px-1.5 py-1 rounded bg-white/5 border border-glass-border text-[10px] text-text outline-none focus:border-accent/40 font-mono"
+                      onKeyDown={(e) => { if (e.key === "Enter") handleRenew(expid); }}
+                      autoFocus
+                    />
+                    <button onClick={() => handleRenew(expid)}
+                      className="px-2 py-1 rounded text-[10px] font-bold text-white"
+                      style={{ background: "linear-gradient(135deg, #8b5cf6, #d946ef)" }}>
+                      OK
+                    </button>
+                  </div>
+                ) : (
+                  <button onClick={() => { setRenewingPid(expid); setRenewToken(""); }}
+                    className="text-[10px] text-accent-light hover:text-accent transition-colors flex items-center gap-1">
+                    <KeyRound size={10} /> Update token
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Join project section */}
+      {!collapsed && (
+        <div className="px-3 pb-2">
+          {showJoin ? (
+            <div className="rounded-lg border border-glass-border bg-white/3 p-2 space-y-1.5">
+              <div className="flex items-center gap-1.5 text-[10px] text-muted">
+                <KeyRound size={11} />
+                <span className="font-bold">Join shared project</span>
+              </div>
+              <input
+                type="text" value={joinKey}
+                onChange={(e) => setJoinKey(e.target.value)}
+                placeholder="Share key (e.g. 2-aB3xK9mZ)"
+                className="w-full px-2 py-1 rounded bg-white/5 border border-glass-border text-[11px] text-text outline-none focus:border-accent/40"
+                onKeyDown={(e) => { if (e.key === "Enter") handleJoin(); }}
+                autoFocus
+              />
+              <input
+                type="password" value={joinToken}
+                onChange={(e) => setJoinToken(e.target.value)}
+                placeholder="Bitbucket token (for private repos)"
+                className="w-full px-2 py-1 rounded bg-white/5 border border-glass-border text-[11px] text-text outline-none focus:border-accent/40 font-mono"
+                onKeyDown={(e) => { if (e.key === "Enter") handleJoin(); }}
+              />
+              {joinError && <div className="text-[10px] text-red">{joinError}</div>}
+              <div className="flex gap-1">
+                <button onClick={() => setShowJoin(false)}
+                  className="flex-1 px-2 py-1 rounded text-[10px] text-muted hover:text-text transition-colors">Cancel</button>
+                <button onClick={handleJoin} disabled={joinLoading || !joinKey.trim()}
+                  className="flex-1 px-2 py-1 rounded text-[10px] font-bold text-white disabled:opacity-40"
+                  style={{ background: "linear-gradient(135deg, #8b5cf6, #d946ef)" }}>
+                  {joinLoading ? <Loader2 size={10} className="animate-spin mx-auto" /> : "Join"}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button onClick={() => setShowJoin(true)}
+              className="w-full flex items-center justify-center gap-1.5 py-1.5 rounded-lg text-[11px] text-muted hover:text-accent-light hover:bg-accent/5 transition-colors">
+              <KeyRound size={12} /> Join shared project
+            </button>
+          )}
         </div>
       )}
 
@@ -177,6 +312,39 @@ export function Sidebar({
           </button>
         )}
       </div>
+
+      {/* Share modal */}
+      {shareModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-6"
+          style={{ background: "rgba(0,0,0,0.6)", backdropFilter: "blur(6px)" }}
+          onClick={() => setShareModal(null)}>
+          <div className="rounded-2xl p-5 max-w-sm w-full"
+            style={{ background: "rgba(13,17,23,1)", border: "1px solid #21262d" }}
+            onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-sm font-bold gradient-text m-0">Share Project</h3>
+              <button onClick={() => setShareModal(null)} className="text-muted hover:text-red"><X size={16} /></button>
+            </div>
+            <p className="text-[11px] text-muted mb-2">
+              Share this key with your teammate. They can join via "Join shared project" in the sidebar.
+            </p>
+            <div className="flex gap-2">
+              <input
+                type="text" readOnly value={shareModal.key}
+                className="flex-1 px-3 py-2 rounded-lg bg-white/5 border border-glass-border text-sm text-text font-mono outline-none"
+                onClick={(e) => e.target.select()}
+                autoFocus
+              />
+              <button
+                onClick={() => { navigator.clipboard.writeText(shareModal.key); }}
+                className="px-3 py-2 rounded-lg text-xs font-bold text-white"
+                style={{ background: "linear-gradient(135deg, #8b5cf6, #d946ef)" }}>
+                Copy
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </motion.aside>
   );
 }

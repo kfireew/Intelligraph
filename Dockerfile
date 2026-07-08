@@ -33,6 +33,8 @@ ENV INTELLIGRAPH_GIT_SSL_VERIFY=false
 ENV INTELLIGRAPH_ENABLE_NX_MCP=true
 ENV INTELLIGRAPH_NX_COMMAND=/usr/local/bin/nx
 ENV INTELLIGRAPH_NX_MCP_COMMAND=/usr/local/bin/nx
+ENV INTELLIGRAPH_REQUIRE_SSO=true
+# SECRET_KEY must be set at runtime (min 32 chars) when REQUIRE_SSO=true
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
   CMD curl -f http://localhost:5050/status || exit 1
