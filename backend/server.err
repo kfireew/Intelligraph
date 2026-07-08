@@ -1,0 +1,13 @@
+WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
+ * Running on http://127.0.0.1:5050
+Press CTRL+C to quit
+127.0.0.1 - - [08/Jul/2026 23:53:40] "GET /projects HTTP/1.1" 200 -
+127.0.0.1 - - [09/Jul/2026 00:03:51] "POST /graph/retrieve-context HTTP/1.1" 200 -
+Sparse checkout failed: fatal: unable to access 'https://github.com/graphify-labs/graphify.git/': failed to connect to github.com port 443 after 21109 ms: could not connect to server
+fatal: could not fetch faa0f4b2617dc60d6bd597019b20897e70df09af from promisor remote
+
+127.0.0.1 - - [09/Jul/2026 00:04:18] "POST /graph/retrieve-context HTTP/1.1" 200 -
+Sparse checkout failed: fatal: unable to access 'https://github.com/graphify-labs/graphify.git/': failed to connect to github.com port 443 after 21080 ms: could not connect to server
+fatal: could not fetch 2e0a71c7562a4b1e9b0b165b1f0d7f7e661f9964 from promisor remote
+
+127.0.0.1 - - [09/Jul/2026 00:04:44] "POST /graph/retrieve-context HTTP/1.1" 200 -

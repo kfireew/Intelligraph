@@ -91,17 +91,17 @@ def retrieve_chunks(ranked_files: list, proj: dict, task_policy: dict = None, ma
                 _vmsg("CHUNKER SPARSE FAIL pid=%s — error: %s", proj.get("id"), fetch_error)
             if fetched_dir:
                 _vmsg("CHUNKER SPARSE OK pid=%s — fetched to %s", proj.get("id"), fetched_dir)
-                proj["_sparse_fetch_ok"] = True
                 cleanup_after = fetched_dir
                 try:
                     from code_chunker import chunk_files
                     chunks = chunk_files(file_paths, repo_dir=fetched_dir, max_chunks=MAX_CHUNKS)
                     if chunks:
                         chunks = _dedup_overlapping(chunks)
+                        proj["_sparse_fetch_ok"] = True
                         _vmsg("CHUNKER SPARSE CHUNKS pid=%s — %d chunks", proj.get("id"), len(chunks))
                         return _apply_policy(chunks, task_policy)
                     else:
-                        _vmsg("CHUNKER SPARSE EMPTY pid=%s — chunk_files returned 0", proj.get("id"))
+                        _vmsg("CHUNKER SPARSE EMPTY pid=%s — chunk_files returned 0 (cold start?)", proj.get("id"))
                 except Exception as e:
                     _vmsg("CHUNKER SPARSE FAIL pid=%s — %s", proj.get("id"), e)
                     log.warning("ChunkRetriever sparse fetch failed: %s", e)
