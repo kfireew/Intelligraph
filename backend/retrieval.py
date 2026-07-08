@@ -157,6 +157,7 @@ def retrieve_context(proj: dict, prompt: str, overrides: dict = None) -> dict:
         # ── NodeResolver: text → graph nodes ──
         from resolver import resolve_nodes
         matched = resolve_nodes(task["target"], graphify_data)
+        resolver_matched = len(matched) > 0
 
         # Architecture tasks: merge resolver matches with graph-heuristic seeding
         # (was: replace resolver output entirely — now we keep both for better targeting)
@@ -243,6 +244,8 @@ def retrieve_context(proj: dict, prompt: str, overrides: dict = None) -> dict:
                         # Also search for the target
                         search_results = provider.search(target or prompt, max_results=10)
                         intel_files.extend(search_results)
+                        if not intel_mode and search_results:
+                            intel_mode = "search"
                     elif ttype in ("what_is", "search", "callers", "callees"):
                         # Search: FTS symbol search
                         search_results = provider.search(target or prompt, max_results=15)
@@ -286,6 +289,7 @@ def retrieve_context(proj: dict, prompt: str, overrides: dict = None) -> dict:
             "files": ranked[:file_cap],
             "chunks": chunks,
             "expanded_nodes": expanded_ids,
+            "resolver_matched": resolver_matched,
             "crg_domain_files": crg_domain_files,
             "crg_rescue_info": crg_rescue_info,
             "intel_metadata": intel_metadata,

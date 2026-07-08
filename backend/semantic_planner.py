@@ -63,14 +63,14 @@ class OpenRouterLLM:
         self.timeout = 15
 
     def __call__(self, messages):
-        """Call the LLM with a list of Message-like objects. Returns text."""
+        """Call the LLM with a list of Message-like objects. Returns text or None."""
         if not self.url:
             return None
         try:
             payload = {
                 "model": self.model,
                 "messages": [{"role": m.role, "content": m.content} for m in messages],
-                "max_tokens": 100,
+                "max_tokens": 500,
                 "temperature": 0.0,
             }
             headers = {"Content-Type": "application/json"}
@@ -85,24 +85,81 @@ class OpenRouterLLM:
                 log.warning("OpenRouterLLM status=%s body=%s", resp.status_code, resp.text[:200])
                 return None
             data = resp.json()
-            return data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+            msg = data.get("choices", [{}])[0].get("message", {})
+            content = msg.get("content")
+            if not content:
+                # Reasoning models (qwen3.6) may put output in reasoning field
+                # when max_tokens is exhausted during reasoning phase
+                reasoning = msg.get("reasoning", "")
+                if not reasoning and msg.get("reasoning_details"):
+                    reasoning = msg["reasoning_details"][0].get("text", "")
+                if reasoning:
+                    # Try to find JSON target in reasoning text
+                    m = re.search(r'\{[^}]*"target"[^}]*\}', reasoning)
+                    if m:
+                        return m.group()
+                    # Try to find answer after output patterns
+                    for pat in [r'->\s*"([^"]+)"', r'output:\s*"([^"]+)"',
+                                r'"target"\s*:\s*"([^"]+)"']:
+                        m = re.search(pat, reasoning)
+                        if m:
+                            return '{"target": "%s"}' % m.group(1)
+                return None
+            # Strip thinking tokens from reasoning models
+            content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
+            return content if content else None
         except Exception as e:
             log.warning("OpenRouterLLM failed: %s", e)
             return None
 
     def extract_function_inputs(self, query, function_schema):
-        """Extract target parameter from query using LLM."""
-        import json
+        """Extract target parameter from query using LLM.
+
+        Returns dict like {"target": "extract"}.
+        Falls back to regex if LLM fails or returns unparseable output.
+        """
+        import json as _json
         prompt = (
-            "You are a helpful assistant designed to output JSON. "
-            "Given the following function schema "
-            f"<< {function_schema} >> "
-            "and query "
-            f"<< {query} >> "
-            "extract the parameters values from the query, in a valid JSON format. "
-            'Example: {"target": "build_graph"}'
+            "You are a code intelligence assistant. Extract the target symbol name "
+            "from the user's question. Return ONLY a JSON object.\n\n"
+            "The target is the specific function, class, module, or file name "
+            "that the question is about. Strip filler words.\n\n"
+            "Examples:\n"
+            '  "how does the clustering algorithm work" -> {"target": "clustering"}\n'
+            '  "what breaks if I change the extract function" -> {"target": "extract"}\n'
+            '  "where is the cluster function defined" -> {"target": "cluster"}\n'
+            '  "who calls the build_graph function" -> {"target": "build_graph"}\n'
+            '  "what is the architecture of the graphify system" -> {"target": "graphify"}\n'
+            '  "architecture of the parser" -> {"target": "parser"}\n\n'
+            f"Question: {query}\n"
+            'JSON:'
         )
         from semantic_router.schema import Message
+        llm_input = [Message(role="user", content=prompt)]
+        output = self(llm_input)
+        if not output:
+            raise Exception("LLM returned no output")
+        # Try to extract JSON from the response
+        # The LLM might wrap it in markdown or add extra text
+        try:
+            # Direct parse
+            result = _json.loads(output.strip())
+        except _json.JSONDecodeError:
+            # Try to find JSON object in the response
+            m = re.search(r'\{[^}]+\}', output)
+            if m:
+                try:
+                    result = _json.loads(m.group())
+                except _json.JSONDecodeError:
+                    raise Exception(f"Could not parse LLM output: {output[:100]}")
+            else:
+                raise Exception(f"No JSON in LLM output: {output[:100]}")
+        if "target" not in result:
+            raise Exception(f"No 'target' key in LLM output: {result}")
+        target = str(result["target"]).strip()
+        if not target or len(target) < 1:
+            raise Exception("Empty target from LLM")
+        return result
         llm_input = [Message(role="user", content=prompt)]
         output = self(llm_input)
         if not output:
@@ -144,6 +201,14 @@ def _build_routes():
                 "help me understand the project architecture",
                 "what modules exist in this codebase",
                 "how is the code organized",
+                "what is the architecture of this system",
+                "describe the system architecture",
+                "what is the overall architecture",
+                "explain the system design",
+                "architecture of the parser module",
+                "architecture of the clustering component",
+                "what is the structure of the retrieval system",
+                "describe the layout of the codebase",
             ],
             score_threshold=_SCORE_THRESHOLD,
         ),
@@ -163,9 +228,12 @@ def _build_routes():
                 "what is the algorithm used here",
                 "how is this component implemented",
                 "trace the execution flow",
-                "what does this module do",
+                "what does the bridge module do",
                 "what does this component do",
                 "how does this system operate",
+                "how does the extraction pipeline work",
+                "explain how the retrieval system works",
+                "how does the MCP server work",
             ],
             score_threshold=_SCORE_THRESHOLD,
         ),
@@ -310,13 +378,14 @@ def _build_routes():
             name="nx_architecture",
             utterances=[
                 "nx workspace structure",
-                "project dependencies in the monorepo",
-                "what nx projects exist",
+                "what nx projects exist in the monorepo",
                 "how is the nx workspace organized",
-                "show me the monorepo layout",
+                "show me the nx monorepo layout",
                 "what are the nx project boundaries",
-                "nx project graph",
-                "workspace dependency graph",
+                "nx project graph and dependencies",
+                "nx workspace dependency graph",
+                "which nx projects depend on each other",
+                "show me the nx project configuration",
             ],
             score_threshold=_SCORE_THRESHOLD,
         ),
@@ -470,7 +539,7 @@ def _regex_extract_target(prompt: str, intent: str) -> str:
         "architecture":  r"(?:architecture|structure|overview|components|organization|design)\s*(?:of|for)?\s*(.+)?",
         "how_works":     r"(?:how|explain).*(?:does|work|implement|called|used)\s*(?:(?:the|a|an)\s+)?(.+)",
         "what_is":       r"(?:what|where|which|find|show)\s+(?:is|are|the|a|an|file|function|class)\s*(.+)?",
-        "impact":        r"(?:impact|what breaks|affect|blast radius|risk)\s*(?:of|on|for|if|when)?\s*(.+)?",
+        "impact":        r"(?:impact|what breaks|affect|blast radius|risk)\s*(?:of|on|for|if|when)?\s*(?:I\s+(?:change|modify|update|edit|refactor|delete|remove)\s+)?(.+)?",
         "callers":       r"(?:who|what)\s*(?:calls|uses|imports|depends on)\s*(.+)?",
         "callees":       r"(?:what does|what are)\s*(.+?)\s*(?:call|use|import|depend on)",
         "debug":         r"(?:bug|error|issue|problem|debug|trace)\s*(?:in|of|with)?\s*(.+)?",

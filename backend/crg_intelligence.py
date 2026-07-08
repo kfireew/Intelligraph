@@ -351,6 +351,32 @@ class CRGProvider(IntelligenceProvider):
             ).fetchall()
 
         if not target_nodes:
+            # Try word-level search: extract significant words from target
+            words = [w for w in re.split(r'[\s_\-\.]+', target_lower) if len(w) > 2 and w not in
+                     ("the", "and", "for", "that", "this", "with", "from", "what", "break", "change",
+                      "modify", "update", "function", "method", "class", "module", "file", "code")]
+            if words:
+                for word in words:
+                    try:
+                        rows = conn.execute(
+                            "SELECT n.id, n.name, n.qualified_name, n.file_path "
+                            "FROM nodes_fts f JOIN nodes n ON f.rowid = n.id "
+                            "WHERE nodes_fts MATCH ? LIMIT 10",
+                            (f'"{word}"',)
+                        ).fetchall()
+                        target_nodes.extend(rows)
+                    except Exception:
+                        pass
+                # Deduplicate by id
+                seen_ids = set()
+                deduped = []
+                for n in target_nodes:
+                    if n["id"] not in seen_ids:
+                        seen_ids.add(n["id"])
+                        deduped.append(n)
+                target_nodes = deduped
+
+        if not target_nodes:
             _vmsg("CRG IMPACT: target '%s' not found", target)
             return []
 

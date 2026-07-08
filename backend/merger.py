@@ -114,16 +114,28 @@ def merge_tasks(tasks: list, per_task_results: list, graphify_data: dict, nx_met
                     nx_parts.append(f"  - `{p['name']}` ({p.get('type', 'lib')}) — `{p.get('root', '')}`")
             parts.append("\n".join(nx_parts))
 
-    # 2c. Determine query type for architecture-aware sections
+    # 2c. Determine query type for architecture-aware sections.
+    # A "narrow" query targets a specific subsystem (e.g. "architecture of the parser").
+    # A "broad" query asks about the whole codebase (e.g. "overview", "how is it organized").
+    #
+    # Signal: did the resolver find real node matches for the architecture target?
+    # If yes AND the matched file count is small (≤8), it's a narrow query.
+    # If the resolver found nothing (fell back to seeds), it's a broad query.
     is_architecture = any(t.get("type") in ("architecture", "overview") for t in tasks)
-    # Check if this is a narrow architecture query (has a specific target)
-    has_specific_target = any(
-        t.get("type") == "architecture" and t.get("target") and
-        len(t["target"]) > 3 and t["target"].lower() not in
-        ("the project", "this project", "project", "this", "the",
-         "architecture", "structure", "overview", "codebase", "app", "application", "system")
-        for t in tasks
-    )
+    _task_results_by_id = {r.get("task_id"): r for r in per_task_results}
+    has_specific_target = False
+    for t in tasks:
+        if t.get("type") not in ("architecture", "overview"):
+            continue
+        tid = t.get("id")
+        result = _task_results_by_id.get(tid, {})
+        if not result.get("resolver_matched", False):
+            continue
+        files = result.get("files", [])
+        matched_files = set(f.get("file_path", "") for f in files if f.get("score", 0) > 0)
+        if 0 < len(matched_files) <= 8:
+            has_specific_target = True
+            break
 
     # 2d. Graphify architecture context (architecture/overview tasks only)
     arch_overhead_chars = 0
