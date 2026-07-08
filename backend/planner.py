@@ -90,11 +90,16 @@ def extract_target(prompt: str, task_type: str) -> str:
     """Extract a target symbol or phrase from prompt for a task type."""
     pattern = _TASK_EXTRACTORS.get(task_type)
     if not pattern:
-        return prompt[:80]
+        return prompt[:80].rstrip("?").strip()
     m = re.search(pattern, prompt, re.IGNORECASE)
-    if m and m.group(1) and m.group(1).strip():
-        return m.group(1).strip()[:80]
-    return prompt[:80]
+    if m and m.group(1) and m.group(1).strip().rstrip("?").strip():
+        return m.group(1).strip().rstrip("?").strip()[:80]
+    # Fallback: try to extract the noun phrase between "how does" and "work"
+    if task_type == "how_works":
+        m2 = re.search(r"(?:how|explain)\s+(?:does\s+)?(?:the\s+|a\s+|an\s+)?(.+?)(?:\s+work|\?)", prompt, re.IGNORECASE)
+        if m2 and m2.group(1).strip():
+            return m2.group(1).strip()[:80]
+    return prompt[:80].rstrip("?").strip()
 
 
 def plan_query(prompt: str) -> dict:

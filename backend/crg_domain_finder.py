@@ -21,7 +21,26 @@ log = logging.getLogger(__name__)
 
 
 def get_crg_db_path(proj: dict) -> str | None:
-    """Get CRG DB path from project metadata, or None if unavailable."""
+    """Get CRG DB path from project metadata, or None if unavailable.
+
+    Checks relocated artifact first (proj['crg_db_path']), then repo_dir.
+    """
+    # 1. Relocated artifact (post-build cleanup — most common case)
+    crg_path = proj.get("crg_db_path")
+    if crg_path and os.path.isfile(crg_path):
+        return crg_path
+
+    # 2. Artifacts dir fallback
+    pid = proj.get("id")
+    if pid:
+        artifacts = os.environ.get("INTELLIGRAPH_ARTIFACTS_DIR",
+            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                         "data", "artifacts"))
+        p = os.path.join(artifacts, str(pid), "graph.db")
+        if os.path.isfile(p):
+            return p
+
+    # 3. Repo dir (if still alive — e.g. INTELLIGRAPH_ENABLE_NX_MCP=true)
     repo_dir = proj.get("repo_dir")
     if not repo_dir:
         return None

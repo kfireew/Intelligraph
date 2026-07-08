@@ -1,0 +1,52 @@
+[
+  {
+    "prompt": "How does the graph builder work?",
+    "expected_files": ["graphify/build.py", "graphify/extract.py"],
+    "task_type": "how_works"
+  },
+  {
+    "prompt": "How does clustering work?",
+    "expected_files": ["graphify/cluster.py"],
+    "task_type": "how_works"
+  },
+  {
+    "prompt": "How does HTML export work?",
+    "expected_files": ["graphify/export.py", "graphify/callflow_html.py"],
+    "task_type": "how_works"
+  },
+  {
+    "prompt": "How does the LLM integration work?",
+    "expected_files": ["graphify/llm.py"],
+    "task_type": "how_works"
+  },
+  {
+    "prompt": "What is the main entry point?",
+    "expected_files": ["graphify/__main__.py", "graphify/__init__.py"],
+    "task_type": "what_is"
+  },
+  {
+    "prompt": "How does deduplication work?",
+    "expected_files": ["graphify/dedup.py"],
+    "task_type": "how_works"
+  },
+  {
+    "prompt": "What does the security analyzer do?",
+    "expected_files": ["graphify/security.py"],
+    "task_type": "what_is"
+  },
+  {
+    "prompt": "How does file slicing work?",
+    "expected_files": ["graphify/file_slice.py"],
+    "task_type": "how_works"
+  },
+  {
+    "prompt": "What would break if I changed extract.py?",
+    "expected_files": ["graphify/extract.py", "graphify/build.py"],
+    "task_type": "impact"
+  },
+  {
+    "prompt": "Explain the architecture of this project",
+    "expected_files": ["graphify/build.py", "graphify/extract.py", "graphify/cluster.py", "graphify/export.py"],
+    "task_type": "architecture"
+  }
+]

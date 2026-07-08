@@ -34,7 +34,7 @@ def _vmsg(msg, *args):
     print(f"[{ts}] {msg}", flush=True)
 
 
-def retrieve_chunks(ranked_files: list, proj: dict, task_policy: dict = None) -> list:
+def retrieve_chunks(ranked_files: list, proj: dict, task_policy: dict = None, max_files: int = 15) -> list:
     """Fetch code chunks for ranked files.
     
     Tries repo_dir first (if alive), then on-demand sparse fetch, then graphify_data content fields.
@@ -42,7 +42,7 @@ def retrieve_chunks(ranked_files: list, proj: dict, task_policy: dict = None) ->
     if not ranked_files:
         return []
 
-    file_paths = [rf["file_path"] for rf in ranked_files[:15]]
+    file_paths = [rf["file_path"] for rf in ranked_files[:max_files]]
     chunks = []
 
     # Try repo_dir (cloned projects where repo_dir is still alive — e.g. Nx MCP enabled)

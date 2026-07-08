@@ -33,6 +33,11 @@ GRID_FILE_COUNTS = [5, 10, 15, 20, 25, 30]
 GRID_CRG_RATIOS = [0.0, 0.2, 0.33, 0.5, 0.66, 1.0]
 GRID_DEPTHS = [1, 2, 3]
 
+# Reduced grid for quick runs (24 combos instead of 108)
+GRID_FILE_COUNTS_FAST = [5, 10, 15, 20]
+GRID_CRG_RATIOS_FAST = [0.0, 0.33, 0.5]
+GRID_DEPTHS_FAST = [1, 2]
+
 JUDGE_SYSTEM_PROMPT = """You are evaluating a code assistant's answer for quality.
 Rate the answer from 1-5 on three dimensions:
 1. CORRECTNESS: Does the answer accurately describe the codebase?
@@ -193,10 +198,17 @@ def main():
     parser.add_argument("--openrouter-key", default=None, help="OpenRouter API key (for stage 2)")
     parser.add_argument("--top-k", type=int, default=5, help="Top K combos per task type for stage 2")
     parser.add_argument("--output", default="tuning_profile.json", help="Output file")
+    parser.add_argument("--fast", action="store_true", help="Use reduced grid (24 combos instead of 108)")
     args = parser.parse_args()
 
     benchmark = load_benchmark(args.benchmark)
     print(f"=== Benchmark: {len(benchmark)} queries ===")
+
+    # Select grid
+    if args.fast:
+        grid_fc, grid_crg, grid_depth = GRID_FILE_COUNTS_FAST, GRID_CRG_RATIOS_FAST, GRID_DEPTHS_FAST
+    else:
+        grid_fc, grid_crg, grid_depth = GRID_FILE_COUNTS, GRID_CRG_RATIOS, GRID_DEPTHS
 
     # Group by task_type
     by_type = {}
@@ -206,8 +218,8 @@ def main():
     print(f"Task types: {', '.join(f'{k}({len(v)})' for k, v in by_type.items())}")
 
     # ── Stage 1: Free retrieval sweep ──
-    combos = list(itertools.product(GRID_FILE_COUNTS, GRID_CRG_RATIOS, GRID_DEPTHS))
-    print(f"\n=== STAGE 1: Retrieval Sweep ({len(combos)} combos × {len(benchmark)} queries = {len(combos) * len(benchmark)} calls) ===")
+    combos = list(itertools.product(grid_fc, grid_crg, grid_depth))
+    print(f"\n=== STAGE 1: Retrieval Sweep ({len(combos)} combos x {len(benchmark)} queries = {len(combos) * len(benchmark)} calls) ===")
 
     results = {}
     for i, (fc, crg, depth) in enumerate(combos):

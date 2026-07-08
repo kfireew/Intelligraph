@@ -81,6 +81,15 @@ def retrieve_context(proj: dict, prompt: str, overrides: dict = None) -> dict:
     per_task_results = []
     all_files = set()
 
+    # Initialize intelligence providers (CRG, future: Nx, Semgrep, etc.)
+    intel_providers = []
+    intel_context_text = ""
+    try:
+        from crg_intelligence import get_providers, merge_intelligence_results, render_intelligence_context
+        intel_providers = get_providers(proj)
+    except Exception as e:
+        log.warning("Intelligence provider init failed: %s", e)
+
     for task in tasks:
         # ── Nx architecture task (skip normal graph pipeline) ──
         if task["type"] == "nx_architecture" and nx_metadata.get("available"):
@@ -192,45 +201,107 @@ def retrieve_context(proj: dict, prompt: str, overrides: dict = None) -> dict:
         if overrides and "depth" in overrides:
             policy = {**policy, "depth": overrides["depth"]}
 
-        # ── CRG Domain Discovery (architecture/overview tasks only) ──
+        # ── Intelligence providers (CRG + future) per task type ──
         crg_domain_files = []
         crg_rescue_info = {"applied": False, "rescued_files": []}
-        if task["type"] == "architecture":
-            try:
-                from crg_domain_finder import find_domain_files_with_crg, get_crg_db_path
-                crg_path = get_crg_db_path(proj)
-                if crg_path:
-                    max_files = 12
-                    if overrides and "file_count" in overrides:
-                        max_files = overrides["file_count"]
-                    crg_domain_files = find_domain_files_with_crg(crg_path, prompt, repo_dir=proj.get("repo_dir"), max_files=max_files, graphify_data=graphify_data)
-                    # Merge CRG domain files into ranking with combined scores
-                    ranked = merge_graphify_and_crg_candidates(ranked, crg_domain_files)
-                    # Rescue: swap in CRG files if none in top N
-                    min_slots, max_slots = 2, 5
-                    if overrides and "crg_ratio" in overrides and "file_count" in overrides:
-                        fc = overrides["file_count"]
-                        min_slots = round(overrides["crg_ratio"] * fc * 0.7)
-                        max_slots = round(overrides["crg_ratio"] * fc)
-                    ranked, crg_rescue_info = apply_architecture_layer_rescue(ranked, crg_domain_files, min_crg_slots=min_slots, max_crg_slots=max_slots)
-            except Exception as e:
-                import logging as _l
-                _l.getLogger(__name__).warning("CRG domain discovery failed: %s", e)
+        intel_files = []
+        intel_metadata = []
+        intel_mode = None
 
-        chunks = retrieve_chunks(ranked, proj, policy)
+        if intel_providers:
+            for provider in intel_providers:
+                try:
+                    ttype = task["type"]
+                    target = task.get("target") or ""
+                    if ttype == "architecture":
+                        # Architecture: get community structure
+                        arch_data = provider.architecture()
+                        if arch_data:
+                            intel_metadata.extend(arch_data)
+                            # Extract files from communities
+                            for c in arch_data:
+                                for fp in c.get("files", []):
+                                    intel_files.append({"file_path": fp, "score": 6.0, "reason": [f"{provider.name}:community"], "source": provider.name})
+                            intel_mode = "architecture"
+                            # Also do FTS search for the query
+                            search_results = provider.search(prompt, max_results=10)
+                            intel_files.extend(search_results)
+                    elif ttype in ("impact", "debug", "refactor", "security"):
+                        # Impact: blast-radius over CALLS edges
+                        impact_results = provider.impact(target, max_depth=2)
+                        intel_files.extend(impact_results)
+                        intel_mode = "impact"
+                    elif ttype == "how_works":
+                        # How works: execution flows + FTS search
+                        flow_results = provider.flows(target)
+                        if flow_results:
+                            intel_metadata.extend(flow_results)
+                            for f in flow_results:
+                                for fp in f.get("files", []):
+                                    intel_files.append({"file_path": fp, "score": 8.0, "reason": [f"{provider.name}:flow"], "source": provider.name})
+                            intel_mode = "flows"
+                        # Also search for the target
+                        search_results = provider.search(target or prompt, max_results=10)
+                        intel_files.extend(search_results)
+                    elif ttype in ("what_is", "search", "callers", "callees"):
+                        # Search: FTS symbol search
+                        search_results = provider.search(target or prompt, max_results=15)
+                        intel_files.extend(search_results)
+                        intel_mode = "search"
+
+                    # Also run the old CRG domain finder for architecture (backward compat)
+                    if ttype == "architecture":
+                        try:
+                            from crg_domain_finder import find_domain_files_with_crg, get_crg_db_path
+                            crg_path = get_crg_db_path(proj)
+                            if crg_path:
+                                max_files = 12
+                                if overrides and "file_count" in overrides:
+                                    max_files = overrides["file_count"]
+                                crg_domain_files = find_domain_files_with_crg(crg_path, prompt, repo_dir=proj.get("repo_dir"), max_files=max_files, graphify_data=graphify_data)
+                        except Exception:
+                            pass
+                except Exception as e:
+                    log.warning("Intelligence provider %s failed: %s", provider.name, e)
+
+            # Merge intelligence file results into ranked list
+            if intel_files:
+                ranked = merge_intelligence_results(ranked, intel_files, provider_name=intel_providers[0].name)
+            elif crg_domain_files:
+                ranked = merge_graphify_and_crg_candidates(ranked, crg_domain_files)
+
+            # Architecture rescue: ensure intelligence files have room in top N
+            if task["type"] == "architecture" and (intel_files or crg_domain_files):
+                combined_intel = intel_files + [{"file_path": cf["file_path"], "score": cf.get("score", 5)} for cf in crg_domain_files]
+                min_slots, max_slots = 2, 5
+                if overrides and "crg_ratio" in overrides and "file_count" in overrides:
+                    fc = overrides["file_count"]
+                    min_slots = round(overrides["crg_ratio"] * fc * 0.7)
+                    max_slots = round(overrides["crg_ratio"] * fc)
+                ranked, crg_rescue_info = apply_architecture_layer_rescue(
+                    ranked, combined_intel, min_crg_slots=min_slots, max_crg_slots=max_slots)
+
+            # Render intelligence metadata as context text
+            if intel_metadata and intel_mode:
+                intel_context_text += render_intelligence_context(intel_metadata, intel_mode)
+
         file_cap = 20
         if overrides and "file_count" in overrides:
             file_cap = overrides["file_count"]
+        chunks = retrieve_chunks(ranked, proj, policy, max_files=file_cap)
         task_files = [r["file_path"] for r in ranked[:file_cap]]
         all_files.update(task_files)
 
         per_task_results.append({
             "task_id": task["id"],
-            "files": ranked[:20],
+            "files": ranked[:file_cap],
             "chunks": chunks,
             "expanded_nodes": expanded_ids,
             "crg_domain_files": crg_domain_files,
             "crg_rescue_info": crg_rescue_info,
+            "intel_metadata": intel_metadata,
+            "intel_mode": intel_mode,
+            "intel_files": [r["file_path"] for r in intel_files],
         })
 
     # Propagate token status from proj to result (set by retriever on auth failure)
@@ -239,6 +310,9 @@ def retrieve_context(proj: dict, prompt: str, overrides: dict = None) -> dict:
     # 3. ContextMerger: deduplicate, rank, budget, assemble
     from merger import merge_tasks
     context, merger_stats = merge_tasks(tasks, per_task_results, graphify_data, nx_metadata)
+    # Prepend intelligence context (community summaries, flow paths, etc.)
+    if intel_context_text:
+        context = intel_context_text + "\n" + context
     # Collect matched nodes from planner tasks
     matched_nodes = []
     for result in per_task_results:
@@ -298,9 +372,13 @@ def retrieve_context(proj: dict, prompt: str, overrides: dict = None) -> dict:
         "task_count": len(tasks),
     })
 
+    file_cap_return = 20
+    if overrides and "file_count" in overrides:
+        file_cap_return = overrides["file_count"]
+
     return {
         "context": context,
-        "files": sorted(all_files)[:20],
+        "files": sorted(all_files)[:file_cap_return],
         "strategy": strategy,
         "plan": {
             "task_count": len(tasks),
