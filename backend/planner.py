@@ -112,7 +112,8 @@ _LIVE_NX_PATTERNS = [
     r"what (command|generator|scaffold)",
     r"affected|what would be affected",
     r"npx nx|nx help|show local nx",
-    r"list generators|what generators",
+    r"list.* generators|what.* generators",
+    r"(run|execute|build)\s+(?:nx|npx)",
 ]
 
 
@@ -153,9 +154,38 @@ def plan_query(prompt: str) -> dict:
     Uses semantic-router for intent detection + target extraction.
     Falls back to regex patterns if semantic-router is unavailable.
 
+    Live Nx questions (run, affected, generators) are detected by regex
+    BEFORE semantic routing — these need requires_live_nx=True which
+    semantic-router can't express.
+
     Returns { tasks: [{ id, type, target, depth, compression, operations }] }
     """
-    # Try semantic-router first
+    # 0. Live Nx questions need special handling (requires_live_nx flag)
+    # Check before semantic routing — these are action-oriented, not
+    # knowledge-oriented, and need the Nx MCP bridge.
+    if detect_live_nx_question(prompt):
+        lower = prompt.lower()
+        nx_cap = None
+        if "affected" in lower:
+            nx_cap = "affected"
+        elif "generator" in lower:
+            nx_cap = "generator_info"
+        elif "target" in lower or "run" in lower:
+            nx_cap = "task_info"
+        elif "help" in lower or "status" in lower:
+            nx_cap = "status"
+        return {"tasks": [{
+            "id": 1,
+            "type": "how_works",
+            "target": prompt[:80],
+            "depth": 1,
+            "compression": "none",
+            "operations": [],
+            "requires_live_nx": True,
+            "nx_capability": nx_cap,
+        }]}
+
+    # Try semantic-router
     routes = _semantic_route(prompt)
 
     if routes:
