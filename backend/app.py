@@ -679,6 +679,15 @@ def download_mcp():
                      mimetype="text/x-python")
 
 
+@app.route("/download/agent")
+def download_agent():
+    """Download the MCP agent guide (markdown)."""
+    agent_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "agent.md")
+    return send_file(agent_path, as_attachment=True,
+                     download_name="intelligraph-agent.md",
+                     mimetype="text/markdown")
+
+
 @app.route("/download/graph-builder")
 def download_graph_builder():
     """Download the graph builder EXE if built, otherwise the Python script."""
@@ -1926,7 +1935,8 @@ def status():
     return jsonify({
         "oidc_configured": bool(OIDC_ISSUER),
         "downloads": {"mcp_server": "/download/mcp-server",
-                      "graph_builder": "/download/graph-builder"},
+                      "graph_builder": "/download/graph-builder",
+                      "agent": "/download/agent"},
         "project": proj,
         "projects": list(_projects().keys()),
         "build_queue_depth": build_queue.depth,
