@@ -40,3 +40,5 @@ USER_PROMPTS_COMPLETE.txt
 *.tar
 tomamdas_output/
 ToMamdas_*
+intelligraph*.tar
+*.tar

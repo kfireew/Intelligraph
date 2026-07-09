@@ -1,13 +1,15 @@
 """
-semantic_planner.py — Embedding-based intent routing via semantic-router.
+semantic_planner.py — Embedding-based intent routing + target extraction.
 
 Replaces the regex catalog in planner.py with a semantic vector space approach
 that handles multi-phrased questions, unusual wording, and synonyms.
 
-Uses:
-  - HuggingFaceEncoder (all-MiniLM-L6-v2, 23MB, local-only) for embeddings
-  - RouteLayer for fast cosine-similarity intent classification
-  - Custom OpenRouterLLM for dynamic route parameter extraction (target symbol)
+Uses only the bundled all-MiniLM-L6-v2 model (23MB). No external LLM needed.
+
+Two-stage pipeline:
+  1. Intent routing: RouteLayer with template utterances per intent
+  2. Target extraction: CRG FTS (when available) or embedding similarity
+     against graphify node names (fallback)
 
 The encoder and route layer are lazily initialized on first use and cached.
 A regex fallback is used if the model or library is unavailable.
@@ -18,6 +20,8 @@ import os
 import re
 import sys
 
+import numpy as np
+
 log = logging.getLogger(__name__)
 
 _VERBOSE = os.environ.get("INTELLIGRAPH_VERBOSE", "true").lower() == "true"
@@ -26,7 +30,7 @@ _MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models", 
 _SCORE_THRESHOLD = 0.25
 
 _router_instance = None
-_llm_instance = None
+_encoder_instance = None
 _init_error = None
 
 
@@ -43,147 +47,10 @@ def _vmsg(msg, *args):
     print(f"[{ts}] {msg}", flush=True)
 
 
-# ── Custom LLM for dynamic route parameter extraction ────────────
-
-class OpenRouterLLM:
-    """Calls an OpenAI-compatible LLM endpoint for target extraction.
-
-    Uses INTELLIGRAPH_LLM_URL / INTELLIGRAPH_LLM_TOKEN / INTELLIGRAPH_LLM_MODEL
-    env vars. Falls back gracefully if not configured.
-    """
-
-    def __init__(self):
-        import requests
-        self._requests = requests
-        self.name = "intelligraph-llm"
-        self.url = os.environ.get("INTELLIGRAPH_LLM_URL", "").rstrip("/")
-        self.token = os.environ.get("INTELLIGRAPH_LLM_TOKEN", "")
-        self.model = os.environ.get("INTELLIGRAPH_LLM_MODEL", "gpt-4o-mini")
-        self.ssl_verify = os.environ.get("LLM_SSL_VERIFY", "false").lower() == "true"
-        self.timeout = 30
-
-    def __call__(self, messages):
-        """Call the LLM with a list of Message-like objects. Returns text or None."""
-        if not self.url:
-            return None
-        try:
-            payload = {
-                "model": self.model,
-                "messages": [{"role": m.role, "content": m.content} for m in messages],
-                "max_tokens": 500,
-                "temperature": 0.0,
-            }
-            headers = {"Content-Type": "application/json"}
-            if self.token:
-                headers["Authorization"] = f"Bearer {self.token}"
-            resp = self._requests.post(
-                self.url, json=payload, headers=headers,
-                timeout=self.timeout, verify=self.ssl_verify,
-            )
-            resp.encoding = "utf-8"
-            if resp.status_code != 200:
-                log.warning("OpenRouterLLM status=%s body=%s", resp.status_code, resp.text[:200])
-                return None
-            data = resp.json()
-            msg = data.get("choices", [{}])[0].get("message", {})
-            content = msg.get("content")
-            if not content:
-                # Reasoning models (qwen3.6) may put output in reasoning field
-                # when max_tokens is exhausted during reasoning phase
-                reasoning = msg.get("reasoning", "")
-                if not reasoning and msg.get("reasoning_details"):
-                    reasoning = msg["reasoning_details"][0].get("text", "")
-                if reasoning:
-                    # Try to find JSON target in reasoning text
-                    m = re.search(r'\{[^}]*"target"[^}]*\}', reasoning)
-                    if m:
-                        return m.group()
-                    # Try to find answer after output patterns
-                    for pat in [r'->\s*"([^"]+)"', r'output:\s*"([^"]+)"',
-                                r'"target"\s*:\s*"([^"]+)"']:
-                        m = re.search(pat, reasoning)
-                        if m:
-                            return '{"target": "%s"}' % m.group(1)
-                return None
-            # Strip thinking tokens from reasoning models
-            content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL).strip()
-            return content if content else None
-        except Exception as e:
-            log.warning("OpenRouterLLM failed: %s", e)
-            return None
-
-    def extract_function_inputs(self, query, function_schema):
-        """Extract target parameter from query using LLM.
-
-        Returns dict like {"target": "extract"}.
-        Falls back to regex if LLM fails or returns unparseable output.
-        """
-        import json as _json
-        prompt = (
-            "You are a code intelligence assistant. Extract the target symbol name "
-            "from the user's question. Return ONLY a JSON object.\n\n"
-            "The target is the specific function, class, module, or file name "
-            "that the question is about. Strip filler words.\n\n"
-            "Examples:\n"
-            '  "how does the clustering algorithm work" -> {"target": "clustering"}\n'
-            '  "what breaks if I change the extract function" -> {"target": "extract"}\n'
-            '  "where is the cluster function defined" -> {"target": "cluster"}\n'
-            '  "who calls the build_graph function" -> {"target": "build_graph"}\n'
-            '  "what is the architecture of the graphify system" -> {"target": "graphify"}\n'
-            '  "architecture of the parser" -> {"target": "parser"}\n\n'
-            f"Question: {query}\n"
-            'JSON:'
-        )
-        from semantic_router.schema import Message
-        llm_input = [Message(role="user", content=prompt)]
-        output = self(llm_input)
-        if not output:
-            raise Exception("LLM returned no output")
-        # Try to extract JSON from the response
-        # The LLM might wrap it in markdown or add extra text
-        try:
-            # Direct parse
-            result = _json.loads(output.strip())
-        except _json.JSONDecodeError:
-            # Try to find JSON object in the response
-            m = re.search(r'\{[^}]+\}', output)
-            if m:
-                try:
-                    result = _json.loads(m.group())
-                except _json.JSONDecodeError:
-                    raise Exception(f"Could not parse LLM output: {output[:100]}")
-            else:
-                raise Exception(f"No JSON in LLM output: {output[:100]}")
-        if "target" not in result:
-            raise Exception(f"No 'target' key in LLM output: {result}")
-        target = str(result["target"]).strip()
-        if not target or len(target) < 1:
-            raise Exception("Empty target from LLM")
-        return result
-        llm_input = [Message(role="user", content=prompt)]
-        output = self(llm_input)
-        if not output:
-            raise Exception("No output generated for extract function input")
-        output = output.replace("'", '"').strip().rstrip(",")
-        result = json.loads(output)
-        return result
-
-
 # ── Route definitions ────────────────────────────────────────────
 
 def _build_routes():
     from semantic_router import Route
-
-    def _extract_target(query: str) -> str:
-        """Extract the target symbol/component name from the query."""
-        return query[:80].strip()
-
-    target_schema = {
-        "name": "extract_target",
-        "description": "Extract the target symbol, file, or component name from a code intelligence question",
-        "signature": "(target: str) -> str",
-        "output": "<class 'str'>",
-    }
 
     routes = [
         Route(
@@ -396,27 +263,181 @@ def _build_routes():
     return routes
 
 
+# ── Embedding-based target extraction ────────────────────────────
+
+class EmbeddingTargetExtractor:
+    """Extracts target symbol from query by embedding similarity against
+    graphify node names.
+
+    Builds an embedding index of meaningful node names (Function, Class)
+    from the graphify graph. When queried, embeds the question and finds
+    the closest node name by cosine similarity.
+
+    For 10K nodes: ~15MB in RAM, <50ms per query.
+    """
+
+    def __init__(self):
+        self._indices = {}  # proj_id -> (names_array, embeddings_array)
+
+    def get_target(self, query: str, graphify_data: dict, proj_id=None) -> str | None:
+        """Extract target symbol from query via embedding similarity.
+
+        Args:
+            query: The user's natural language question
+            graphify_data: The project's graphify graph data
+            proj_id: Optional project ID for caching
+
+        Returns:
+            Best matching node name, or None if no good match.
+        """
+        encoder = _get_encoder()
+        if encoder is None:
+            return None
+
+        names, embeddings = self._get_or_build_index(graphify_data, proj_id, encoder)
+        if names is None or len(names) == 0:
+            return None
+
+        # Embed the query
+        q_emb = encoder.encode([query], show_progress_bar=False, convert_to_numpy=True)[0]
+
+        # Cosine similarity (embeddings are already normalized by sentence-transformers)
+        scores = embeddings @ q_emb
+        top_idx = int(np.argmax(scores))
+        top_score = float(scores[top_idx])
+        top_name = str(names[top_idx])
+
+        # Clean up: if name is a long sentence (documentation node), skip it
+        if len(top_name) > 60 or " " in top_name:
+            # Try to find a shorter, symbol-like name with decent score
+            for idx in np.argsort(scores)[::-1][:10]:
+                candidate = str(names[idx])
+                if len(candidate) <= 60 and " " not in candidate:
+                    top_name = candidate
+                    top_score = float(scores[idx])
+                    break
+            else:
+                _vmsg("EMBED TARGET: query='%s' only long names found, skipping", query[:50])
+                return None
+
+        # Threshold: below 0.3 is too weak to trust
+        if top_score < 0.3:
+            _vmsg("EMBED TARGET: query='%s' best='%s' score=%.2f (below threshold)", query[:50], top_name, top_score)
+            return None
+
+        _vmsg("EMBED TARGET: query='%s' -> '%s' (score=%.2f)", query[:50], top_name, top_score)
+        return top_name
+
+    def _get_or_build_index(self, graphify_data: dict, proj_id, encoder):
+        """Get cached index or build a new one."""
+        cache_key = proj_id or id(graphify_data)
+
+        if cache_key in self._indices:
+            return self._indices[cache_key]
+
+        # Build index from graphify node names
+        nodes = graphify_data.get("nodes", [])
+        if not nodes:
+            self._indices[cache_key] = (None, None)
+            return None, None
+
+        # Filter to meaningful names — symbol-like, not documentation
+        _GENERIC_NAMES = {
+            "main", "init", "run", "config", "module", "server", "client",
+            "handler", "manager", "base", "core", "utils", "helper",
+            "test", "setup", "teardown", "fixture", "mock",
+        }
+        _CODE_EXTENSIONS = {".py", ".js", ".ts", ".jsx", ".tsx", ".java", ".go",
+                            ".rs", ".rb", ".php", ".c", ".cpp", ".h", ".cs",
+                            ".scala", ".kt", ".swift", ".md", ".txt", ".json",
+                            ".yaml", ".yml", ".toml", ".xml", ".html", ".css",
+                            ".sh", ".sql", ".lua", ".jl"}
+        names = []
+        seen = set()
+        for n in nodes:
+            name = n.get("label") or n.get("id") or ""
+            name_str = str(name)
+            name_lower = name_str.lower()
+            # Skip: too short, private, test, generic, documentation, files
+            if (len(name_str) <= 2
+                    or name_str.startswith("_")
+                    or name_str.startswith("test_")
+                    or name_str in seen
+                    or name_lower in _GENERIC_NAMES
+                    or " " in name_str
+                    or len(name_str) > 60
+                    # Skip file names (have extensions)
+                    or any(name_lower.endswith(ext) for ext in _CODE_EXTENSIONS)
+                    # Skip names that are just paths
+                    or "/" in name_str or "\\" in name_str):
+                continue
+            seen.add(name_str)
+            names.append(name_str)
+
+        if not names:
+            self._indices[cache_key] = (None, None)
+            return None, None
+
+        # Embed all names
+        embeddings = encoder.encode(names, show_progress_bar=False, convert_to_numpy=True)
+
+        self._indices[cache_key] = (np.array(names), embeddings)
+        _vmsg("EMBED TARGET: built index for proj=%s, %d names", cache_key, len(names))
+        return self._indices[cache_key]
+
+
+_target_extractor = EmbeddingTargetExtractor()
+
+
 # ── Initialization ───────────────────────────────────────────────
 
-def _init_router():
-    """Lazily initialize the semantic router. Returns (router, llm) or (None, None)."""
-    global _router_instance, _llm_instance, _init_error
-    if _router_instance is not None:
-        return _router_instance, _llm_instance
-    if _init_error is not None:
-        return None, None
+_encoder_error = None
+
+def _get_encoder():
+    """Lazily initialize the sentence transformer encoder. Returns encoder or None."""
+    global _encoder_instance, _encoder_error
+    if _encoder_instance is not None:
+        return _encoder_instance
+    if _encoder_error is not None:
+        return None
 
     try:
         os.environ["TRANSFORMERS_VERBOSITY"] = "error"
         os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
+        from sentence_transformers import SentenceTransformer
+
+        if not os.path.isdir(_MODEL_DIR):
+            _encoder_error = f"Model dir not found: {_MODEL_DIR}"
+            _vmsg("SEMANTIC PLANNER: %s", _encoder_error)
+            return None
+
+        _vmsg("SEMANTIC PLANNER: loading encoder from %s", _MODEL_DIR)
+        _encoder_instance = SentenceTransformer(_MODEL_DIR)
+        _vmsg("SEMANTIC PLANNER: encoder ready (dim=%d)", _encoder_instance.get_embedding_dimension())
+        return _encoder_instance
+    except Exception as e:
+        _encoder_error = str(e)
+        _vmsg("SEMANTIC PLANNER: encoder init failed: %s", e)
+        log.warning("Encoder init failed: %s", e, exc_info=True)
+        return None
+
+
+def _init_router():
+    """Lazily initialize the semantic router. Returns router or None."""
+    global _router_instance, _init_error
+    if _router_instance is not None:
+        return _router_instance
+    if _init_error is not None:
+        return None
+
+    try:
         from semantic_router import RouteLayer
         from semantic_router.encoders import HuggingFaceEncoder
 
         if not os.path.isdir(_MODEL_DIR):
             _init_error = f"Model dir not found: {_MODEL_DIR}"
-            _vmsg("SEMANTIC PLANNER: %s", _init_error)
-            return None, None
+            return None
 
         _vmsg("SEMANTIC PLANNER: loading encoder from %s", _MODEL_DIR)
         encoder = HuggingFaceEncoder(
@@ -426,21 +447,14 @@ def _init_router():
         encoder.score_threshold = _SCORE_THRESHOLD
 
         routes = _build_routes()
-        router = RouteLayer(encoder=encoder, routes=routes)
-
-        _llm_instance = OpenRouterLLM()
-        if not _llm_instance.url:
-            _vmsg("SEMANTIC PLANNER: no LLM URL configured, target extraction will use regex fallback")
-            _llm_instance = None
-
-        _router_instance = router
+        _router_instance = RouteLayer(encoder=encoder, routes=routes)
         _vmsg("SEMANTIC PLANNER: ready (%d routes, threshold=%.2f)", len(routes), _SCORE_THRESHOLD)
-        return _router_instance, _llm_instance
+        return _router_instance
     except Exception as e:
         _init_error = str(e)
-        _vmsg("SEMANTIC PLANNER: init failed: %s", e)
+        _vmsg("SEMANTIC PLANNER: router init failed: %s", e)
         log.warning("Semantic router init failed: %s", e, exc_info=True)
-        return None, None
+        return None
 
 
 # ── Clause splitting for compound queries ────────────────────────
@@ -458,15 +472,25 @@ def _split_clauses(prompt: str) -> list[str]:
 
 # ── Main entry point ─────────────────────────────────────────────
 
-def route_query(prompt: str) -> list[dict]:
+def route_query(prompt: str, graphify_data: dict = None, proj_id=None) -> list[dict]:
     """Route a user prompt to one or more intents.
+
+    Two-stage:
+      1. Intent routing via embedding similarity (RouteLayer)
+      2. Target extraction via CRG FTS (if providers given) or
+         embedding similarity against graphify node names (fallback)
+
+    Args:
+        prompt:         User's natural language question
+        graphify_data:  Optional graphify graph data for embedding-based target extraction
+        proj_id:        Optional project ID for index caching
 
     Returns:
         [{intent: str, target: str, score: float}, ...]
         Multiple entries for compound queries.
-        Falls back to [{"intent": "what_is", "target": prompt[:80]}] if routing fails.
+        Falls back to regex if semantic router is unavailable.
     """
-    router, llm = _init_router()
+    router = _init_router()
     if router is None:
         return _regex_fallback(prompt)
 
@@ -477,7 +501,7 @@ def route_query(prompt: str) -> list[dict]:
     results = []
     seen_intents = set()
     for clause in clauses:
-        result = _route_single(router, llm, clause, prompt)
+        result = _route_single(router, clause, prompt, graphify_data, proj_id)
         if result and result["intent"] not in seen_intents:
             results.append(result)
             seen_intents.add(result["intent"])
@@ -489,7 +513,7 @@ def route_query(prompt: str) -> list[dict]:
     return results
 
 
-def _route_single(router, llm, clause: str, full_prompt: str) -> dict | None:
+def _route_single(router, clause: str, full_prompt: str, graphify_data: dict, proj_id) -> dict | None:
     """Route a single clause. Returns {intent, target, score} or None."""
     try:
         choice = router(clause)
@@ -503,7 +527,8 @@ def _route_single(router, llm, clause: str, full_prompt: str) -> dict | None:
     if not intent:
         return None
 
-    target = _extract_target(llm, clause, intent, full_prompt)
+    # Target extraction: try CRG FTS first (via providers), then embedding fallback
+    target = _extract_target(clause, intent, full_prompt, graphify_data, proj_id)
 
     return {
         "intent": intent,
@@ -512,45 +537,74 @@ def _route_single(router, llm, clause: str, full_prompt: str) -> dict | None:
     }
 
 
-def _extract_target(llm, clause: str, intent: str, full_prompt: str) -> str:
-    """Extract the target symbol from the clause.
+def _extract_target(clause: str, intent: str, full_prompt: str, graphify_data: dict, proj_id) -> str:
+    """Extract target symbol from clause.
 
-    Tries LLM-based extraction first, falls back to regex.
+    Priority:
+      1. CRG provider FTS (if available — set externally via set_providers())
+      2. Embedding similarity against graphify node names (if graphify_data available)
+      3. Regex fallback
     """
-    if llm:
-        try:
-            schema = {
-                "name": "extract_target",
-                "description": "Extract the target symbol, file, or component name from a code intelligence question",
-                "signature": "(target: str) -> str",
-                "output": "<class 'str'>",
-            }
-            result = llm.extract_function_inputs(clause, schema)
-            target = result.get("target", "").strip()
-            if target and len(target) > 1:
-                return target[:80]
-        except Exception as e:
-            log.debug("LLM target extraction failed: %s", e)
+    # If the clause is just the intent word itself (e.g. "architecture"),
+    # it's a generic query — no specific target to extract.
+    _GENERIC_CLAUSES = {"architecture", "overview", "structure", "tests",
+                        "security", "impact", "debug", "refactor"}
+    if clause.lower().strip() in _GENERIC_CLAUSES:
+        return clause.lower().strip()
 
+    # 1. Try CRG provider FTS
+    if _active_providers:
+        for provider in _active_providers:
+            try:
+                target = provider.extract_target(clause)
+                if target:
+                    return target
+            except Exception as e:
+                log.warning("Provider extract_target failed: %s", e)
+
+    # 2. Try embedding similarity against graphify node names
+    if graphify_data:
+        target = _target_extractor.get_target(clause, graphify_data, proj_id)
+        if target:
+            return target
+
+    # 3. Regex fallback
     return _regex_extract_target(clause, intent)
 
 
+# ── Provider injection ───────────────────────────────────────────
+
+_active_providers = []
+
+def set_providers(providers: list):
+    """Set the active intelligence providers for target extraction.
+
+    Called by retrieval.py after initializing providers (CRG, etc.).
+    """
+    global _active_providers
+    _active_providers = providers or []
+
+
+# ── Regex fallback ───────────────────────────────────────────────
+
+_TASK_EXTRACTORS = {
+    "architecture":  r"(?:architecture|structure|overview|components|organization|design)\s*(?:of|for)?\s*(.+)?",
+    "how_works":     r"(?:how|explain).*(?:does|work|implement|called|used)\s*(?:(?:the|a|an)\s+)?(.+)",
+    "what_is":       r"(?:what|where|which|find|show)\s+(?:is|are|the|a|an|file|function|class)\s*(.+)?",
+    "impact":        r"(?:impact|what breaks|affect|blast radius|risk)\s*(?:of|on|for|if|when)?\s*(?:I\s+(?:change|modify|update|edit|refactor|delete|remove)\s+)?(.+)?",
+    "callers":       r"(?:who|what)\s*(?:calls|uses|imports|depends on)\s*(.+)?",
+    "callees":       r"(?:what does|what are)\s*(.+?)\s*(?:call|use|import|depend on)",
+    "debug":         r"(?:bug|error|issue|problem|debug|trace)\s*(?:in|of|with)?\s*(.+)?",
+    "refactor":      r"(?:refactor|rewrite|improve|optimize)\s*(.+)?",
+    "nx_architecture": r"(?:nx|workspace|project|app|lib)\s*(?:architectur|structure|layout|organized|depend|target)?\s*(.+)?",
+    "security":      r"(?:security|vulnerability|exploit|injection|xss|csrf)\s*(?:in|of|for)?\s*(.+)?",
+    "tests":         r"(?:test|coverage|spec|unit|integration)\s*(?:for|of|in)?\s*(.+)?",
+}
+
+
 def _regex_extract_target(prompt: str, intent: str) -> str:
-    """Simplified regex target extraction — fallback when LLM is unavailable."""
-    patterns = {
-        "architecture":  r"(?:architecture|structure|overview|components|organization|design)\s*(?:of|for)?\s*(.+)?",
-        "how_works":     r"(?:how|explain).*(?:does|work|implement|called|used)\s*(?:(?:the|a|an)\s+)?(.+)",
-        "what_is":       r"(?:what|where|which|find|show)\s+(?:is|are|the|a|an|file|function|class)\s*(.+)?",
-        "impact":        r"(?:impact|what breaks|affect|blast radius|risk)\s*(?:of|on|for|if|when)?\s*(?:I\s+(?:change|modify|update|edit|refactor|delete|remove)\s+)?(.+)?",
-        "callers":       r"(?:who|what)\s*(?:calls|uses|imports|depends on)\s*(.+)?",
-        "callees":       r"(?:what does|what are)\s*(.+?)\s*(?:call|use|import|depend on)",
-        "debug":         r"(?:bug|error|issue|problem|debug|trace)\s*(?:in|of|with)?\s*(.+)?",
-        "refactor":      r"(?:refactor|rewrite|improve|optimize)\s*(.+)?",
-        "security":      r"(?:security|vulnerability|exploit|injection|xss|csrf)\s*(?:in|of|for)?\s*(.+)?",
-        "tests":         r"(?:test|coverage|spec|unit|integration)\s*(?:for|of|in)?\s*(.+)?",
-        "nx_architecture": r"(?:nx|workspace|project|app|lib)\s*(?:architectur|structure|layout|organized|depend|target)?\s*(.+)?",
-    }
-    pattern = patterns.get(intent)
+    """Regex-based target extraction — fallback when no providers or embeddings."""
+    pattern = _TASK_EXTRACTORS.get(intent)
     if pattern:
         m = re.search(pattern, prompt, re.IGNORECASE)
         if m and m.group(1) and m.group(1).strip().rstrip("?").strip():
@@ -570,5 +624,5 @@ def _regex_fallback(prompt: str) -> list[dict]:
 
 def is_available() -> bool:
     """Check if semantic router is available."""
-    r, _ = _init_router()
+    r = _init_router()
     return r is not None

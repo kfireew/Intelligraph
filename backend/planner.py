@@ -133,30 +133,39 @@ from retrieval import task_policy
 _semantic_cache = {}
 
 
-def _semantic_route(prompt: str) -> list[dict]:
+def _semantic_route(prompt: str, graphify_data: dict = None, proj_id=None) -> list[dict]:
     """Try semantic-router, return list of {intent, target, score} or []."""
-    if prompt in _semantic_cache:
-        return _semantic_cache[prompt]
+    cache_key = (prompt, proj_id)
+    if cache_key in _semantic_cache:
+        return _semantic_cache[cache_key]
     try:
         from semantic_planner import route_query
-        results = route_query(prompt)
+        results = route_query(prompt, graphify_data=graphify_data, proj_id=proj_id)
         if results:
-            _semantic_cache[prompt] = results
+            _semantic_cache[cache_key] = results
             return results
     except Exception:
         pass
     return []
 
 
-def plan_query(prompt: str) -> dict:
+def plan_query(prompt: str, graphify_data: dict = None, proj_id=None) -> dict:
     """Decompose query into task plan.
 
     Uses semantic-router for intent detection + target extraction.
+    Target extraction uses CRG FTS (if providers set) or embedding
+    similarity against graphify node names (fallback). No external LLM.
+
     Falls back to regex patterns if semantic-router is unavailable.
 
     Live Nx questions (run, affected, generators) are detected by regex
     BEFORE semantic routing — these need requires_live_nx=True which
     semantic-router can't express.
+
+    Args:
+        prompt:         User's natural language question
+        graphify_data:  Optional graphify graph data for target extraction
+        proj_id:        Optional project ID for caching
 
     Returns { tasks: [{ id, type, target, depth, compression, operations }] }
     """
@@ -185,8 +194,8 @@ def plan_query(prompt: str) -> dict:
             "nx_capability": nx_cap,
         }]}
 
-    # Try semantic-router
-    routes = _semantic_route(prompt)
+    # Try semantic-router (pass graphify_data for embedding-based target extraction)
+    routes = _semantic_route(prompt, graphify_data=graphify_data, proj_id=proj_id)
 
     if routes:
         tasks = []

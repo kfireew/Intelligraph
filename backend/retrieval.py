@@ -72,16 +72,8 @@ def retrieve_context(proj: dict, prompt: str, overrides: dict = None) -> dict:
     # re-clone on every chat request was too expensive.
     repo_dir = proj.get("repo_dir")
 
-    # 1. ExecutionPlanner: decompose query into task plan
-    from planner import plan_query
-    plan = plan_query(prompt)
-    tasks = plan["tasks"]
-
-    # 2. Execute each task through the pipeline
-    per_task_results = []
-    all_files = set()
-
-    # Initialize intelligence providers (CRG, future: Nx, Semgrep, etc.)
+    # 0. Initialize intelligence providers (CRG, future: Nx, Semgrep, etc.)
+    # Do this BEFORE planning so providers can contribute to target extraction.
     intel_providers = []
     intel_context_text = ""
     try:
@@ -89,6 +81,22 @@ def retrieve_context(proj: dict, prompt: str, overrides: dict = None) -> dict:
         intel_providers = get_providers(proj)
     except Exception as e:
         log.warning("Intelligence provider init failed: %s", e)
+
+    # Inject providers into semantic planner for FTS-based target extraction
+    try:
+        from semantic_planner import set_providers
+        set_providers(intel_providers)
+    except Exception:
+        pass
+
+    # 1. ExecutionPlanner: decompose query into task plan
+    from planner import plan_query
+    plan = plan_query(prompt, graphify_data=graphify_data, proj_id=proj.get("id"))
+    tasks = plan["tasks"]
+
+    # 2. Execute each task through the pipeline
+    per_task_results = []
+    all_files = set()
 
     for task in tasks:
         # ── Nx architecture task (skip normal graph pipeline) ──

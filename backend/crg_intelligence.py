@@ -60,6 +60,15 @@ class IntelligenceProvider:
         """Check if this provider has data for the project."""
         return False
 
+    def extract_target(self, query: str) -> str | None:
+        """Extract the target symbol from a natural language query.
+
+        Uses the provider's own data (FTS, node names, etc.) to find
+        which codebase symbol the query is about. Returns the symbol
+        name, or None if no match.
+        """
+        return None
+
     def search(self, query: str, max_results: int = 20) -> list[dict]:
         """FTS/symbol search for files matching the query."""
         return []
@@ -191,24 +200,140 @@ class CRGProvider(IntelligenceProvider):
 
     @staticmethod
     def _extract_terms(query: str) -> list[str]:
-        """Extract meaningful search terms from a natural language query."""
+        """Extract meaningful search terms from a natural language query.
+
+        Returns both individual words AND multi-word compound terms.
+        For "who calls build_graph function", returns ['build_graph', 'build', 'graph'].
+        Compound terms are tried first (more specific).
+        """
         if not query:
             return []
         lower = query.lower()
         stopwords = {
+            # Grammar
             "what", "how", "where", "which", "who", "the", "a", "an", "is",
             "are", "does", "do", "can", "should", "would", "could", "explain",
-            "describe", "architecture", "structure", "overview", "and", "or",
-            "of", "to", "in", "for", "with", "about", "tell", "me", "find",
-            "show", "list", "work", "works", "working", "project", "this",
-            "app", "application", "code", "codebase",
+            "describe", "and", "or", "of", "to", "in", "for", "with", "about",
+            "tell", "me", "find", "show", "list", "this", "that", "it", "from",
+            "if", "i", "on", "all", "behind", "through", "walk", "happens",
+            "when", "could", "would", "parts", "touch", "locate",
+            # Generic programming terms (match too many symbols)
+            "function", "method", "class", "module", "file", "code", "variable",
+            "project", "app", "application", "codebase", "system", "component",
+            "design", "work", "works", "working", "overview", "architecture",
+            "structure", "layout", "organized", "modules", "exist", "entry",
+            "point", "run", "available", "targets", "affected", "generators",
+            "workspace", "callers", "implementation", "invoke", "invokes",
+            "operate", "main", "pipeline", "algorithm", "flow",
+            # Intent keywords (already captured by semantic router)
+            "impact", "blast", "radius", "test", "tests", "coverage", "spec",
+            "secure", "security", "vulnerable", "debug", "error", "bug",
+            "issue", "refactor", "break", "breaks", "change", "modify",
+            "update", "depends", "calls", "uses", "imports", "defined",
+            "declared", "called", "used", "rely", "relies", "vulnerabilities",
         }
-        terms = []
-        for token in re.split(r"[\s_\-\./]+", lower):
+
+        # Split on spaces/punctuation but preserve underscores
+        raw_tokens = re.split(r"[\s\-./]+", lower)
+
+        # Individual meaningful words
+        words = []
+        for token in raw_tokens:
             token = token.strip()
             if len(token) > 2 and token.isalpha() and token not in stopwords:
-                terms.append(token)
+                words.append(token)
+
+        # Also try multi-word compound: "build_graph" from "build graph"
+        # Rejoin consecutive meaningful words with underscore
+        compounds = []
+        current_compound = []
+        for token in raw_tokens:
+            token = token.strip()
+            if token and len(token) > 2 and token not in stopwords and token.isalpha():
+                current_compound.append(token)
+            else:
+                if len(current_compound) > 1:
+                    compounds.append("_".join(current_compound))
+                current_compound = []
+        if len(current_compound) > 1:
+            compounds.append("_".join(current_compound))
+
+        # Return compounds first (more specific), then individual words
+        return compounds + words
         return terms or [query.lower().strip()]
+
+    # ── Mode 0: Target extraction ──────────────────────────────────
+
+    def extract_target(self, query: str) -> str | None:
+        """Extract the target symbol from a natural language query using FTS.
+
+        Two-pass approach:
+          1. LIKE search for compound terms (e.g. "build_graph") — exact substring
+          2. FTS search for individual words — with relevance filtering
+
+        Only returns a match if the search term is a substring of the symbol
+        name (prevents "change" matching "_changed_path_candidates").
+        """
+        conn = self._get_conn()
+        terms = self._extract_terms(query)
+        if not terms:
+            return None
+
+        best_match = None
+        best_score = 0
+
+        for term in terms:
+            # Pass 1: LIKE search for exact substring match (handles compound terms)
+            if "_" in term or len(term) > 4:
+                try:
+                    rows = conn.execute(
+                        "SELECT name, kind FROM nodes "
+                        "WHERE kind IN ('Function', 'Class') "
+                        "AND LOWER(name) LIKE ? "
+                        "ORDER BY LENGTH(name) ASC LIMIT 5",
+                        (f"%{term}%",)
+                    ).fetchall()
+                    for r in rows:
+                        name = r["name"]
+                        name_lower = name.lower()
+                        if term in name_lower:
+                            relevance = len(term) / max(len(name_lower), 1)
+                            if relevance > best_score:
+                                best_score = relevance
+                                best_match = name
+                except Exception:
+                    pass
+
+            # Pass 2: FTS search (handles tokenized matches)
+            try:
+                rows = conn.execute(
+                    "SELECT n.name, n.kind FROM nodes_fts f JOIN nodes n ON f.rowid = n.id "
+                    "WHERE nodes_fts MATCH ? AND n.kind IN ('Function', 'Class') "
+                    "ORDER BY rank LIMIT 10",
+                    (f'"{term}"',)
+                ).fetchall()
+                for r in rows:
+                    name = r["name"]
+                    name_lower = name.lower()
+                    if term in name_lower:
+                        relevance = len(term) / max(len(name_lower), 1)
+                        if relevance > best_score:
+                            best_score = relevance
+                            best_match = name
+                    elif name_lower in term:
+                        relevance = len(name_lower) / max(len(term), 1) * 0.8
+                        if relevance > best_score:
+                            best_score = relevance
+                            best_match = name
+            except Exception as e:
+                log.warning("CRG extract_target FTS failed for '%s': %s", term, e)
+
+        if best_match:
+            _vmsg("CRG EXTRACT_TARGET: query='%s' -> '%s' (relevance=%.2f)", query[:50], best_match, best_score)
+            return best_match
+
+        _vmsg("CRG EXTRACT_TARGET: no match for query='%s' terms=%s", query[:50], terms[:5])
+        return None
 
     # ── Mode 1: FTS5 search ────────────────────────────────────────
 
