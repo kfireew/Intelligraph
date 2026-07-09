@@ -60,7 +60,7 @@ class OpenRouterLLM:
         self.token = os.environ.get("INTELLIGRAPH_LLM_TOKEN", "")
         self.model = os.environ.get("INTELLIGRAPH_LLM_MODEL", "gpt-4o-mini")
         self.ssl_verify = os.environ.get("LLM_SSL_VERIFY", "false").lower() == "true"
-        self.timeout = 15
+        self.timeout = 30
 
     def __call__(self, messages):
         """Call the LLM with a list of Message-like objects. Returns text or None."""
@@ -253,6 +253,8 @@ def _build_routes():
                 "what is the ripple effect of changing this",
                 "what code depends on this being stable",
                 "what would break if this changed",
+                "what code relies on the config module",
+                "what depends on calling this",
             ],
             score_threshold=_SCORE_THRESHOLD,
         ),
