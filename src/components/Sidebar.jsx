@@ -1,7 +1,7 @@
 import { useState, useCallback } from "react";
 import { motion } from "framer-motion";
 import {
-  MessageSquare, Settings, Server,
+  MessageSquare, Settings, Server, GitBranch,
   Plus, X, LogIn, LogOut, ChevronLeft,
   Loader2, CheckCircle2, AlertCircle, Clock,
   RefreshCw, Share2, KeyRound, AlertTriangle,
@@ -33,6 +33,10 @@ const NAV_ITEMS = [
   { panel: "guide", label: "Guide", icon: Server },
 ];
 
+const CLONED_NAV_ITEMS = [
+  { panel: "branch", label: "Branch", icon: GitBranch },
+];
+
 export function Sidebar({
   projects, activePid, activePanel,
   auth, onSelectProject, onNewProject,
@@ -49,6 +53,9 @@ export function Sidebar({
   const [shareModal, setShareModal] = useState(null); // { pid, key }
   const [renewingPid, setRenewingPid] = useState(null);
   const [renewToken, setRenewToken] = useState("");
+
+  const activeProject = projects.find((p) => p.id === activePid);
+  const activeProjectHasGitUrl = !!(activeProject?.git_url);
 
   const handleRenameSubmit = useCallback((pid) => {
     const input = document.getElementById(`rename-input-${pid}`);
@@ -282,6 +289,21 @@ export function Sidebar({
       {/* Nav buttons */}
       <div className="px-2 py-2 space-y-0.5 border-t border-glass-border">
         {NAV_ITEMS.map(({ panel, label, icon: Icon }) => (
+          <motion.button
+            key={panel}
+            whileHover={{ scale: 1.02, backgroundColor: "rgba(255,255,255,0.06)" }}
+            onClick={() => onSwitchPanel(panel)}
+            className={`w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+              activePanel === panel
+                ? "text-accent-light bg-accent/10"
+                : "text-muted hover:text-text"
+            }`}
+          >
+            <Icon size={14} className="flex-shrink-0" />
+            {!collapsed && label}
+          </motion.button>
+        ))}
+        {activeProjectHasGitUrl && CLONED_NAV_ITEMS.map(({ panel, label, icon: Icon }) => (
           <motion.button
             key={panel}
             whileHover={{ scale: 1.02, backgroundColor: "rgba(255,255,255,0.06)" }}

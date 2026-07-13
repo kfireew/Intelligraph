@@ -8,7 +8,7 @@ export function CloneModal({ onClone, onClose, loading, auth }) {
   const [status, setStatus] = useState("");
   const [accessToken, setAccessToken] = useState("");
 
-  const needLogin = auth && auth.oidcConfigured && !auth.authenticated;
+  const needLogin = auth && auth.ssoConfigured && !auth.authenticated;
 
   const clearSensitiveState = () => {
     setAccessToken("");

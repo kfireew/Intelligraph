@@ -19,3 +19,5 @@ cryptography>=43.0
 semantic-router>=0.0.20
 sentence-transformers>=2.2
 numpy>=2.0
+# torch is installed separately in Dockerfile.base as CPU-only (--index-url https://download.pytorch.org/whl/cpu)
+# to avoid pulling ~2.5 GB of unnecessary nvidia-* / CUDA packages

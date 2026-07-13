@@ -36,13 +36,23 @@ def main():
         with open(graph_path, "r", encoding="utf-8") as f:
             data = json.load(f)
         G = graphify.build_from_json(data)
-        comms = {}
+        community_labels = {}
         if "communities" in data:
             for c in (data["communities"] or []):
-                cid = c.get("id") or c.get("community_id")
+                cid = c.get("id")
+                if cid is None:
+                    cid = c.get("community_id")
                 if cid is not None:
-                    comms[cid] = c.get("label") or c.get("name") or str(cid)
-        gf_export.to_html(G, comms, html_path)
+                    community_labels[cid] = c.get("label") or c.get("name") or f"Community {cid}"
+        comms = {}
+        for nid, ndata in G.nodes(data=True):
+            cid = ndata.get("community", 0)
+            if cid not in comms:
+                comms[cid] = []
+                if cid not in community_labels:
+                    community_labels[cid] = f"Community {cid}"
+            comms[cid].append(nid)
+        gf_export.to_html(G, comms, html_path, community_labels=community_labels)
         print("  Done.")
     except Exception as e:
         print(f"  Warning: graph.html generation skipped: {e}")

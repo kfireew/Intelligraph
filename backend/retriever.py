@@ -83,6 +83,7 @@ def retrieve_chunks(ranked_files: list, proj: dict, task_policy: dict = None, ma
                 git_url, file_paths,
                 git_auth_args=git_auth_args,
                 git_env=git_env,
+                branch=proj.get("branch"),
             )
             if fetch_error == "auth":
                 _vmsg("CHUNKER SPARSE AUTH FAIL pid=%s — token expired or invalid", proj.get("id"))

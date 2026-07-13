@@ -1,10 +1,12 @@
 """
-graphify-qa: thin pod server. Serves static UI, handles OIDC SSO, relays LLM calls,
+graphify-qa: thin pod server. Serves static UI, handles SSO (PKCE), relays LLM calls,
 provides optional online MCP, and serves downloadable tools (MCP server, graph builder).
 
 Usage: python app.py [--port 5050]
 """
 
+import base64
+import hashlib
 import json
 import os
 import secrets
@@ -380,14 +382,14 @@ else:
         app.secret_key = _sk
         _vmsg("WARNING: SECRET_KEY not set — generated random key. Tokens will not survive restart.")
 
-OIDC_ISSUER = os.environ.get("OIDC_ISSUER", "")
-OIDC_CLIENT_ID = os.environ.get("OIDC_CLIENT_ID", "")
-OIDC_CLIENT_SECRET = os.environ.get("OIDC_CLIENT_SECRET", "")
-OIDC_CONFIG = {}
+SSO_ISSUER = os.environ.get("SSO_ISSUER", "") or os.environ.get("OIDC_ISSUER", "")
+SSO_CLIENT_ID = os.environ.get("SSO_CLIENT_ID", "") or os.environ.get("OIDC_CLIENT_ID", "")
+SSO_CLIENT_SECRET = os.environ.get("SSO_CLIENT_SECRET", "") or os.environ.get("OIDC_CLIENT_SECRET", "")
+SSO_CONFIG = {}
 
 # ── Project storage ───────────────────────────────────────────────
-# user_key -> {pid: {name, git_url, status, nodes, edges, crg_db_path, graphify_data, oidc_token}}
-# user_key is session-based: OIDC sub or session ID for anonymous users
+# user_key -> {pid: {name, git_url, status, nodes, edges, crg_db_path, graphify_data, sso_token}}
+# user_key is session-based: SSO sub or session ID for anonymous users
 _PROJECTS = {}  # {user_key: {pid: project_dict}}
 _NEXT_PID = {}   # {user_key: next_pid}`
 
@@ -395,13 +397,13 @@ _NEXT_PID = {}   # {user_key: next_pid}`
 def _user_key():
     """Stable identifier for the current user across the session."""
     u = get_user()
-    if u and u.get("source") == "oidc":
-        uk = session.get("oidc_sub", u["name"])
-    elif OIDC_ISSUER:
-        # OIDC configured but not authenticated - keep session-based for multi-user
+    if u and u.get("source") == "sso":
+        uk = session.get("sso_sub", u["name"])
+    elif SSO_ISSUER:
+        # SSO configured but not authenticated - keep session-based for multi-user
         uk = session.get("_anon_key") or _init_anon()
     else:
-        # No OIDC - single-user mode, use stable key so clearing cookies
+        # No SSO - single-user mode, use stable key so clearing cookies
         # doesn't orphan projects
         uk = "local"
     # Load persisted projects on first access for this user
@@ -428,13 +430,13 @@ def _next_pid():
     return pid
 
 
-def fetch_oidc_config():
-    global OIDC_CONFIG
-    if not OIDC_ISSUER:
+def fetch_sso_config():
+    global SSO_CONFIG
+    if not SSO_ISSUER:
         return
     try:
-        url = f"{OIDC_ISSUER.rstrip('/')}/.well-known/openid-configuration"
-        OIDC_CONFIG = requests.get(url, timeout=10, verify=LLM_SSL_VERIFY).json()
+        url = f"{SSO_ISSUER.rstrip('/')}/.well-known/openid-configuration"
+        SSO_CONFIG = requests.get(url, timeout=10, verify=LLM_SSL_VERIFY).json()
     except Exception:
         pass
 
@@ -456,7 +458,7 @@ def _sso_guard():
     """Require SSO login for mutating actions when INTELLIGRAPH_REQUIRE_SSO=true."""
     if not REQUIRE_SSO:
         return None
-    if not OIDC_ISSUER:
+    if not SSO_ISSUER:
         return None  # SSO not configured, can't enforce
     if request.method not in _SSO_PROTECTED_METHODS:
         return None  # read-only methods allowed
@@ -478,38 +480,55 @@ def _sso_guard():
 
 @app.route("/auth/login")
 def auth_login():
-    if not OIDC_ISSUER:
-        return jsonify({"error": "OIDC not configured"}), 400
-    if not OIDC_CONFIG:
-        fetch_oidc_config()
-    if not OIDC_CONFIG:
-        return jsonify({"error": "Cannot reach SSO provider. Check that OIDC_ISSUER is accessible from the container."}), 503
+    if not SSO_ISSUER:
+        return jsonify({"error": "SSO not configured"}), 400
+    if not SSO_CONFIG:
+        fetch_sso_config()
+    if not SSO_CONFIG:
+        return jsonify({"error": "Cannot reach SSO provider. Check that SSO_ISSUER is accessible from the container."}), 503
     state = secrets.token_urlsafe(16)
-    session["oidc_state"] = state
+    session["sso_state"] = state
     params = {
-        "client_id": OIDC_CLIENT_ID,
+        "client_id": SSO_CLIENT_ID,
         "response_type": "code",
         "scope": "openid profile email",
         "redirect_uri": url_for("auth_callback", _external=True),
         "state": state,
     }
-    return redirect(f"{OIDC_CONFIG['authorization_endpoint']}?{urlencode(params)}")
+    # PKCE: when no client secret, use code challenge/verifier (RFC 7636)
+    if not SSO_CLIENT_SECRET:
+        code_verifier = secrets.token_urlsafe(64)
+        code_challenge = base64.urlsafe_b64encode(
+            hashlib.sha256(code_verifier.encode("ascii")).digest()
+        ).rstrip(b"=").decode("ascii")
+        session["sso_code_verifier"] = code_verifier
+        params["code_challenge"] = code_challenge
+        params["code_challenge_method"] = "S256"
+    return redirect(f"{SSO_CONFIG['authorization_endpoint']}?{urlencode(params)}")
 
 
 @app.route("/auth/callback")
 def auth_callback():
-    if request.args.get("state") != session.pop("oidc_state", None):
+    if request.args.get("state") != session.pop("sso_state", None):
         return "Invalid state", 400
     try:
-        token_resp = requests.post(OIDC_CONFIG["token_endpoint"], data={
-            "grant_type": "authorization_code", "code": request.args.get("code"),
+        token_data = {
+            "grant_type": "authorization_code",
+            "code": request.args.get("code"),
             "redirect_uri": url_for("auth_callback", _external=True),
-            "client_id": OIDC_CLIENT_ID, "client_secret": OIDC_CLIENT_SECRET,
-        }, timeout=10, verify=LLM_SSL_VERIFY).json()
+            "client_id": SSO_CLIENT_ID,
+        }
+        # PKCE: send code_verifier when no client secret; otherwise send secret
+        if SSO_CLIENT_SECRET:
+            token_data["client_secret"] = SSO_CLIENT_SECRET
+        else:
+            token_data["code_verifier"] = session.pop("sso_code_verifier", "")
+        token_resp = requests.post(SSO_CONFIG["token_endpoint"], data=token_data,
+                                   timeout=10, verify=LLM_SSL_VERIFY).json()
         access_token = token_resp.get("access_token")
         if not access_token:
             return f"Token error: {token_resp.get('error_description', 'unknown')}", 400
-        userinfo = requests.get(OIDC_CONFIG["userinfo_endpoint"],
+        userinfo = requests.get(SSO_CONFIG["userinfo_endpoint"],
                                 headers={"Authorization": f"Bearer {access_token}"},
                                 timeout=10, verify=LLM_SSL_VERIFY).json()
     except requests.exceptions.Timeout:
@@ -521,18 +540,18 @@ def auth_callback():
     session["user"] = {
         "name": userinfo.get("preferred_username") or userinfo.get("email", "unknown"),
         "email": userinfo.get("email", ""),
-        "source": "oidc",
+        "source": "sso",
     }
-    session["oidc_access_token"] = access_token
-    session["oidc_sub"] = userinfo.get("sub", "")
+    session["sso_access_token"] = access_token
+    session["sso_sub"] = userinfo.get("sub", "")
     return redirect("/")
 
 
 @app.route("/auth/logout")
 def auth_logout():
     session.clear()
-    if OIDC_CONFIG.get("end_session_endpoint"):
-        return redirect(OIDC_CONFIG["end_session_endpoint"])
+    if SSO_CONFIG.get("end_session_endpoint"):
+        return redirect(SSO_CONFIG["end_session_endpoint"])
     return redirect("/")
 
 
@@ -540,8 +559,8 @@ def auth_logout():
 def auth_me():
     u = get_user()
     return jsonify({"authenticated": bool(u), "user": u,
-                     "oidc_configured": bool(OIDC_ISSUER),
-                     "login_url": "/auth/login" if OIDC_ISSUER else None,
+                     "sso_configured": bool(SSO_ISSUER),
+                     "login_url": "/auth/login" if SSO_ISSUER else None,
                      "logout_url": "/auth/logout"})
 
 
@@ -839,13 +858,14 @@ def clone_project():
 
             # ── Auth mode ──
             _vmsg("CLONE AUTH pid=%d - use_bearer=%s", pid, use_bearer)
+            proj["auth_mode"] = auth_mode or ""
             git_auth = _git_auth_args(access_token=access_token if use_bearer else None)
             git_env = _git_env()
 
             # Clone URL stays clean - token goes in http.extraHeader, not the URL
             clone_url = git_url
             if not use_bearer and "bitbucket" in git_url.lower():
-                use_token = access_token or session.get("oidc_access_token", "")
+                use_token = access_token or session.get("sso_access_token", "")
                 if use_token:
                     try:
                         host = git_url.split("://", 1)[-1].split("/", 1)[0]
@@ -888,7 +908,7 @@ def clone_project():
             _clean_remote_url(repo_dir)
 
             # Store fetch token for on-demand sparse fetch (Fernet-encrypted in SQLite)
-            fetch_token = access_token or session.get("oidc_access_token", "")
+            fetch_token = access_token or session.get("sso_access_token", "")
             if fetch_token:
                 _store_fetch_token(pid, fetch_token, uk=_user_key())
                 _vmsg("CLONE TOKEN STORED pid=%d - saved for sparse fetch", pid)
@@ -1125,6 +1145,7 @@ def _relocate_artifacts(pid, proj, repo_dir):
 def pull_project(pid):
     """Pull latest from git and rebuild graph + CRG for an existing cloned project.
     
+    Accepts optional {branch: "name"} to switch branches.
     If repo_dir was deleted (post-build cleanup), creates a fresh temp clone.
     """
     try:
@@ -1136,21 +1157,41 @@ def pull_project(pid):
         if not git_url:
             return jsonify({"error": "not a cloned project (no git_url)"}), 400
 
-        _vmsg("PULL START pid=%d name=%s url=%s", pid, proj.get("name"), git_url)
+        data = request.get_json(silent=True) or {}
+        target_branch = data.get("branch", "").strip()
+
+        _vmsg("PULL START pid=%d name=%s url=%s branch=%s", pid, proj.get("name"), git_url, target_branch or "(default)")
         proj["status"] = "pulling"
         _save_project(pid, proj)
 
         git_env = _git_env()
-        # Use stored access token if available for auth (per-user)
-        access_token = session.get("oidc_access_token", "") or _load_fetch_token(pid, uk=_user_key()) or ""
-        git_auth = _git_auth_args(access_token=access_token) if access_token else []
+        # Use stored Bitbucket token first (the one provided during clone),
+        # then fall back to SSO session token
+        access_token = _load_fetch_token(pid, uk=_user_key()) or session.get("sso_access_token", "") or ""
+        auth_mode = proj.get("auth_mode", "")
+        use_bearer = auth_mode == "bitbucket_datacenter_bearer"
+        git_auth = _git_auth_args(access_token=access_token if use_bearer else None) if access_token else []
+
+        # Build clone_url with token embedded for non-bearer auth (same as clone)
+        clone_url = git_url
+        if not use_bearer and "bitbucket" in git_url.lower() and access_token:
+            try:
+                host = git_url.split("://", 1)[-1].split("/", 1)[0]
+                path = git_url.split("://", 1)[-1].split("/", 1)[1]
+                clone_url = f"https://x-token-auth:{access_token}@{host}/{path}"
+            except (ValueError, IndexError):
+                app.logger.warning("Could not parse git URL for token embedding")
 
         # If repo_dir was deleted after build, re-clone to a fresh temp dir
         if not repo_dir or not os.path.isdir(repo_dir):
             _vmsg("PULL RE-CLONE pid=%d - repo_dir was deleted, re-cloning", pid)
             repo_dir = os.path.join(REPO_DIR, f"{_user_key()}-{pid}-pull-{uuid.uuid4().hex[:12]}")
             os.makedirs(repo_dir)
-            r = subprocess.run(["git"] + git_auth + ["clone", "--depth", "1", git_url, repo_dir],
+            clone_cmd = ["git"] + git_auth + ["clone", "--depth", "1"]
+            if target_branch:
+                clone_cmd += ["--branch", target_branch]
+            clone_cmd += [clone_url, repo_dir]
+            r = subprocess.run(clone_cmd,
                              capture_output=True, text=True, timeout=120, env=git_env)
             if r.returncode != 0:
                 _vmsg("PULL RE-CLONE FAIL pid=%d - %s", pid, (r.stderr or "")[:200])
@@ -1162,10 +1203,15 @@ def pull_project(pid):
                     return jsonify({"error": "token_expired_or_invalid", "message": "Your Bitbucket access token has expired or is invalid. Please update it."}), 401
                 return jsonify({"error": "pull_failed", "message": redact_secret(r.stderr[:500], access_token)}), 500
             proj["repo_dir"] = repo_dir
+            if target_branch:
+                proj["branch"] = target_branch
             _vmsg("PULL RE-CLONE OK pid=%d - repo at %s", pid, repo_dir)
         else:
             _vmsg("PULL FETCH pid=%d - git fetch + reset (repo_dir exists)", pid)
-            r = subprocess.run(["git"] + git_auth + ["fetch", "--depth", "1", "origin"],
+            fetch_cmd = ["git"] + git_auth + ["fetch", "--depth", "1", "origin"]
+            if target_branch:
+                fetch_cmd += [target_branch]
+            r = subprocess.run(fetch_cmd,
                              capture_output=True, text=True, timeout=120, env=git_env, cwd=repo_dir)
             if r.returncode != 0:
                 _vmsg("PULL FETCH FAIL pid=%d - %s", pid, (r.stderr or "")[:200])
@@ -1175,13 +1221,24 @@ def pull_project(pid):
                 if any(p in err_lower for p in ("401", "403", "authentication", "access denied", "could not read", "authorization")):
                     return jsonify({"error": "token_expired_or_invalid", "message": "Your Bitbucket access token has expired or is invalid. Please update it."}), 401
                 return jsonify({"error": "pull_failed", "message": redact_secret(r.stderr[:500], access_token)}), 500
-            r = subprocess.run(["git", "reset", "--hard", "origin/HEAD"],
+            reset_ref = f"origin/{target_branch}" if target_branch else "origin/HEAD"
+            r = subprocess.run(["git", "reset", "--hard", reset_ref],
                              capture_output=True, text=True, timeout=60, env=git_env, cwd=repo_dir)
+            if r.returncode != 0 and not target_branch:
+                _vmsg("PULL RESET origin/HEAD FAIL pid=%d - trying default branch", pid)
+                r2 = subprocess.run(["git", "symbolic-ref", "refs/remotes/origin/HEAD"],
+                                  capture_output=True, text=True, timeout=10, env=git_env, cwd=repo_dir)
+                if r2.returncode == 0:
+                    default_branch = r2.stdout.strip().split("origin/")[-1]
+                    r = subprocess.run(["git", "reset", "--hard", f"origin/{default_branch}"],
+                                     capture_output=True, text=True, timeout=60, env=git_env, cwd=repo_dir)
             if r.returncode != 0:
                 _vmsg("PULL RESET FAIL pid=%d - %s", pid, (r.stderr or "")[:200])
                 proj["status"] = "ready"
                 _save_project(pid, proj)
                 return jsonify({"error": "pull_failed", "message": redact_secret(r.stderr[:500], access_token)}), 500
+            if target_branch:
+                proj["branch"] = target_branch
             _vmsg("PULL FETCH OK pid=%d", pid)
 
         # Rebuild graphs (shared logic)
@@ -1215,6 +1272,45 @@ def pull_project(pid):
             pass
         return jsonify({"error": str(e)[:500]}), 500
 
+
+@app.route("/projects/<int:pid>/branches")
+def project_branches(pid):
+    """List remote branches for a cloned project using git ls-remote."""
+    proj = _projects().get(pid) or _get_shared_project(pid)
+    if not proj:
+        return jsonify({"error": "project not found"}), 404
+    git_url = proj.get("git_url", "")
+    if not git_url:
+        return jsonify({"error": "not a cloned project (no git_url)"}), 400
+    try:
+        access_token = _load_fetch_token(pid, uk=_user_key()) or session.get("sso_access_token", "") or ""
+        auth_mode = proj.get("auth_mode", "")
+        use_bearer = auth_mode == "bitbucket_datacenter_bearer"
+        git_auth = _git_auth_args(access_token=access_token if use_bearer else None) if access_token else []
+        clone_url = git_url
+        if not use_bearer and "bitbucket" in git_url.lower() and access_token:
+            try:
+                host = git_url.split("://", 1)[-1].split("/", 1)[0]
+                path = git_url.split("://", 1)[-1].split("/", 1)[1]
+                clone_url = f"https://x-token-auth:{access_token}@{host}/{path}"
+            except (ValueError, IndexError):
+                pass
+        r = subprocess.run(["git"] + git_auth + ["ls-remote", "--heads", clone_url],
+                         capture_output=True, text=True, timeout=30, env=_git_env())
+        if r.returncode != 0:
+            err_lower = (r.stderr or "").lower()
+            if any(p in err_lower for p in ("401", "403", "authentication", "access denied", "could not read", "authorization")):
+                return jsonify({"error": "token_expired_or_invalid", "message": "Your Bitbucket access token has expired or is invalid."}), 401
+            return jsonify({"error": "branch_list_failed", "message": redact_secret((r.stderr or "")[:500], access_token)}), 500
+        branches = []
+        for line in r.stdout.strip().split("\n"):
+            if "\trefs/heads/" in line:
+                branches.append(line.split("\trefs/heads/")[1])
+        return jsonify({"branches": sorted(branches), "current": proj.get("branch", "")})
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "branch_list_timeout", "message": "Timed out listing branches."}), 504
+    except Exception as e:
+        return jsonify({"error": str(e)[:500]}), 500
 
 @app.route("/projects/<int:pid>", methods=["GET"])
 def get_project(pid):
@@ -1271,19 +1367,49 @@ def delete_project(pid):
     try:
         owner_row = conn.execute("SELECT 1 FROM projects WHERE id=? AND user_key=?", (pid, uk)).fetchone()
         if owner_row and remaining_members == 0:
-            remaining_members = 1  # owner still has it
+            # Owner is deleting their own project — remove from projects table so full cleanup runs
+            conn.execute("DELETE FROM projects WHERE id=? AND user_key=?", (pid, uk))
+            conn.commit()
     except Exception:
         pass
 
     if remaining_members == 0:
         # Last user out — clean up everything
         _vmsg("DELETE LAST MEMBER pid=%d - full cleanup", pid)
-        if proj and proj.get("repo_dir"):
-            _vmsg("DELETE pid=%d - removing repo_dir %s", pid, proj["repo_dir"])
-            _rmtree_hard(proj["repo_dir"])
-        artifacts_proj_dir = os.path.join(ARTIFACTS_DIR, str(pid))
-        _vmsg("DELETE pid=%d - removing artifacts %s", pid, artifacts_proj_dir)
-        _rmtree_hard(artifacts_proj_dir)
+        if proj:
+            if proj.get("repo_dir"):
+                _vmsg("DELETE pid=%d - removing repo_dir %s", pid, proj["repo_dir"])
+                _rmtree_hard(proj["repo_dir"])
+            artifacts_proj_dir = os.path.join(ARTIFACTS_DIR, str(pid))
+            _vmsg("DELETE pid=%d - removing artifacts %s", pid, artifacts_proj_dir)
+            _rmtree_hard(artifacts_proj_dir)
+            # Clean individual artifact files not in artifacts dir (e.g., in TEMP_DIR)
+            for path_key in ("graph_html_path", "graphify_path", "crg_db_path"):
+                p = proj.get(path_key)
+                if p and os.path.exists(p):
+                    try:
+                        norm_p = os.path.normpath(p)
+                        norm_art = os.path.normpath(artifacts_proj_dir)
+                        if not norm_p.startswith(norm_art):
+                            if os.path.isfile(p):
+                                os.unlink(p)
+                            elif os.path.isdir(p):
+                                _rmtree_hard(p)
+                            _vmsg("DELETE pid=%d - removed %s=%s", pid, path_key, p)
+                    except Exception as e:
+                        _vmsg("DELETE pid=%d - could not remove %s: %s", pid, path_key, e)
+            # Clean temp files matching this pid
+            if os.path.isdir(TEMP_DIR):
+                for entry in os.listdir(TEMP_DIR):
+                    if f"-{pid}-" in entry or f"-{pid}." in entry or entry.endswith(f"-{pid}.html"):
+                        try:
+                            fp = os.path.join(TEMP_DIR, entry)
+                            if os.path.isfile(fp):
+                                os.unlink(fp)
+                            elif os.path.isdir(fp):
+                                _rmtree_hard(fp)
+                        except Exception:
+                            pass
         _delete_fetch_token(pid)  # cleans all remaining tokens
         try:
             conn.execute("DELETE FROM projects WHERE id=?", (pid,))
@@ -1531,14 +1657,23 @@ def project_graph_html(pid):
             gf_data = proj["graphify_data"]
             G = graphify.build_from_json(gf_data)
             if G and G.number_of_nodes() > 0:
+                community_labels = {}
+                for c in (gf_data.get("communities") or []):
+                    cid = c.get("id")
+                    if cid is None:
+                        cid = c.get("community_id")
+                    if cid is not None:
+                        community_labels[cid] = c.get("label") or c.get("name") or f"Community {cid}"
                 comms = {}
                 for nid, ndata in G.nodes(data=True):
                     cid = ndata.get('community', 0)
                     if cid not in comms:
                         comms[cid] = []
+                        if cid not in community_labels:
+                            community_labels[cid] = f"Community {cid}"
                     comms[cid].append(nid)
                 tmp_path = f"{TEMP_DIR}/intelligraph-gf-html-{_user_key()}-{pid}.html"
-                gf_export.to_html(G, comms, tmp_path, node_limit=VIZ_NODE_LIMIT)
+                gf_export.to_html(G, comms, tmp_path, community_labels=community_labels, node_limit=VIZ_NODE_LIMIT)
                 if os.path.exists(tmp_path):
                     proj["graph_html_path"] = tmp_path
                     with open(tmp_path, "r", encoding="utf-8") as f:
@@ -1933,7 +2068,7 @@ def status():
     proj = _projects().get(pid) if pid else None
     from build_queue import build_queue
     return jsonify({
-        "oidc_configured": bool(OIDC_ISSUER),
+        "sso_configured": bool(SSO_ISSUER),
         "downloads": {"mcp_server": "/download/mcp-server",
                       "graph_builder": "/download/graph-builder",
                       "agent": "/download/agent"},
@@ -1996,16 +2131,16 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--port", type=int, default=5050)
     p.add_argument("--host", default="0.0.0.0")
-    p.add_argument("--oidc-issuer")
-    p.add_argument("--oidc-client-id")
-    p.add_argument("--oidc-client-secret")
+    p.add_argument("--sso-issuer")
+    p.add_argument("--sso-client-id")
+    p.add_argument("--sso-client-secret")
     args = p.parse_args()
 
-    if args.oidc_issuer:
-        OIDC_ISSUER = args.oidc_issuer
-        OIDC_CLIENT_ID = args.oidc_client_id or ""
-        OIDC_CLIENT_SECRET = args.oidc_client_secret or ""
-        fetch_oidc_config()
+    if args.sso_issuer:
+        SSO_ISSUER = args.sso_issuer
+        SSO_CLIENT_ID = args.sso_client_id or ""
+        SSO_CLIENT_SECRET = args.sso_client_secret or ""
+        fetch_sso_config()
 
     # (_projects_ref wired at module level above)
 
@@ -2013,7 +2148,7 @@ if __name__ == "__main__":
 
     print(f"Network:   {NETWORK_MODE} (SSL verify={'on' if LLM_SSL_VERIFY else 'off'}, git SSL={'on' if GIT_SSL_VERIFY else 'off'})")
     print(f"LLM hosts: {ALLOWED_LLM_HOSTS}")
-    print(f"OIDC:      {'configured' if OIDC_ISSUER else 'disabled'}")
+    print(f"SSO:       {'configured' if SSO_ISSUER else 'disabled'}{' (PKCE)' if SSO_ISSUER and not SSO_CLIENT_SECRET else ''}")
     print(f"Downloads: /download/mcp-server, /download/graph-builder")
     print(f"LLM relay: /llm/ask")
     print(f"Server:    http://{args.host}:{args.port}")

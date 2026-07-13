@@ -9,6 +9,7 @@ export const endpoints = {
   projectGraphData: (pid) => `/projects/${pid}/graph-data`,
   projectDetail: (pid) => `/projects/${pid}`,
   projectPull: (pid) => `/projects/${pid}/pull`,
+  projectBranches: (pid) => `/projects/${pid}/branches`,
   projectToken: (pid) => `/projects/${pid}/token`,
   projectShare: (pid) => `/projects/${pid}/share`,
   shareJoin: "/share/join",

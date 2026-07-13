@@ -1,19 +1,9 @@
-FROM python:3.12-slim
-
-RUN apt-get update && apt-get install -y --no-install-recommends git curl nodejs npm && \
-    rm -rf /var/lib/apt/lists/*
-
-RUN npm install -g nx@latest 2>/dev/null || true
+FROM intelligraph-optimised:latest
 
 WORKDIR /app/backend
 
-COPY requirements.txt /app/backend/requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
-
 COPY backend/ /app/backend/
 COPY dist/ /app/dist/
-
-RUN mkdir -p /app/backend/data/repos /app/backend/data/temp
 
 EXPOSE 5050
 

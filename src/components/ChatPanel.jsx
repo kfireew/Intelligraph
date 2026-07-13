@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { ChatMessage } from "./ChatMessage";
 import { PromptComposer } from "./PromptComposer";
 import { StatusPill } from "./StatusPill";
-import { Settings, Zap, Plus, Trash2, MessageSquare, PanelLeftClose, PanelLeft } from "lucide-react";
+import { Settings, Zap, Plus, Trash2, MessageSquare, PanelLeftClose, PanelLeft, GitBranch } from "lucide-react";
 
 const STATUS_PILL = {
   idle: null,
@@ -133,6 +133,12 @@ export function ChatPanel({
             <div>
               <h2 className="text-sm font-bold text-text m-0">
                 {activeProject ? activeProject.name : "Intelligraph Chat"}
+                {activeProject?.branch && (
+                  <span className="ml-2 text-xs font-normal text-muted inline-flex items-center gap-0.5">
+                    <GitBranch size={11} className="inline" />
+                    {activeProject.branch}
+                  </span>
+                )}
               </h2>
               <p className="text-[11px] text-muted m-0 mt-0.5">
                 {activeProject

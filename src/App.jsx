@@ -8,6 +8,7 @@ import { GraphPanel } from "./components/GraphPanel";
 import { StarTrail } from "./components/StarTrail";
 import { LLMSettings } from "./components/LLMSettings";
 import { GuidePanel } from "./components/GuidePanel";
+import { BranchPanel } from "./components/BranchPanel";
 import { CloneModal } from "./components/CloneModal";
 import { LoadingOverlay } from "./components/LoadingOverlay";
 import { useAuth } from "./hooks/useAuth";
@@ -115,6 +116,13 @@ export default function App() {
             <motion.div key="guide" initial={{ opacity: 0 }} animate={{ opacity: 1 }}
               exit={{ opacity: 0 }} transition={{ duration: 0.15 }} className="flex flex-1 min-w-0">
               <GuidePanel activePid={projects.activePid} activeProject={projects.activeProject} />
+            </motion.div>
+          )}
+          {activePanel === "branch" && (
+            <motion.div key="branch" initial={{ opacity: 0 }} animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }} transition={{ duration: 0.15 }} className="flex flex-1 min-w-0">
+              <BranchPanel activePid={projects.activePid} activeProject={projects.activeProject}
+                onPull={projects.pullProject} fetchBranches={projects.fetchBranches} />
             </motion.div>
           )}
         </AnimatePresence>

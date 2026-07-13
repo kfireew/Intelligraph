@@ -94,10 +94,10 @@ export function useProjects() {
     await fetchProjects();
   }, [activePid, fetchProjects]);
 
-  const pullProject = useCallback(async (pid) => {
+  const pullProject = useCallback(async (pid, branch) => {
     setProjects((prev) => prev.map((p) => p.id === pid ? { ...p, status: "pulling" } : p));
     try {
-      await projectsService.pull(pid);
+      await projectsService.pull(pid, branch);
       startPolling(pid);
     } catch (e) {
       if (e.message && e.message.includes("token_expired_or_invalid")) {
@@ -107,6 +107,14 @@ export function useProjects() {
       await fetchProjects();
     }
   }, [fetchProjects, startPolling]);
+
+  const fetchBranches = useCallback(async (pid) => {
+    try {
+      return await projectsService.branches(pid);
+    } catch (e) {
+      return null;
+    }
+  }, []);
 
   const updateToken = useCallback(async (pid, token) => {
     try {
@@ -149,6 +157,6 @@ export function useProjects() {
   return {
     projects, activePid, activeProject, loading, tokenExpired,
     fetchProjects, selectProject, cloneProject, renameProject, deleteProject, pullProject,
-    updateToken, shareProject, joinProject, markTokenExpired,
+    fetchBranches, updateToken, shareProject, joinProject, markTokenExpired,
   };
 }

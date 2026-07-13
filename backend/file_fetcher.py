@@ -42,7 +42,7 @@ def _rmtree_hard(path):
 
 
 def fetch_files_sparse(git_url, file_paths, git_auth_args=None, git_env=None,
-                       timeout=FETCH_TIMEOUT):
+                       timeout=FETCH_TIMEOUT, branch=None):
     """Sparse-clone only the requested files.
 
     Args:
@@ -91,9 +91,10 @@ def fetch_files_sparse(git_url, file_paths, git_auth_args=None, git_env=None,
             "--filter=blob:none",
             "--sparse",
             "--no-checkout",
-            git_url,
-            tmp_dir,
         ]
+        if branch:
+            clone_cmd += ["--branch", branch]
+        clone_cmd += [git_url, tmp_dir]
         r = subprocess.run(
             clone_cmd,
             capture_output=True, text=True,

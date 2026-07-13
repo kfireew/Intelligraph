@@ -206,9 +206,9 @@ def resolve_bitbucket_credential(
 
 # ── Error message builders ──────────────────────────────────────────
 
-def missing_credential_error(is_oidc_user):
+def missing_credential_error(is_sso_user):
     """Return (status_code, body) for missing credentials."""
-    if is_oidc_user:
+    if is_sso_user:
         return (
             400,
             {

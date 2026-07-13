@@ -202,6 +202,12 @@ export function useChat({ activePid, llmUrl, llmToken, model, onMatchedNodes, on
       return;
     }
 
+    if (!model) {
+      addMessage({ role: "assistant", content: "No model selected. Go to the LLM tab to select a model.", metadata: { intent, route: { category: intent, label: intent } } }, targetConvId);
+      setStatus("idle");
+      return;
+    }
+
     // LLM call — non-streaming relay (LLM provider doesn't support streaming)
     setStatus("answering");
     let fullText = "";
@@ -215,11 +221,14 @@ export function useChat({ activePid, llmUrl, llmToken, model, onMatchedNodes, on
         content: m.content.length > 200 ? m.content.slice(0, 200) + "..." : m.content,
       }));
 
+      const systemContent = richContext
+        ? `${SYSTEM_PROMPT}\n\nProject context:\n${richContext}`
+        : SYSTEM_PROMPT;
+
       const payload = {
         model: model || undefined,
         messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          ...(richContext ? [{ role: "system", content: `Project context:\n${richContext}` }] : []),
+          { role: "system", content: systemContent },
           ...historyMessages,
           { role: "user", content: trimmed },
         ],

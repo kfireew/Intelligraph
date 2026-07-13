@@ -24,8 +24,13 @@ export const projectsService = {
     }),
   delete: (pid) =>
     requestJson(endpoints.projectDetail(pid), { method: "DELETE" }),
-  pull: (pid) =>
-    requestJson(endpoints.projectPull(pid), { method: "POST" }),
+  pull: (pid, branch) =>
+    requestJson(endpoints.projectPull(pid), {
+      method: "POST",
+      body: JSON.stringify(branch ? { branch } : {}),
+    }),
+  branches: (pid) =>
+    requestJson(endpoints.projectBranches(pid)),
   updateToken: (pid, token) =>
     requestJson(endpoints.projectToken(pid), {
       method: "POST",
