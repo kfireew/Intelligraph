@@ -52,6 +52,7 @@ from mcp.server.stdio import stdio_server
 INTELLIGRAPH_URL = "http://localhost:5050"
 PROJECT_ID = None
 REPO_DIR = None
+MCP_TOKEN = os.environ.get("INTELLIGRAPH_MCP_TOKEN", "")
 SSL_VERIFY = os.environ.get("LLM_SSL_VERIFY", "false").lower() == "true"
 
 
@@ -204,9 +205,13 @@ def _build_tools() -> list[types.Tool]:
 def _retrieve(query: str) -> dict:
     """Call the Intelligraph container's retrieval endpoint (full pipeline)."""
     url = f"{INTELLIGRAPH_URL}/graph/retrieve-context"
+    headers = {"Content-Type": "application/json"}
+    if MCP_TOKEN:
+        headers["X-MCP-Token"] = MCP_TOKEN
     r = requests.post(
         url,
         json={"prompt": query, "project_id": PROJECT_ID},
+        headers=headers,
         timeout=30,
         verify=SSL_VERIFY,
     )
@@ -217,9 +222,13 @@ def _retrieve(query: str) -> dict:
 def _crg(mode: str, query: str) -> dict:
     """Call the Intelligraph CRG endpoint for direct mode access."""
     url = f"{INTELLIGRAPH_URL}/graph/crg"
+    headers = {"Content-Type": "application/json"}
+    if MCP_TOKEN:
+        headers["X-MCP-Token"] = MCP_TOKEN
     r = requests.post(
         url,
         json={"project_id": PROJECT_ID, "mode": mode, "query": query},
+        headers=headers,
         timeout=30,
         verify=SSL_VERIFY,
     )
@@ -483,17 +492,23 @@ async def main():
                         help="Project name to use (alternative to --project-id)")
     parser.add_argument("--repo-dir", default=None,
                         help="Local repository directory for direct file reads (enables local_files tool)")
+    parser.add_argument("--mcp-token", default=MCP_TOKEN,
+                        help="MCP API token (from Intelligraph UI). Required when SSO is enabled.")
     parser.add_argument("--ssl-verify", action="store_true", default=SSL_VERIFY,
                         help="Verify SSL certificates (default: from LLM_SSL_VERIFY env)")
     args = parser.parse_args()
     INTELLIGRAPH_URL = args.intelligraph_url.rstrip("/")
     PROJECT_ID = args.project_id
     REPO_DIR = os.path.abspath(args.repo_dir) if args.repo_dir else None
+    MCP_TOKEN = args.mcp_token.strip()
     if REPO_DIR and not os.path.isdir(REPO_DIR):
         print(f"WARNING: --repo-dir '{REPO_DIR}' does not exist, local_files tool disabled", file=sys.stderr)
         REPO_DIR = None
 
-    print(f"Intelligraph MCP Server starting (url={INTELLIGRAPH_URL}, pid={PROJECT_ID}, repo={REPO_DIR})", file=sys.stderr)
+    if not MCP_TOKEN:
+        print("WARNING: no --mcp-token provided. /graph/ endpoints will return 401 if SSO is enabled.", file=sys.stderr)
+
+    print(f"Intelligraph MCP Server starting (url={INTELLIGRAPH_URL}, pid={PROJECT_ID}, repo={REPO_DIR}, token={'yes' if MCP_TOKEN else 'no'})", file=sys.stderr)
 
     async with stdio_server() as (read_stream, write_stream):
         await server.run(read_stream, write_stream, server.create_initialization_options())

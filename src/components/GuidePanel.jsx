@@ -1,6 +1,7 @@
-import { Download, Server, Copy, Check, FileCode } from "lucide-react";
+import { Download, Server, Copy, Check, FileCode, KeyRound, Loader2, AlertCircle } from "lucide-react";
 import { useState } from "react";
 import { endpoints } from "../config/endpoints";
+import { requestJson } from "../services/apiClient";
 
 function copy(text) {
   navigator.clipboard.writeText(text);
@@ -10,6 +11,9 @@ export function GuidePanel({ activePid, activeProject }) {
   const [copied, setCopied] = useState(null);
   const [scriptPath, setScriptPath] = useState("");
   const [mcpUrl, setMcpUrl] = useState("");
+  const [mcpToken, setMcpToken] = useState("");
+  const [tokenLoading, setTokenLoading] = useState(false);
+  const [tokenError, setTokenError] = useState("");
   const isReady = activeProject && ["ready", "cloned", "indexed"].includes(activeProject.status);
   const pid = activeProject?.id;
 
@@ -30,14 +34,15 @@ export function GuidePanel({ activePid, activeProject }) {
   }'`
     : null;
 
-  // MCP config — MCP server connects DIRECTLY to the container, bypassing SSO proxy.
-  // Default to localhost:5050 (container port mapping). User can override.
+  // MCP config — MCP server sends X-MCP-Token header to authenticate against /graph/ endpoints.
+  // Default to localhost:5050 (container port mapping). User can override for remote/pod setups.
   const mcpContainerUrl = (mcpUrl.trim().replace(/\/+$/, "") || "http://localhost:5050");
   // scriptPath is the full path to mcp_server_standalone.py on the user's machine.
   // Without it, the MCP runner can't find the script (relative paths break).
   const scriptArg = (scriptPath.trim().replace(/^["']|["']$/g, "") || "mcp_server_standalone.py");
+  const tokenArg = mcpToken.trim() || "YOUR-MCP-TOKEN";
   const mcpCommand = pid
-    ? `python ${scriptArg} --intelligraph-url ${mcpContainerUrl} --project-id ${pid} --repo-dir .`
+    ? `python ${scriptArg} --intelligraph-url ${mcpContainerUrl} --project-id ${pid} --mcp-token ${tokenArg} --repo-dir .`
     : null;
 
   const claudeMcp = pid
@@ -45,7 +50,7 @@ export function GuidePanel({ activePid, activeProject }) {
         mcpServers: {
           intelligraph: {
             command: "python",
-            args: [scriptArg, "--intelligraph-url", mcpContainerUrl, "--project-id", String(pid), "--repo-dir", "."],
+            args: [scriptArg, "--intelligraph-url", mcpContainerUrl, "--project-id", String(pid), "--mcp-token", tokenArg, "--repo-dir", "."],
           },
         },
       }, null, 2)
@@ -57,12 +62,40 @@ export function GuidePanel({ activePid, activeProject }) {
         mcp: {
           intelligraph: {
             type: "local",
-            command: ["python", scriptArg, "--intelligraph-url", mcpContainerUrl, "--project-id", String(pid), "--repo-dir", "."],
+            command: ["python", scriptArg, "--intelligraph-url", mcpContainerUrl, "--project-id", String(pid), "--mcp-token", tokenArg, "--repo-dir", "."],
             timeout: 10000,
           },
         },
       }, null, 2)
     : null;
+
+  const handleGenerateToken = async () => {
+    if (!pid) return;
+    setTokenLoading(true);
+    setTokenError("");
+    try {
+      const res = await requestJson(`/projects/${pid}/mcp-token`, { method: "POST" });
+      setMcpToken(res.mcp_token || "");
+    } catch (e) {
+      setTokenError(e.message || "Failed to generate token");
+    } finally {
+      setTokenLoading(false);
+    }
+  };
+
+  const handleRevokeToken = async () => {
+    if (!pid) return;
+    setTokenLoading(true);
+    setTokenError("");
+    try {
+      await requestJson(`/projects/${pid}/mcp-token`, { method: "DELETE" });
+      setMcpToken("");
+    } catch (e) {
+      setTokenError(e.message || "Failed to revoke token");
+    } finally {
+      setTokenLoading(false);
+    }
+  };
 
   const handleCopy = (key, text) => {
     copy(text);
@@ -195,9 +228,49 @@ export function GuidePanel({ activePid, activeProject }) {
               <CodeBlock id="pip" code="pip install mcp requests" />
             </div>
 
-            {/* Step 2 */}
+            {/* Step 2 — Generate MCP Token */}
             <div className="mb-4">
-              <p className="text-xs font-bold text-text mb-1">Step 2 — Download the MCP server script</p>
+              <p className="text-xs font-bold text-text mb-1">Step 2 — Generate MCP token</p>
+              <p className="text-xs text-muted-subtle m-0 mb-2">
+                The MCP server authenticates with this token (not your SSO session). Click generate, then copy it into the config below.
+              </p>
+              <div className="flex gap-2 items-start">
+                {mcpToken ? (
+                  <>
+                    <input
+                      type="text" readOnly value={mcpToken}
+                      onClick={(e) => e.target.select()}
+                      className="flex-1 px-2.5 py-1.5 rounded-lg bg-white/5 border border-glass-border text-[11px] text-text font-mono outline-none"
+                    />
+                    <button onClick={() => copy(mcpToken)} className="px-2.5 py-1.5 rounded-lg bg-accent/10 hover:bg-accent/20 text-accent-light text-[11px] font-medium transition-colors">
+                      {copied === "mcpToken" ? <Check size={12} /> : <Copy size={12} />}
+                    </button>
+                    <button onClick={handleRevokeToken} disabled={tokenLoading}
+                      className="px-2.5 py-1.5 rounded-lg bg-red/10 hover:bg-red/20 text-red text-[11px] font-medium transition-colors disabled:opacity-40">
+                      Revoke
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <button onClick={handleGenerateToken} disabled={tokenLoading}
+                      className="px-3 py-1.5 rounded-lg text-xs font-bold text-white disabled:opacity-40"
+                      style={{ background: "linear-gradient(135deg, #8b5cf6, #d946ef)" }}>
+                      {tokenLoading ? <Loader2 size={14} className="animate-spin" /> : <KeyRound size={14} />}
+                      <span className="ml-1.5">Generate Token</span>
+                    </button>
+                  </>
+                )}
+              </div>
+              {tokenError && (
+                <div className="flex items-center gap-1.5 mt-2 text-[10px] text-red">
+                  <AlertCircle size={11} /> {tokenError}
+                </div>
+              )}
+            </div>
+
+            {/* Step 3 */}
+            <div className="mb-4">
+              <p className="text-xs font-bold text-text mb-1">Step 3 — Download the MCP server script</p>
               <p className="text-xs text-muted-subtle m-0 mb-2">Save this file into your project folder (the folder where you run your AI assistant):</p>
               <a href={endpoints.downloadMCPServer} download
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-accent/10 hover:bg-accent/20 text-accent-light text-xs font-medium transition-colors no-underline">
@@ -215,8 +288,8 @@ export function GuidePanel({ activePid, activeProject }) {
                 />
               </div>
               <div className="mt-3">
-                <p className="text-[11px] font-bold text-muted uppercase tracking-wider mb-1.5">Direct container URL</p>
-                <p className="text-[10px] text-muted-subtle m-0 mb-1.5">The MCP server connects directly to the container, bypassing SSO. Default is localhost with port mapping. Change if the container is on another machine.</p>
+                <p className="text-[11px] font-bold text-muted uppercase tracking-wider mb-1.5">Container URL</p>
+                <p className="text-[10px] text-muted-subtle m-0 mb-1.5">The MCP server connects to this URL with the token. Use the container address (works for pods and remote setups — token authenticates through SSO).</p>
                 <input
                   type="text"
                   value={mcpUrl}
@@ -227,11 +300,11 @@ export function GuidePanel({ activePid, activeProject }) {
               </div>
             </div>
 
-            {/* Step 3 */}
+            {/* Step 4 */}
             <div className="mb-4">
-              <p className="text-xs font-bold text-text mb-1">Step 3 — Add config file</p>
+              <p className="text-xs font-bold text-text mb-1">Step 4 — Add config file</p>
               <p className="text-xs text-muted-subtle m-0 mb-2">
-                Your project ID is <span className="text-accent-light font-mono font-bold">{pid}</span>. The MCP server connects directly to the container at <span className="text-accent-light font-mono">{mcpContainerUrl}</span> (bypasses SSO). Just copy and paste.
+                Your project ID is <span className="text-accent-light font-mono font-bold">{pid}</span>. The MCP server authenticates with your token at <span className="text-accent-light font-mono">{mcpContainerUrl}</span>. Just copy and paste.
               </p>
 
               <details open className="mt-2">
@@ -255,9 +328,9 @@ export function GuidePanel({ activePid, activeProject }) {
               </details>
             </div>
 
-            {/* Step 4 */}
+            {/* Step 5 */}
             <div className="mb-2">
-              <p className="text-xs font-bold text-text mb-1">Step 4 — Use it</p>
+              <p className="text-xs font-bold text-text mb-1">Step 5 — Use it</p>
               <p className="text-xs text-text-secondary m-0 leading-relaxed">
                 Open your AI assistant in the project folder and ask questions like "search for authentication" or "who calls processPayment". The assistant will use Intelligraph's code graph to answer.
               </p>

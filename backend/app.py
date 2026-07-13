@@ -141,7 +141,6 @@ _SSO_OPEN_PREFIXES = (
     "/auth/", "/status", "/diagnostics", "/assets/", "/static/",
     "/download/", "/projects/<int:pid>/graph-html",
     "/projects/<int:pid>/graph-data", "/projects/<int:pid>/crg-db",
-    "/graph/",
 )
 # ── SQLite persistence (optional) ──
 INTELLIGRAPH_DB = os.environ.get("INTELLIGRAPH_DB", os.path.join(TEMP_DIR, "intelligraph.db"))
@@ -162,6 +161,7 @@ def _get_db():
     conn.execute("CREATE TABLE IF NOT EXISTS fetch_tokens_v2 (project_id INTEGER, user_key TEXT, token TEXT, created_at TEXT, PRIMARY KEY(project_id, user_key))")
     conn.execute("CREATE TABLE IF NOT EXISTS project_members (project_id INTEGER, user_key TEXT, joined_at TEXT, PRIMARY KEY(project_id, user_key))")
     conn.execute("CREATE TABLE IF NOT EXISTS project_share_keys (project_id INTEGER, share_key TEXT PRIMARY KEY, created_at TEXT)")
+    conn.execute("CREATE TABLE IF NOT EXISTS mcp_tokens (project_id INTEGER, user_key TEXT, token TEXT, created_at TEXT, PRIMARY KEY(project_id, user_key))")
     _migrate_fetch_tokens(conn)
     return conn
 
@@ -505,6 +505,26 @@ def get_user():
     return None
 
 
+def _validate_mcp_token(path):
+    """Check if the request carries a valid MCP token in the X-MCP-Token header.
+
+    MCP tokens are per-project, stored in the mcp_tokens table.
+    Only allows access to /graph/ endpoints (read-only retrieval).
+    Returns the project_id if valid, None otherwise.
+    """
+    token = request.headers.get("X-MCP-Token", "").strip()
+    if not token:
+        return None
+    try:
+        conn = _db_conn()
+        row = conn.execute(
+            "SELECT project_id FROM mcp_tokens WHERE token = ?", (token,)
+        ).fetchone()
+        return row["project_id"] if row else None
+    except Exception:
+        return None
+
+
 @app.before_request
 def _sso_guard():
     """Require SSO login for mutating actions when INTELLIGRAPH_REQUIRE_SSO=true."""
@@ -515,11 +535,17 @@ def _sso_guard():
     if request.method not in _SSO_PROTECTED_METHODS:
         return None  # read-only methods allowed
     path = request.path
-    # Check if this path is protected
+    # Check if this path is open (no auth needed)
     for prefix in _SSO_OPEN_PREFIXES:
         if path.startswith(prefix.replace("<int:pid>", "").replace("<pid>", "")):
             return None
-    # If it's a mutating /projects/ route, require auth
+    # /graph/ endpoints: allow with valid MCP token (X-MCP-Token header)
+    if path.startswith("/graph/"):
+        pid = _validate_mcp_token(path)
+        if pid is not None:
+            return None  # valid MCP token — allow
+        # No valid MCP token — fall through to SSO check
+    # Mutating route — require SSO auth
     u = get_user()
     if not u:
         if request.path.startswith("/api/"):
@@ -1475,6 +1501,7 @@ def delete_project(pid):
             conn.execute("DELETE FROM project_share_keys WHERE project_id=?", (pid,))
             conn.execute("DELETE FROM project_members WHERE project_id=?", (pid,))
             conn.execute("DELETE FROM fetch_tokens_v2 WHERE project_id=?", (pid,))
+            conn.execute("DELETE FROM mcp_tokens WHERE project_id=?", (pid,))
             conn.commit()
         except Exception as e:
             app.logger.warning("DB delete failed: %s", e)
@@ -1515,6 +1542,49 @@ def update_project_token(pid):
     _store_fetch_token(pid, token, uk=_user_key())
     _vmsg("TOKEN UPDATED pid=%d user=%s", pid, _user_key())
     return jsonify({"status": "ok", "message": "Token updated successfully"})
+
+
+# ── MCP token endpoints ───────────────────────────────────────────
+
+def _store_mcp_token(pid, user_key, token):
+    conn = _db_conn()
+    conn.execute(
+        "INSERT OR REPLACE INTO mcp_tokens(project_id, user_key, token, created_at) VALUES(?, ?, ?, ?)",
+        (pid, user_key, token, datetime.now(timezone.utc).isoformat())
+    )
+    conn.commit()
+
+
+@app.route("/projects/<int:pid>/mcp-token", methods=["POST"])
+def create_mcp_token(pid):
+    """Generate an MCP API token for a project. Requires SSO auth.
+
+    The token is stored in the mcp_tokens table and allows the MCP
+    server to access /graph/ endpoints without a session cookie.
+    Scoped per-project, revocable.
+    """
+    proj = _projects().get(pid) or _get_shared_project(pid)
+    if not proj:
+        return jsonify({"error": "project not found"}), 404
+    uk = _user_key()
+    token = "mcp_" + secrets.token_urlsafe(32)
+    _store_mcp_token(pid, uk, token)
+    _vmsg("MCP TOKEN CREATED pid=%d user=%s", pid, uk)
+    return jsonify({"mcp_token": token, "project_id": pid})
+
+
+@app.route("/projects/<int:pid>/mcp-token", methods=["DELETE"])
+def revoke_mcp_token(pid):
+    """Revoke the MCP API token for a project. Requires SSO auth."""
+    proj = _projects().get(pid) or _get_shared_project(pid)
+    if not proj:
+        return jsonify({"error": "project not found"}), 404
+    uk = _user_key()
+    conn = _db_conn()
+    conn.execute("DELETE FROM mcp_tokens WHERE project_id=? AND user_key=?", (pid, uk))
+    conn.commit()
+    _vmsg("MCP TOKEN REVOKED pid=%d user=%s", pid, uk)
+    return jsonify({"status": "ok", "message": "MCP token revoked"})
 
 
 # ── Share key endpoints ──────────────────────────────────────────
