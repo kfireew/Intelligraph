@@ -3,44 +3,6 @@
 You have access to Intelligraph MCP tools that provide deep codebase intelligence.
 **You must use these tools actively** — do not guess or hallucinate about code you haven't looked up.
 
-## Setup
-
-### Claude Code
-
-Create `.mcp.json` in your project root:
-
-```json
-{
-  "mcpServers": {
-    "intelligraph": {
-      "command": "python",
-      "args": ["mcp_server_standalone.py", "--intelligraph-url", "http://localhost:5050", "--project-id", "1", "--repo-dir", "."],
-      "cwd": "/path/to/your/project"
-    }
-  }
-}
-```
-
-### opencode
-
-Create `opencode.json` in your project root or `~/.config/opencode/opencode.json`:
-
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "mcp": {
-    "intelligraph": {
-      "type": "local",
-      "command": ["python", "mcp_server_standalone.py", "--intelligraph-url", "http://localhost:5050", "--project-id", "1", "--repo-dir", "."],
-      "cwd": "/path/to/your/project"
-    }
-  }
-}
-```
-
-Replace `--project-id` with your project's ID from the Intelligraph dashboard.
-Set `--repo-dir` to your local repo path to enable the `local_files` tool.
-
 ---
 
 ## When to Use Each Tool

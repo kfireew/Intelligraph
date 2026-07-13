@@ -2289,7 +2289,7 @@ if __name__ == "__main__":
     print(f"Network:   {NETWORK_MODE} (SSL verify={'on' if LLM_SSL_VERIFY else 'off'}, git SSL={'on' if GIT_SSL_VERIFY else 'off'})")
     print(f"LLM hosts: {ALLOWED_LLM_HOSTS}")
     print(f"SSO:       {'configured' if SSO_ISSUER else 'disabled'}{' (PKCE)' if SSO_ISSUER and not SSO_CLIENT_SECRET else ''}")
-    print(f"Downloads: /download/mcp-server, /download/graph-builder, /download/test-mcp")
+    print(f"Downloads: /download/mcp-server, /download/graph-builder")
     print(f"LLM relay: /llm/ask")
     print(f"Server:    http://{args.host}:{args.port}")
     app.run(host=args.host, port=args.port, debug=False)
