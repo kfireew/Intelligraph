@@ -785,6 +785,15 @@ def download_agent():
                      mimetype="text/markdown")
 
 
+@app.route("/download/test-mcp")
+def download_test_mcp():
+    """Download the MCP connectivity test script."""
+    test_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_mcp_conn.py")
+    return send_file(test_path, as_attachment=True,
+                     download_name="test_mcp_conn.py",
+                     mimetype="text/x-python")
+
+
 @app.route("/download/graph-builder")
 def download_graph_builder():
     """Download the graph builder EXE if built, otherwise the Python script."""
@@ -2200,8 +2209,9 @@ def status():
     return jsonify({
         "sso_configured": bool(SSO_ISSUER),
         "downloads": {"mcp_server": "/download/mcp-server",
-                      "graph_builder": "/download/graph-builder",
-                      "agent": "/download/agent"},
+                     "graph_builder": "/download/graph-builder",
+                     "agent": "/download/agent",
+                     "test_mcp": "/download/test-mcp"},
         "project": proj,
         "projects": list(_projects().keys()),
         "build_queue_depth": build_queue.depth,
@@ -2279,7 +2289,7 @@ if __name__ == "__main__":
     print(f"Network:   {NETWORK_MODE} (SSL verify={'on' if LLM_SSL_VERIFY else 'off'}, git SSL={'on' if GIT_SSL_VERIFY else 'off'})")
     print(f"LLM hosts: {ALLOWED_LLM_HOSTS}")
     print(f"SSO:       {'configured' if SSO_ISSUER else 'disabled'}{' (PKCE)' if SSO_ISSUER and not SSO_CLIENT_SECRET else ''}")
-    print(f"Downloads: /download/mcp-server, /download/graph-builder")
+    print(f"Downloads: /download/mcp-server, /download/graph-builder, /download/test-mcp")
     print(f"LLM relay: /llm/ask")
     print(f"Server:    http://{args.host}:{args.port}")
     app.run(host=args.host, port=args.port, debug=False)
