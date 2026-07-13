@@ -45,10 +45,10 @@ _TASK_CHUNK_CAPS = {
     "refactor": 12,
     "security": 12,
     "impact": 12,
-    "callers": 8,
-    "callees": 8,
+    "callers": 12,
+    "callees": 12,
     "tests": 8,
-    "what_is": 5,
+    "what_is": 8,
     "nx_architecture": 10,
 }
 

@@ -159,8 +159,8 @@ def test_merger_chunk_count_cap(sample_graphify_data):
     }]
     
     ctx, stats = merge_tasks(tasks, per_task_results, sample_graphify_data)
-    # what_is cap is 5 chunks
-    assert stats["raw_chunks"] <= 5, f"Chunk cap not enforced: {stats['raw_chunks']} chunks"
+    # what_is cap is 8 chunks
+    assert stats["raw_chunks"] <= 8, f"Chunk cap not enforced: {stats['raw_chunks']} chunks"
 
 
 # ── 3. Smart Truncation ──

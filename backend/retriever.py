@@ -14,7 +14,7 @@ import logging
 
 log = logging.getLogger(__name__)
 
-MAX_CHUNKS = 50
+MAX_CHUNKS = 80
 MAX_SNIPPET_CHARS = 3000
 
 _VERBOSE = os.environ.get("INTELLIGRAPH_VERBOSE", "true").lower() == "true"
@@ -34,7 +34,7 @@ def _vmsg(msg, *args):
     print(f"[{ts}] {msg}", flush=True)
 
 
-def retrieve_chunks(ranked_files: list, proj: dict, task_policy: dict = None, max_files: int = 15) -> list:
+def retrieve_chunks(ranked_files: list, proj: dict, task_policy: dict = None, max_files: int = 30) -> list:
     """Fetch code chunks for ranked files.
     
     Tries repo_dir first (if alive), then on-demand sparse fetch, then graphify_data content fields.

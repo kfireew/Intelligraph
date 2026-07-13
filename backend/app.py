@@ -141,6 +141,7 @@ _SSO_OPEN_PREFIXES = (
     "/auth/", "/status", "/diagnostics", "/assets/", "/static/",
     "/download/", "/projects/<int:pid>/graph-html",
     "/projects/<int:pid>/graph-data", "/projects/<int:pid>/crg-db",
+    "/graph/",
 )
 # ── SQLite persistence (optional) ──
 INTELLIGRAPH_DB = os.environ.get("INTELLIGRAPH_DB", os.path.join(TEMP_DIR, "intelligraph.db"))

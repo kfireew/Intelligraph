@@ -285,7 +285,7 @@ def retrieve_context(proj: dict, prompt: str, overrides: dict = None) -> dict:
             if not intel_metadata and intel_files and intel_mode:
                 intel_context_text += render_intelligence_context(intel_files, intel_mode, max_chars=800)
 
-        file_cap = 20
+        file_cap = 30
         if overrides and "file_count" in overrides:
             file_cap = overrides["file_count"]
         chunks = retrieve_chunks(ranked, proj, policy, max_files=file_cap)
@@ -373,7 +373,7 @@ def retrieve_context(proj: dict, prompt: str, overrides: dict = None) -> dict:
         "task_count": len(tasks),
     })
 
-    file_cap_return = 20
+    file_cap_return = 30
     if overrides and "file_count" in overrides:
         file_cap_return = overrides["file_count"]
 
