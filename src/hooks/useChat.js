@@ -7,7 +7,7 @@ const SYSTEM_PROMPT = `You are an expert software architect helping a developer 
 
 Give a direct, concise answer. Do not output your thinking process or say "Let me analyze" -- just answer.
 Use the provided context as your only source of truth. Mention specific file paths.
-If context is insufficient, state what is missing.
+If context is insufficient, append a section at the very end starting with "## Missing Information" followed by a concise list of what files, functions, or symbols you need to fully answer. Do not weave "missing" notes into the main answer body.
 Do not invent files, functions, imports, or APIs. Format file references as a markdown list with newlines (one per line).`;
 
 

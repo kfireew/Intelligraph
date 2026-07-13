@@ -279,60 +279,56 @@ class CRGProvider(IntelligenceProvider):
         if not terms:
             return None
 
-        best_match = None
-        best_score = 0
-
+        # Terms are ordered by priority (compounds first, then words in
+        # order of appearance in the query). Return the first match instead
+        # of comparing relevance scores — the subject of the query ("map")
+        # should win over a later higher-relevance term ("add").
         for term in terms:
-            # Pass 1: LIKE search for exact substring match (handles compound terms)
-            if "_" in term or len(term) > 4:
-                try:
-                    rows = conn.execute(
-                        "SELECT name, kind FROM nodes "
-                        "WHERE kind IN ('Function', 'Class') "
-                        "AND LOWER(name) LIKE ? "
-                        "ORDER BY LENGTH(name) ASC LIMIT 5",
-                        (f"%{term}%",)
-                    ).fetchall()
-                    for r in rows:
-                        name = r["name"]
-                        name_lower = name.lower()
-                        if term in name_lower:
-                            relevance = len(term) / max(len(name_lower), 1)
-                            if relevance > best_score:
-                                best_score = relevance
-                                best_match = name
-                except Exception:
-                    pass
+            matched = self._try_term_match(conn, term)
+            if matched:
+                _vmsg("CRG EXTRACT_TARGET: query='%s' -> '%s' (first match for '%s')", query[:50], matched, term)
+                return matched
 
-            # Pass 2: FTS search (handles tokenized matches)
+        _vmsg("CRG EXTRACT_TARGET: no match for query='%s' terms=%s", query[:50], terms[:5])
+        return None
+
+    @staticmethod
+    def _try_term_match(conn, term: str) -> str | None:
+        """Try to find a symbol matching a single term. Returns name or None."""
+        # Pass 1: LIKE search for exact substring match (handles compound terms)
+        if "_" in term or len(term) > 4:
             try:
                 rows = conn.execute(
-                    "SELECT n.name, n.kind FROM nodes_fts f JOIN nodes n ON f.rowid = n.id "
-                    "WHERE nodes_fts MATCH ? AND n.kind IN ('Function', 'Class') "
-                    "ORDER BY rank LIMIT 10",
-                    (f'"{term}"',)
+                    "SELECT name, kind FROM nodes "
+                    "WHERE kind IN ('Function', 'Class') "
+                    "AND LOWER(name) LIKE ? "
+                    "ORDER BY LENGTH(name) ASC LIMIT 5",
+                    (f"%{term}%",)
                 ).fetchall()
                 for r in rows:
                     name = r["name"]
-                    name_lower = name.lower()
-                    if term in name_lower:
-                        relevance = len(term) / max(len(name_lower), 1)
-                        if relevance > best_score:
-                            best_score = relevance
-                            best_match = name
-                    elif name_lower in term:
-                        relevance = len(name_lower) / max(len(term), 1) * 0.8
-                        if relevance > best_score:
-                            best_score = relevance
-                            best_match = name
-            except Exception as e:
-                log.warning("CRG extract_target FTS failed for '%s': %s", term, e)
+                    if term in name.lower():
+                        return name
+            except Exception:
+                pass
 
-        if best_match:
-            _vmsg("CRG EXTRACT_TARGET: query='%s' -> '%s' (relevance=%.2f)", query[:50], best_match, best_score)
-            return best_match
-
-        _vmsg("CRG EXTRACT_TARGET: no match for query='%s' terms=%s", query[:50], terms[:5])
+        # Pass 2: FTS search (handles tokenized matches)
+        try:
+            rows = conn.execute(
+                "SELECT n.name, n.kind FROM nodes_fts f JOIN nodes n ON f.rowid = n.id "
+                "WHERE nodes_fts MATCH ? AND n.kind IN ('Function', 'Class') "
+                "ORDER BY rank LIMIT 10",
+                (f'"{term}"',)
+            ).fetchall()
+            for r in rows:
+                name = r["name"]
+                name_lower = name.lower()
+                if term in name_lower:
+                    return name
+                if name_lower in term:
+                    return name
+        except Exception as e:
+            log.warning("CRG extract_target FTS failed for '%s': %s", term, e)
         return None
 
     # ── Mode 1: FTS5 search ────────────────────────────────────────

@@ -494,6 +494,17 @@ def route_query(prompt: str, graphify_data: dict = None, proj_id=None) -> list[d
     if router is None:
         return _regex_fallback(prompt)
 
+    # Route the full prompt first — produces better results for compound queries
+    # like "how does map work and how can I add entities to it" where clause
+    # splitting would route each half to a different (wrong) intent.
+    # Only split if the full prompt doesn't route at all.
+    full_result = _route_single(router, prompt, prompt, graphify_data, proj_id)
+    if full_result:
+        results = [full_result]
+        _vmsg("SEMANTIC PLANNER: prompt=%r -> %s", prompt[:80], results)
+        return results
+
+    # Fall back to clause splitting for genuinely compound queries
     clauses = _split_clauses(prompt)
     if len(clauses) <= 1:
         clauses = [prompt]

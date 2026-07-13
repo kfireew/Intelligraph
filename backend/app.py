@@ -172,6 +172,57 @@ def _db_conn():
         _db = _get_db()
     return _db
 
+
+def _enrich_community_labels(graphify_data, crg_db_path):
+    """Match graphify communities to CRG communities by file overlap.
+
+    CRG communities have meaningful names (e.g. 'graphify-extract', 'tests-file')
+    generated during build. Graphify graph.json only stores integer community IDs.
+    Returns {graphify_cid: crg_name} for all matchable communities.
+    """
+    if not crg_db_path or not os.path.exists(crg_db_path):
+        return {}
+    try:
+        conn = sqlite3.connect(f"file:{crg_db_path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        from os.path import commonpath
+        crg_fps = [r[0] for r in conn.execute(
+            "SELECT DISTINCT file_path FROM nodes WHERE file_path IS NOT NULL"
+        ).fetchall()]
+        if not crg_fps:
+            return {}
+        prefix = commonpath(crg_fps)
+        crg_comms = {}
+        for r in conn.execute(
+            "SELECT c.id, c.name, n.file_path FROM communities c "
+            "JOIN nodes n ON n.community_id = c.id WHERE n.file_path IS NOT NULL"
+        ).fetchall():
+            fp = (r["file_path"] or "").replace("\\", "/")
+            rel = fp[len(prefix):].lstrip("/").replace("\\", "/")
+            crg_comms.setdefault(r["id"], {"name": r["name"], "files": set()})["files"].add(rel)
+        conn.close()
+    except Exception:
+        return {}
+    gf_comm_files = {}
+    for n in graphify_data.get("nodes", []):
+        c = n.get("community")
+        sf = (n.get("source_file") or "").replace("\\", "/")
+        if c is not None and sf:
+            gf_comm_files.setdefault(c, set()).add(sf)
+    labels = {}
+    for gf_cid, gf_files in gf_comm_files.items():
+        best_name = None
+        best_overlap = 0
+        for data in crg_comms.values():
+            overlap = len(gf_files & data["files"])
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_name = data["name"]
+        if best_name and best_overlap > 0:
+            labels[gf_cid] = best_name
+    return labels
+
+
 # ── Token encryption (Fernet / AES-128-CBC + HMAC-SHA256) ──────────
 _ENCRYPTION_SALT = b"intelligraph-token-encryption-v1"
 _fernet = None
@@ -1063,8 +1114,10 @@ def _build_graphs(pid, proj, repo_dir, user_key=None):
                     if cid not in comms:
                         comms[cid] = []
                     comms[cid].append(nid)
+                crg_path = proj.get("crg_db_path") or (os.path.join(repo_dir, ".code-review-graph", "graph.db") if repo_dir else None)
+                community_labels = _enrich_community_labels(proj["graphify_data"], crg_path)
                 html_path = f"{TEMP_DIR}/intelligraph-gf-html-{user_key or 'unknown'}-{pid}-{int(time.time())}.html"
-                gf_export.to_html(G, comms, html_path, node_limit=VIZ_NODE_LIMIT)
+                gf_export.to_html(G, comms, html_path, community_labels=community_labels or None, node_limit=VIZ_NODE_LIMIT)
                 proj["graph_html_path"] = html_path
         except Exception as e:
             app.logger.warning("graph.html generation failed: %s", e, exc_info=True)
@@ -1663,14 +1716,15 @@ def project_graph_html(pid):
                     if cid is None:
                         cid = c.get("community_id")
                     if cid is not None:
-                        community_labels[cid] = c.get("label") or c.get("name") or f"Community {cid}"
+                        community_labels[cid] = c.get("label") or c.get("name") or ""
+                crg_labels = _enrich_community_labels(gf_data, proj.get("crg_db_path"))
                 comms = {}
                 for nid, ndata in G.nodes(data=True):
                     cid = ndata.get('community', 0)
                     if cid not in comms:
                         comms[cid] = []
-                        if cid not in community_labels:
-                            community_labels[cid] = f"Community {cid}"
+                        if cid not in community_labels or not community_labels.get(cid):
+                            community_labels[cid] = crg_labels.get(cid) or f"Community {cid}"
                     comms[cid].append(nid)
                 tmp_path = f"{TEMP_DIR}/intelligraph-gf-html-{_user_key()}-{pid}.html"
                 gf_export.to_html(G, comms, tmp_path, community_labels=community_labels, node_limit=VIZ_NODE_LIMIT)

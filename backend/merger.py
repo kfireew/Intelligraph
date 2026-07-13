@@ -39,7 +39,7 @@ _TASK_PRIORITY = {
 # Per-task-type chunk count caps
 _TASK_CHUNK_CAPS = {
     "architecture": 15,
-    "how_works": 10,
+    "how_works": 15,
     "explain": 10,
     "debug": 10,
     "refactor": 10,
