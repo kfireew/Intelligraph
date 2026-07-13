@@ -32,7 +32,7 @@ export function GuidePanel({ activePid, activeProject }) {
   // MCP config — auto-filled with real values
   // scriptPath is the full path to mcp_server_standalone.py on the user's machine.
   // Without it, the MCP runner can't find the script (relative paths break).
-  const scriptArg = scriptPath.trim() || "mcp_server_standalone.py";
+  const scriptArg = (scriptPath.trim().replace(/^["']|["']$/g, "") || "mcp_server_standalone.py");
   const mcpCommand = pid
     ? `python ${scriptArg} --intelligraph-url ${containerUrl} --project-id ${pid} --repo-dir .`
     : null;
