@@ -1101,9 +1101,9 @@ def _build_graphs(pid, proj, repo_dir, user_key=None):
     else:
         _vmsg("PARSE graph.db pid=%d - NOT FOUND", pid)
 
-    # Generate graph.html - skip if graphify CLI already wrote one (saves ~1GB RAM on large repos)
+    # Generate graph.html with CRG-enriched community labels
     pre_built_html = os.path.join(repo_dir, "graphify-out", "graph.html") if repo_dir else None
-    if proj.get("graphify_data") and not (pre_built_html and os.path.exists(pre_built_html)):
+    if proj.get("graphify_data"):
         try:
             import graphify
             import graphify.export as gf_export
@@ -1117,9 +1117,14 @@ def _build_graphs(pid, proj, repo_dir, user_key=None):
                     comms[cid].append(nid)
                 crg_path = proj.get("crg_db_path") or (os.path.join(repo_dir, ".code-review-graph", "graph.db") if repo_dir else None)
                 community_labels = _enrich_community_labels(proj["graphify_data"], crg_path)
+                for cid in comms:
+                    if cid not in community_labels or not community_labels[cid]:
+                        community_labels[cid] = f"Community {cid}"
                 html_path = f"{TEMP_DIR}/intelligraph-gf-html-{user_key or 'unknown'}-{pid}-{int(time.time())}.html"
-                gf_export.to_html(G, comms, html_path, community_labels=community_labels or None, node_limit=VIZ_NODE_LIMIT)
+                gf_export.to_html(G, comms, html_path, community_labels=community_labels, node_limit=VIZ_NODE_LIMIT)
                 proj["graph_html_path"] = html_path
+                if pre_built_html and os.path.exists(pre_built_html):
+                    os.remove(pre_built_html)
         except Exception as e:
             app.logger.warning("graph.html generation failed: %s", e, exc_info=True)
 
@@ -1175,9 +1180,9 @@ def _relocate_artifacts(pid, proj, repo_dir):
         proj["crg_db_path"] = crg_dst
         _vmsg("RELOCATE graph.db pid=%d - moved to %s", pid, crg_dst)
 
-    # Move graph.html (pre-built by graphify CLI)
+    # Move graph.html (pre-built by graphify CLI) — skip if we already generated enriched HTML
     html_src = os.path.join(repo_dir, "graphify-out", "graph.html")
-    if os.path.exists(html_src):
+    if os.path.exists(html_src) and not proj.get("graph_html_path"):
         html_dst = os.path.join(artifacts_proj_dir, "graph.html")
         shutil.move(html_src, html_dst)
         proj["graph_html_path"] = html_dst
