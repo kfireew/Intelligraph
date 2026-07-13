@@ -8,6 +8,7 @@ function copy(text) {
 
 export function GuidePanel({ activePid, activeProject }) {
   const [copied, setCopied] = useState(null);
+  const [scriptPath, setScriptPath] = useState("");
   const isReady = activeProject && ["ready", "cloned", "indexed"].includes(activeProject.status);
   const pid = activeProject?.id;
 
@@ -29,8 +30,11 @@ export function GuidePanel({ activePid, activeProject }) {
     : null;
 
   // MCP config — auto-filled with real values
+  // scriptPath is the full path to mcp_server_standalone.py on the user's machine.
+  // Without it, the MCP runner can't find the script (relative paths break).
+  const scriptArg = scriptPath.trim() || "mcp_server_standalone.py";
   const mcpCommand = pid
-    ? `python mcp_server_standalone.py --intelligraph-url ${containerUrl} --project-id ${pid}`
+    ? `python ${scriptArg} --intelligraph-url ${containerUrl} --project-id ${pid} --repo-dir .`
     : null;
 
   const claudeMcp = pid
@@ -38,7 +42,7 @@ export function GuidePanel({ activePid, activeProject }) {
         mcpServers: {
           intelligraph: {
             command: "python",
-            args: ["mcp_server_standalone.py", "--intelligraph-url", containerUrl, "--project-id", String(pid)],
+            args: [scriptArg, "--intelligraph-url", containerUrl, "--project-id", String(pid), "--repo-dir", "."],
           },
         },
       }, null, 2)
@@ -50,7 +54,8 @@ export function GuidePanel({ activePid, activeProject }) {
         mcp: {
           intelligraph: {
             type: "local",
-            command: ["python", "mcp_server_standalone.py", "--intelligraph-url", containerUrl, "--project-id", String(pid)],
+            command: ["python", scriptArg, "--intelligraph-url", containerUrl, "--project-id", String(pid), "--repo-dir", "."],
+            timeout: 10000,
           },
         },
       }, null, 2)
@@ -195,6 +200,17 @@ export function GuidePanel({ activePid, activeProject }) {
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-accent/10 hover:bg-accent/20 text-accent-light text-xs font-medium transition-colors no-underline">
                 <Download size={14} /> Download mcp_server_standalone.py
               </a>
+              <div className="mt-3">
+                <p className="text-[11px] font-bold text-muted uppercase tracking-wider mb-1.5">Full path to the script</p>
+                <p className="text-[10px] text-muted-subtle m-0 mb-1.5">Paste the full path where you saved the file. Without it, your AI assistant can't find the script.</p>
+                <input
+                  type="text"
+                  value={scriptPath}
+                  onChange={(e) => setScriptPath(e.target.value)}
+                  placeholder="C:\Users\me\projects\myapp\mcp_server_standalone.py"
+                  className="w-full px-2.5 py-1.5 rounded-lg bg-white/5 border border-glass-border text-[11px] text-text font-mono outline-none focus:border-accent/40 transition-colors"
+                />
+              </div>
             </div>
 
             {/* Step 3 */}
