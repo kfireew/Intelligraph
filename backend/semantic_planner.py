@@ -494,28 +494,31 @@ def route_query(prompt: str, graphify_data: dict = None, proj_id=None) -> list[d
     if router is None:
         return _regex_fallback(prompt)
 
-    # Route the full prompt first — produces better results for compound queries
-    # like "how does map work and how can I add entities to it" where clause
-    # splitting would route each half to a different (wrong) intent.
-    # Only split if the full prompt doesn't route at all.
+    # Route the full prompt first — gets the primary subject right (e.g. "map"
+    # from "how does map work and how entities work"). Then also split clauses
+    # and route each — catches genuinely compound queries with 2+ subjects.
+    # Dedup: drop clause tasks with same (intent, target) as the primary.
     full_result = _route_single(router, prompt, prompt, graphify_data, proj_id)
-    if full_result:
-        results = [full_result]
-        _vmsg("SEMANTIC PLANNER: prompt=%r -> %s", prompt[:80], results)
-        return results
 
-    # Fall back to clause splitting for genuinely compound queries
+    results = []
+    seen_keys = set()
+
+    if full_result:
+        results.append(full_result)
+        seen_keys.add((full_result["intent"], full_result.get("target", "")))
+
     clauses = _split_clauses(prompt)
     if len(clauses) <= 1:
         clauses = [prompt]
 
-    results = []
-    seen_intents = set()
     for clause in clauses:
         result = _route_single(router, clause, prompt, graphify_data, proj_id)
-        if result and result["intent"] not in seen_intents:
+        if not result:
+            continue
+        key = (result["intent"], result.get("target", ""))
+        if key not in seen_keys:
             results.append(result)
-            seen_intents.add(result["intent"])
+            seen_keys.add(key)
 
     if not results:
         return _regex_fallback(prompt)
