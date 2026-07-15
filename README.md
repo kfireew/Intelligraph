@@ -2,6 +2,8 @@
 
 Codebase intelligence platform — clone repos, index them with graphify + code-review-graph, and chat with an LLM about architecture, callers, callees, impact, and test coverage.
 
+> **Prefer something lightweight?** [Intelligraph-mini](https://github.com/kfireew/intelligraph-mini) is a local-first MCP server with the same graph intelligence (RRF hybrid search, multi-hop traversal, source snippets) — no Docker, no web UI, just tools.
+
 <img width="1774" height="887" alt="ChatGPT Image Jun 4, 2026, 01_33_41 AM (1)" src="https://github.com/user-attachments/assets/7ba01d69-56b1-4915-a846-13372519188f" />
 
 ## Architecture

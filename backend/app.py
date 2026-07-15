@@ -865,6 +865,20 @@ def download_graph_builder():
                      mimetype="text/x-python")
 
 
+@app.route("/download/intelligraph-mini")
+def download_intelligraph_mini():
+    """Download the Intelligraph-mini setup script.
+
+    Intelligraph-mini is a local-first MCP server with the same graph
+    intelligence (RRF hybrid search, multi-hop traversal, snippets, rationale)
+    but without Docker, web UI, SSO, or chat. Just tools for your agent.
+    """
+    setup_path = os.path.join(DOWNLOADS, "setup_intelligraph_mini.py")
+    return send_file(setup_path, as_attachment=True,
+                     download_name="setup_intelligraph_mini.py",
+                     mimetype="text/x-python")
+
+
 
 
 
@@ -3136,7 +3150,8 @@ def status():
         "downloads": {"mcp_server": "/download/mcp-server",
                      "graph_builder": "/download/graph-builder",
                      "agent": "/download/agent",
-                     "test_mcp": "/download/test-mcp"},
+                     "test_mcp": "/download/test-mcp",
+                     "intelligraph_mini": "/download/intelligraph-mini"},
         "project": proj,
         "projects": list(_projects().keys()),
         "build_queue_depth": build_queue.depth,
