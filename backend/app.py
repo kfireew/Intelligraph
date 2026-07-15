@@ -22,7 +22,7 @@ from urllib.parse import urlencode, urlparse
 
 import re
 import requests
-from flask import (Flask, Response, jsonify, redirect, render_template,
+from flask import (Flask, Response, g, jsonify, redirect, render_template,
                    request, send_file, send_from_directory, session,
                    stream_with_context, url_for)
 
@@ -44,6 +44,11 @@ else:
 # ── SSL: closed-network internal CAs ────────────────────────────
 LLM_SSL_VERIFY = os.environ.get("LLM_SSL_VERIFY", _DEFAULT_SSL_VERIFY).lower() == "true"
 GIT_SSL_VERIFY = os.environ.get("INTELLIGRAPH_GIT_SSL_VERIFY", _DEFAULT_GIT_SSL_VERIFY).lower() == "true"
+
+# ── Site URL: used by GuidePanel to generate MCP configs. When set (e.g.
+#    INTELLIGRAPH_SITE_URL=https://intelligraph.corp), the GuidePanel uses this
+#    instead of window.location.origin — important for os4 routes / private links.
+SITE_URL = os.environ.get("INTELLIGRAPH_SITE_URL", "")
 
 # ── Verbose console logging ────────────────────────────────────
 # Prints step-by-step progress to stdout so you can see exactly where
@@ -119,8 +124,8 @@ def _cleanup_orphans():
     except Exception:
         pass
 
-# ── Nx MCP: if enabled, keep repo_dir after build (Nx needs node_modules live) ──
-KEEP_REPO_AFTER_BUILD = os.environ.get("INTELLIGRAPH_ENABLE_NX_MCP", "false").lower() == "true"
+# ── Nx MCP: repo_dir deleted after build; live Nx runs on the MCP server (host) ──
+KEEP_REPO_AFTER_BUILD = False
 
 # ── SSO enforcement ──────────────────────────────────────────────
 # When true, mutating actions (clone, share, join, pull, delete) require SSO login.
@@ -156,12 +161,18 @@ def _get_db():
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("CREATE TABLE IF NOT EXISTS projects (id INTEGER, user_key TEXT, data TEXT, PRIMARY KEY(user_key, id))")
     conn.execute("CREATE TABLE IF NOT EXISTS chats (id TEXT PRIMARY KEY, user_key TEXT, project_id INTEGER, role TEXT, content TEXT, created_at TEXT)")
+    conn.execute("CREATE TABLE IF NOT EXISTS conversations (id TEXT PRIMARY KEY, project_id INTEGER, user_key TEXT, data TEXT, created_at TEXT, updated_at TEXT)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_conv_proj_user ON conversations(project_id, user_key)")
     conn.execute("CREATE TABLE IF NOT EXISTS uploads (user_key TEXT, project_id INTEGER, type TEXT, data TEXT, UNIQUE(user_key, project_id, type))")
     # Per-user fetch tokens (was per-project; migrated for shared projects)
     conn.execute("CREATE TABLE IF NOT EXISTS fetch_tokens_v2 (project_id INTEGER, user_key TEXT, token TEXT, created_at TEXT, PRIMARY KEY(project_id, user_key))")
     conn.execute("CREATE TABLE IF NOT EXISTS project_members (project_id INTEGER, user_key TEXT, joined_at TEXT, PRIMARY KEY(project_id, user_key))")
     conn.execute("CREATE TABLE IF NOT EXISTS project_share_keys (project_id INTEGER, share_key TEXT PRIMARY KEY, created_at TEXT)")
     conn.execute("CREATE TABLE IF NOT EXISTS mcp_tokens (project_id INTEGER, user_key TEXT, token TEXT, created_at TEXT, PRIMARY KEY(project_id, user_key))")
+    conn.execute("CREATE TABLE IF NOT EXISTS query_logs (id TEXT PRIMARY KEY, project_id INTEGER, user_key TEXT, prompt TEXT, intent TEXT, strategy TEXT, context_tokens INTEGER, answer_tokens INTEGER, retrieval_mode TEXT, trace_id TEXT, created_at TEXT)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_qlog_proj ON query_logs(project_id)")
+    conn.execute("CREATE TABLE IF NOT EXISTS feedback (id TEXT PRIMARY KEY, project_id INTEGER, user_key TEXT, trace_id TEXT, rating INTEGER, comment TEXT, created_at TEXT)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_fb_proj ON feedback(project_id)")
     _migrate_fetch_tokens(conn)
     return conn
 
@@ -371,6 +382,7 @@ def _get_shared_project(pid):
         pass
     return None
 
+
 def _store_fetch_token(pid, token, uk=None):
     """Store a git access token for sparse-fetch (Fernet-encrypted, per-user)."""
     if not token:
@@ -448,6 +460,32 @@ _NEXT_PID = {}   # {user_key: next_pid}`
 
 def _user_key():
     """Stable identifier for the current user across the session."""
+    # MCP token-authenticated request: use the token's user_key
+    mcp_uk = getattr(g, "mcp_user_key", None)
+    if not mcp_uk:
+        # SSO guard may not have run (REQUIRE_SSO=false) — check token directly
+        token = request.headers.get("X-MCP-Token", "").strip() if request else ""
+        if token:
+            try:
+                conn = _db_conn()
+                row = conn.execute(
+                    "SELECT user_key FROM mcp_tokens WHERE token = ?", (token,)
+                ).fetchone()
+                if row:
+                    mcp_uk = row["user_key"]
+                    g.mcp_user_key = mcp_uk
+            except Exception:
+                pass
+    if mcp_uk:
+        # Force reload if empty (projects may have been added after first load)
+        if mcp_uk not in _PROJECTS or not _PROJECTS.get(mcp_uk):
+            _load_projects(mcp_uk)
+        return mcp_uk
+    # If an MCP token was provided but invalid, don't fall through to "local"
+    # — return a throwaway key with no projects
+    mcp_token_present = request.headers.get("X-MCP-Token", "").strip() if request else ""
+    if mcp_token_present and not mcp_uk:
+        return f"_mcp_invalid_{secrets.token_hex(4)}"
     u = get_user()
     if u and u.get("source") == "sso":
         uk = session.get("sso_sub", u["name"])
@@ -511,18 +549,31 @@ def _validate_mcp_token(path):
     MCP tokens are per-project, stored in the mcp_tokens table.
     Only allows access to /graph/ endpoints (read-only retrieval).
     Returns the project_id if valid, None otherwise.
+
+    Retries with a fresh DB connection if the cached connection is stale
+    (e.g. after Docker restart, WAL lock, concurrent write). This fixes
+    persistent 401s where the token IS valid but the query fails silently.
     """
     token = request.headers.get("X-MCP-Token", "").strip()
     if not token:
         return None
-    try:
-        conn = _db_conn()
-        row = conn.execute(
-            "SELECT project_id FROM mcp_tokens WHERE token = ?", (token,)
-        ).fetchone()
-        return row["project_id"] if row else None
-    except Exception:
-        return None
+    for attempt in range(2):
+        try:
+            conn = _db_conn()
+            row = conn.execute(
+                "SELECT project_id, user_key FROM mcp_tokens WHERE token = ?", (token,)
+            ).fetchone()
+            if row:
+                g.mcp_user_key = row["user_key"]
+                return row["project_id"]
+            return None
+        except Exception:
+            if attempt == 0:
+                global _db
+                _db = None
+            else:
+                return None
+    return None
 
 
 @app.before_request
@@ -541,6 +592,12 @@ def _sso_guard():
             return None
     # /graph/ endpoints: allow with valid MCP token (X-MCP-Token header)
     if path.startswith("/graph/"):
+        pid = _validate_mcp_token(path)
+        if pid is not None:
+            return None  # valid MCP token — allow
+        # No valid MCP token — fall through to SSO check
+    # /api/ endpoints: allow with valid MCP token (X-MCP-Token header)
+    if path.startswith("/api/"):
         pid = _validate_mcp_token(path)
         if pid is not None:
             return None  # valid MCP token — allow
@@ -1090,6 +1147,21 @@ def _build_graphs(pid, proj, repo_dir, user_key=None):
 
     # code-review-graph build - stream output to temp log file
     _vmsg("CRG START pid=%d - code-review-graph build (cwd=%s)", pid, repo_dir)
+
+    # Write .code-review-graphignore to exclude build artifacts from indexing
+    ignore_path = os.path.join(repo_dir, ".code-review-graphignore")
+    try:
+        with open(ignore_path, "w", encoding="utf-8") as igf:
+            igf.write(
+                "# Auto-generated by Intelligraph — excludes build artifacts from CRG index\n"
+                "build-resources/**\nbundle/**\ndevtools/**\nredux-dev-tools/**\n"
+                "out/**\n.nuxt/**\n.cache/**\n*.chunk.js\n*.bundle.js\n*.pack.js\n"
+                "*.dev.js\n*.umd.js\n**/generated/**\n**/codegen/**\n**/__generated__/**\n"
+                "*.ngfactory.ts\n*.ngstyle.ts\n*.shim.ngstyle.ts\nwebpack/**\n.vite/**\n"
+            )
+    except Exception:
+        pass
+
     crg_env = {**os.environ, "CRG_PARSE_WORKERS": os.environ.get("CRG_PARSE_WORKERS", "4")}
     crg_log = os.path.join(TEMP_DIR, f"crg-{pid}-{int(time.time())}.log")
     try:
@@ -1135,6 +1207,46 @@ def _build_graphs(pid, proj, repo_dir, user_key=None):
         _vmsg("PARSE graph.db pid=%d - crg_nodes=%d crg_edges=%d", pid, cn, ce)
     else:
         _vmsg("PARSE graph.db pid=%d - NOT FOUND", pid)
+
+    # ── Store source code snippets in CRG DB for later retrieval ──
+    # Reads source files from repo_dir before it's deleted, stores ~500 char
+    # snippets per node. Enables code snippets in lightweight path + MCP tools.
+    if os.path.exists(crg_path) and repo_dir:
+        try:
+            snip_conn = sqlite3.connect(crg_path)
+            snip_conn.execute("CREATE TABLE IF NOT EXISTS node_snippets (node_name TEXT PRIMARY KEY, snippet TEXT)")
+            nodes_with_lines = snip_conn.execute(
+                "SELECT name, file_path, line_start, line_end FROM nodes "
+                "WHERE line_start IS NOT NULL AND file_path IS NOT NULL AND name IS NOT NULL"
+            ).fetchall()
+            file_groups = defaultdict(list)
+            for n in nodes_with_lines:
+                file_groups[n[1]].append(n)
+            stored = 0
+            for fp, node_list in file_groups.items():
+                full_path = fp if os.path.isabs(fp) else os.path.join(repo_dir, fp)
+                if not os.path.isfile(full_path):
+                    continue
+                try:
+                    with open(full_path, "r", errors="replace") as src_f:
+                        lines = src_f.readlines()
+                except Exception:
+                    continue
+                for n in node_list:
+                    start = max(0, (n[2] or 1) - 1)
+                    end = min(len(lines), n[3] or start + 20)
+                    snippet = "".join(lines[start:end])[:500]
+                    if snippet.strip():
+                        snip_conn.execute(
+                            "INSERT OR REPLACE INTO node_snippets (node_name, snippet) VALUES (?, ?)",
+                            (n[0], snippet)
+                        )
+                        stored += 1
+            snip_conn.commit()
+            snip_conn.close()
+            _vmsg("SNIPPETS pid=%d - stored %d snippets from %d files", pid, stored, len(file_groups))
+        except Exception as e:
+            _vmsg("SNIPPETS pid=%d - failed: %s", pid, str(e)[:200])
 
     # Generate graph.html with CRG-enriched community labels
     pre_built_html = os.path.join(repo_dir, "graphify-out", "graph.html") if repo_dir else None
@@ -1571,15 +1683,46 @@ def create_mcp_token(pid):
     The token is stored in the mcp_tokens table and allows the MCP
     server to access /graph/ endpoints without a session cookie.
     Scoped per-project, revocable.
+
+    On each generate, any previous token for this project (across ALL
+    user_keys) is deleted first — guaranteeing exactly one active token
+    per project. This prevents stale-token accumulation when the user_key
+    drifts (anon session regeneration, SSO sub changes) and implements
+    "disable old + assign new" semantics for the local MCP single-user flow.
     """
     proj = _projects().get(pid) or _get_shared_project(pid)
     if not proj:
         return jsonify({"error": "project not found"}), 404
     uk = _user_key()
     token = "mcp_" + secrets.token_urlsafe(32)
+    conn = _db_conn()
+    conn.execute("DELETE FROM mcp_tokens WHERE project_id=?", (pid,))
     _store_mcp_token(pid, uk, token)
-    _vmsg("MCP TOKEN CREATED pid=%d user=%s", pid, uk)
+    _vmsg("MCP TOKEN CREATED pid=%d user=%s (old tokens cleared)", pid, uk)
     return jsonify({"mcp_token": token, "project_id": pid})
+
+
+@app.route("/projects/<int:pid>/mcp-token", methods=["GET"])
+def get_mcp_token(pid):
+    """Return the current MCP token for this project + user. Requires SSO auth.
+
+    Lets the UI repopulate the token field on a fresh browser/session so
+    the user does not need to regenerate (which would invalidate the old
+    token they may still have wired into their MCP config).
+    """
+    proj = _projects().get(pid) or _get_shared_project(pid)
+    if not proj:
+        return jsonify({"error": "project not found"}), 404
+    uk = _user_key()
+    try:
+        conn = _db_conn()
+        row = conn.execute(
+            "SELECT token FROM mcp_tokens WHERE project_id=? AND user_key=?",
+            (pid, uk),
+        ).fetchone()
+    except Exception:
+        row = None
+    return jsonify({"token": (row["token"] if row else ""), "mcp_token": (row["token"] if row else ""), "project_id": pid})
 
 
 @app.route("/projects/<int:pid>/mcp-token", methods=["DELETE"])
@@ -1965,6 +2108,14 @@ def graph_retrieve_context():
                 overrides[k] = int(v) if k != "crg_ratio" else float(v)
             except (ValueError, TypeError):
                 pass
+    # Resolution % — scales the context budget (merger DEFAULT_TOKEN_BUDGET).
+    # 100 = full budget (12000 chars), 25 = quarter (3000 chars). Floor at 2000.
+    rpct = data.get("resolution_pct")
+    if rpct is not None:
+        try:
+            overrides["resolution_pct"] = max(1, min(100, int(rpct)))
+        except (ValueError, TypeError):
+            pass
     try:
         result = retrieve_context(proj, prompt, overrides=overrides if overrides else None)
         _vmsg("RETRIEVE DONE pid=%s strategy=%s files=%d context_len=%d",
@@ -1983,11 +2134,11 @@ def graph_retrieve_context():
 def graph_crg():
     """Direct CRG intelligence endpoint for MCP server and external tools.
 
-    Body: { project_id, mode, query }
-    mode: "search" | "architecture" | "impact" | "flows"
+    Body: { project_id, mode, query, embedding_weight, max_hops, max_nodes, max_tokens, snippet_chars }
+    mode: "search" | "semantic" | "hybrid" | "architecture" | "impact" | "flows" | "traverse" | "snippets" | "rationale"
     query: symbol name or search text
 
-    Returns structured CRG data (symbols, communities, blast-radius, flows).
+    Returns structured CRG data (symbols, communities, blast-radius, flows, subgraphs, snippets, rationale).
     """
     data = request.get_json(force=True) or {}
     project_id = data.get("project_id")
@@ -2011,16 +2162,32 @@ def graph_crg():
         provider = providers[0]
         if mode == "search":
             results = provider.search(query, max_results=20)
+        elif mode == "semantic":
+            results = provider.semantic_search(query, max_results=20)
+        elif mode == "hybrid":
+            ew = float(data.get("embedding_weight", 0.4))
+            results = provider.hybrid_search(query, max_results=20, embedding_weight=ew)
         elif mode == "architecture":
             results = provider.architecture()
         elif mode == "impact":
             results = provider.impact(query, max_depth=2)
         elif mode == "flows":
             results = provider.flows(query)
+        elif mode == "traverse":
+            max_hops = int(data.get("max_hops", 2))
+            max_nodes = int(data.get("max_nodes", 30))
+            max_tokens = int(data.get("max_tokens", 400))
+            results = provider.traverse(query, max_hops=max_hops, max_nodes=max_nodes, max_tokens=max_tokens)
+        elif mode == "snippets":
+            names = data.get("node_names", [query] if query else [])
+            max_chars = int(data.get("snippet_chars", 500))
+            results = provider.get_snippets(names, max_chars=max_chars)
+        elif mode == "rationale":
+            results = provider.get_rationale(query)
         else:
             return jsonify({"error": f"unknown mode: {mode}"}), 400
 
-        _vmsg("CRG ENDPOINT: pid=%s mode=%s query=%s -> %d results", project_id, mode, query[:50], len(results))
+        _vmsg("CRG ENDPOINT: pid=%s mode=%s query=%s -> %d results", project_id, mode, query[:50], len(results) if isinstance(results, list) else len(results.keys()))
         return jsonify({"mode": mode, "query": query, "results": results})
     except Exception as e:
         _vmsg("CRG ENDPOINT ERROR: %s", str(e)[:300])
@@ -2028,32 +2195,396 @@ def graph_crg():
         return jsonify({"error": str(e)[:200]}), 500
 
 
+# ── Graph traversal endpoints (lightweight, always-fresh) ───────────
+
+_JUNK_PATH_PATTERNS = [
+    "/build/", "/bundle/", "/devtools/", "/dist/", "/out/",
+    ".min.js", ".chunk.js", ".bundle.js", ".pack.js",
+    "/generated/", "/codegen/", "/__generated__/",
+    ".ngfactory.ts", "redux-dev-tools", "build-resources",
+]
+
+
+def _is_junk_path(fp):
+    if not fp:
+        return True
+    lower = fp.lower() if isinstance(fp, str) else ""
+    return any(p in lower for p in _JUNK_PATH_PATTERNS)
+
+
+@app.route("/graph/node", methods=["GET"])
+def graph_node():
+    """Get node details + neighbors from graph.json + CRG metadata.
+
+    Query params: project_id, name, depth (1-3, default 1),
+                  include_rationale (default true), include_snippets (default false)
+    """
+    project_id = request.args.get("project_id", type=int)
+    name = request.args.get("name", "").strip()
+    depth = min(3, max(1, request.args.get("depth", 1, type=int)))
+    include_rationale = request.args.get("include_rationale", "true").lower() != "false"
+    include_snippets = request.args.get("include_snippets", "false").lower() == "true"
+    if not project_id or not name:
+        return jsonify({"error": "project_id and name required"}), 400
+
+    proj = _projects().get(project_id) or _get_shared_project(project_id)
+    if not proj:
+        return jsonify({"error": "project not found"}), 404
+
+    gf = proj.get("graphify_data")
+    if not gf:
+        return jsonify({"error": "no graph data"}), 200
+
+    nodes = gf.get("nodes", [])
+    links = gf.get("links", [])
+    name_lower = name.lower()
+
+    # Find node: exact match first, then substring
+    matched = None
+    for n in nodes:
+        for key in (n.get("id"), n.get("label"), n.get("qualified_name")):
+            if key and key.lower() == name_lower:
+                matched = n
+                break
+        if matched:
+            break
+    if not matched:
+        for n in nodes:
+            for key in (n.get("id"), n.get("label"), n.get("qualified_name")):
+                if key and name_lower in key.lower():
+                    matched = n
+                    break
+            if matched:
+                break
+
+    if not matched:
+        return jsonify({"node": None, "neighbors": []}), 200
+
+    node_id = matched.get("id") or matched.get("label")
+    node_label = matched.get("label") or node_id
+    source_file = matched.get("source_file") or ""
+
+    # CRG enrichment (signature, is_test)
+    crg_meta = {}
+    crg_path = proj.get("crg_db_path")
+    if crg_path and os.path.exists(crg_path):
+        try:
+            import sqlite3 as _sqlite3
+            conn = _sqlite3.connect(f"file:{crg_path}?mode=ro", uri=True)
+            conn.row_factory = _sqlite3.Row
+            rows = conn.execute(
+                "SELECT name, kind, signature, is_test, community_id FROM nodes WHERE name = ? OR qualified_name = ? LIMIT 5",
+                (node_label, node_label)
+            ).fetchall()
+            if rows:
+                r = rows[0]
+                crg_meta = {
+                    "kind": r["kind"], "signature": r["signature"] or "",
+                    "is_test": bool(r["is_test"]), "community_id": r["community_id"],
+                }
+            conn.close()
+        except Exception:
+            pass
+
+    # Build 1-hop neighbors from links
+    neighbors = []
+    for l in links:
+        src = l.get("source") or l.get("from")
+        tgt = l.get("target") or l.get("to")
+        edge_type = l.get("type") or l.get("kind") or "link"
+        confidence = l.get("confidence", "")
+        if src == node_id or src == node_label:
+            # Outgoing edge — this node calls/uses/imports the target
+            tgt_node = None
+            for n in nodes:
+                if (n.get("id") or n.get("label")) == tgt:
+                    tgt_node = n
+                    break
+            tgt_file = (tgt_node or {}).get("source_file", "")
+            if not _is_junk_path(tgt_file):
+                neighbors.append({
+                    "name": tgt, "edge": edge_type, "direction": "outgoing",
+                    "confidence": confidence, "file": tgt_file,
+                })
+        elif tgt == node_id or tgt == node_label:
+            # Incoming edge — something calls/uses/imports this node
+            src_node = None
+            for n in nodes:
+                if (n.get("id") or n.get("label")) == src:
+                    src_node = n
+                    break
+            src_file = (src_node or {}).get("source_file", "")
+            if not _is_junk_path(src_file):
+                neighbors.append({
+                    "name": src, "edge": edge_type, "direction": "incoming",
+                    "confidence": confidence, "file": src_file,
+                })
+
+    # Degree = total neighbors
+    degree = len(neighbors)
+
+    # Community from graphify
+    community = matched.get("community") or matched.get("community_id")
+
+    result = {
+        "node": {
+            "name": node_label,
+            "id": node_id,
+            "file": source_file,
+            "kind": crg_meta.get("kind") or matched.get("file_type") or "unknown",
+            "community": community,
+            "degree": degree,
+            "signature": crg_meta.get("signature", ""),
+            "is_test": crg_meta.get("is_test", False),
+        },
+        "neighbors": neighbors[:30],
+    }
+
+    # Multi-hop: when depth > 1, also get CRG-based subgraph
+    if depth > 1 and crg_path and os.path.exists(crg_path):
+        try:
+            from crg_intelligence import get_providers
+            proj["id"] = project_id
+            providers = get_providers(proj)
+            if providers:
+                provider = providers[0]
+                subgraph = provider.traverse(node_label, max_hops=depth, max_nodes=30, max_tokens=400)
+                result["subgraph"] = subgraph
+        except Exception:
+            pass
+
+    # Rationale notes (from graphify rationale_for edges)
+    if include_rationale:
+        try:
+            rationale_nodes = {n.get("id") or n.get("label"): n for n in nodes if n.get("file_type") == "rationale"}
+            if rationale_nodes:
+                rationale = []
+                for l in links:
+                    src = l.get("source") or l.get("from")
+                    tgt = l.get("target") or l.get("to")
+                    rel = l.get("type") or l.get("kind") or ""
+                    rn = None
+                    if src == node_id and rel == "rationale_for" and tgt in rationale_nodes:
+                        rn = rationale_nodes[tgt]
+                    elif tgt == node_id and rel == "rationale_for" and src in rationale_nodes:
+                        rn = rationale_nodes[src]
+                    if rn:
+                        text = rn.get("label") or rn.get("id") or ""
+                        if text:
+                            rationale.append({
+                                "text": text[:500],
+                                "confidence": l.get("confidence", ""),
+                                "source_file": rn.get("source_file", ""),
+                            })
+                if rationale:
+                    result["rationale"] = rationale
+        except Exception:
+            pass
+
+    # Source code snippets (from CRG node_snippets table)
+    if include_snippets and crg_path and os.path.exists(crg_path):
+        try:
+            from crg_intelligence import get_providers
+            proj["id"] = project_id
+            providers = get_providers(proj)
+            if providers:
+                provider = providers[0]
+                snippet_names = [node_label] + [n["name"] for n in neighbors[:5]]
+                snippets = provider.get_snippets(snippet_names, max_chars=500)
+                if snippets:
+                    result["snippets"] = snippets
+        except Exception:
+            pass
+
+    return jsonify(result)
+
+
+@app.route("/graph/path", methods=["GET"])
+def graph_path():
+    """Shortest path between two nodes via BFS on graph.json links."""
+    project_id = request.args.get("project_id", type=int)
+    src_name = request.args.get("from", "").strip()
+    dst_name = request.args.get("to", "").strip()
+    if not project_id or not src_name or not dst_name:
+        return jsonify({"error": "project_id, from, and to required"}), 400
+
+    proj = _projects().get(project_id) or _get_shared_project(project_id)
+    if not proj:
+        return jsonify({"error": "project not found"}), 404
+
+    gf = proj.get("graphify_data")
+    if not gf:
+        return jsonify({"error": "no graph data"}), 200
+
+    nodes = gf.get("nodes", [])
+    links = gf.get("links", [])
+
+    # Build adjacency list
+    adj = {}
+    node_lookup = {}
+    for n in nodes:
+        nid = n.get("id") or n.get("label")
+        if nid:
+            adj.setdefault(nid, [])
+            node_lookup[nid] = n
+            node_lookup[nid.lower()] = n
+
+    for l in links:
+        src = l.get("source") or l.get("from")
+        tgt = l.get("target") or l.get("to")
+        if src and tgt:
+            adj.setdefault(src, []).append((tgt, l))
+            adj.setdefault(tgt, []).append((src, l))
+
+    # Resolve source and target (exact, then substring)
+    src_id = None
+    dst_id = None
+    src_lower = src_name.lower()
+    dst_lower = dst_name.lower()
+    for nid in node_lookup:
+        if nid.lower() == src_lower:
+            src_id = [k for k in node_lookup if k.lower() == src_lower][0]
+            break
+    if not src_id:
+        for nid, n in node_lookup.items():
+            label = (n.get("label") or "").lower()
+            if src_lower in label or src_lower in nid.lower():
+                src_id = nid
+                break
+    for nid in node_lookup:
+        if nid.lower() == dst_lower:
+            dst_id = [k for k in node_lookup if k.lower() == dst_lower][0]
+            break
+    if not dst_id:
+        for nid, n in node_lookup.items():
+            label = (n.get("label") or "").lower()
+            if dst_lower in label or dst_lower in nid.lower():
+                dst_id = nid
+                break
+
+    if not src_id or not dst_id:
+        return jsonify({"path": [], "hops": 0, "error": "node not found"}), 200
+
+    # BFS
+    from collections import deque
+    visited = {src_id}
+    queue = deque([(src_id, [(src_id, None)])])
+    while queue:
+        current, path = queue.popleft()
+        if current == dst_id:
+            result_path = []
+            for nid, edge_link in path:
+                n = node_lookup.get(nid, {})
+                fp = n.get("source_file", "")
+                entry = {"name": n.get("label") or nid, "file": fp}
+                if edge_link:
+                    entry["edge"] = edge_link.get("type") or edge_link.get("kind") or "link"
+                result_path.append(entry)
+            return jsonify({"path": result_path, "hops": len(result_path) - 1})
+        for neighbor, edge_link in adj.get(current, []):
+            if neighbor not in visited:
+                visited.add(neighbor)
+                queue.append((neighbor, path + [(neighbor, edge_link)]))
+
+    return jsonify({"path": [], "hops": 0, "error": "no path found"}), 200
+
+
+@app.route("/graph/communities", methods=["GET"])
+def graph_communities():
+    """List communities from graph.json with key nodes."""
+    project_id = request.args.get("project_id", type=int)
+    if not project_id:
+        return jsonify({"error": "project_id required"}), 400
+
+    proj = _projects().get(project_id) or _get_shared_project(project_id)
+    if not proj:
+        return jsonify({"error": "project not found"}), 404
+
+    gf = proj.get("graphify_data")
+    if not gf:
+        return jsonify([]), 200
+
+    nodes = gf.get("nodes", [])
+    links = gf.get("links", [])
+
+    # Group nodes by community
+    communities = {}
+    for n in nodes:
+        cid = n.get("community") or n.get("community_id")
+        if cid is None:
+            continue
+        communities.setdefault(cid, []).append(n)
+
+    # Build degree scores
+    degree = {}
+    for l in links:
+        for key in (l.get("source"), l.get("target"), l.get("from"), l.get("to")):
+            if key:
+                degree[key] = degree.get(key, 0) + 1
+
+    result = []
+    for cid, cnodes in sorted(communities.items(), key=lambda x: -len(x[1])):
+        # Key nodes = top 3 by degree
+        key_nodes = sorted(cnodes, key=lambda n: -degree.get(n.get("id") or n.get("label"), 0))[:3]
+        key_nodes_list = [
+            {"name": n.get("label") or n.get("id"), "file": n.get("source_file", ""),
+             "degree": degree.get(n.get("id") or n.get("label"), 0)}
+            for n in key_nodes if not _is_junk_path(n.get("source_file", ""))
+        ]
+        # Dominant language
+        langs = {}
+        for n in cnodes:
+            ft = n.get("file_type") or ""
+            if ft:
+                langs[ft] = langs.get(ft, 0) + 1
+        dominant = max(langs, key=langs.get) if langs else "unknown"
+
+        result.append({
+            "id": cid,
+            "name": f"Community {cid}",
+            "size": len(cnodes),
+            "key_nodes": key_nodes_list,
+            "dominant_language": dominant,
+        })
+
+    return jsonify(result[:20])
+
+
 @app.route("/api/v1/projects/<int:pid>/completions", methods=["POST"])
 def project_completions(pid):
-    """Stateless completion endpoint for n8n/external automation.
+    """Stateless completion endpoint for n8n/external automation + web chat.
 
     Each call creates a fresh LLM request with fresh project context.
-    No LLM conversation state is persisted between calls.
+    No LLM conversation state is persisted between calls — callers pass
+    conversation_history as input.
 
     Request:
         {
-            "prompt": "Explain OCR correction",
-            "session_mode": "stateless",  # default; only mode supported
-            "conversation_id": null,      # rejected in stateless mode
-            "include_context": true,      # default true; retrieve project context
-            "llm_url": "...",             # optional, falls back to INTELLIGRAPH_LLM_URL env
-            "llm_token": "...",           # optional, falls back to INTELLIGRAPH_LLM_TOKEN env
-            "model": "gpt-4o-mini",       # optional, falls back to INTELLIGRAPH_LLM_MODEL env
-            "metadata": {"source": "n8n"} # optional, pass-through
+            "prompt": "Show me code",
+            "conversation_history": [     # optional, last N messages for follow-up context
+                {"role": "user", "content": "How to add entities to map"},
+                {"role": "assistant", "content": "To add entities, modify..."}
+            ],
+            "include_context": true,       # default true; retrieve project context
+            "llm_url": "...",              # optional, falls back to INTELLIGRAPH_LLM_URL env
+            "llm_token": "...",            # optional, falls back to INTELLIGRAPH_LLM_TOKEN env
+            "model": "Qwen/Qwen3.6-27B-FP8",   # optional, falls back to INTELLIGRAPH_LLM_MODEL env
+            "max_tokens": 4096,            # optional, default 4096
+            "resolution_pct": 100          # optional, 1-100, scales context budget
         }
 
     Response:
         {
             "answer": "...",
-            "model": "gpt-4o-mini",
+            "sources": {                   # null if no context retrieved
+                "context": "...",
+                "files": ["src/map.py", ...],
+                "context_stats": {}
+            },
+            "matched_nodes": [...],
+            "model": "Qwen/Qwen3.6-27B-FP8",
             "session_mode": "stateless",
             "trace_id": "req_...",
-            "conversation_reused": false,
             "context_used": true,
             "context_stats": {},
             "path_warnings": [],
@@ -2065,67 +2596,293 @@ def project_completions(pid):
     if not prompt:
         return jsonify({"error": "prompt required"}), 400
 
-    # Session mode: only stateless is supported
-    session_mode = data.get("session_mode", "stateless")
-    if session_mode != "stateless":
-        return jsonify({"error": "unsupported_session_mode", "session_mode": session_mode,
-                        "supported_modes": ["stateless"]}), 400
-
-    # conversation_id rejected in stateless mode to avoid ambiguity
-    if data.get("conversation_id") is not None:
-        return jsonify({"error": "conversation_id not supported in stateless mode",
-                        "session_mode": session_mode}), 400
-
     proj = _projects().get(pid)
     if not proj:
-        return jsonify({"error": "project not found"}), 404
+        return jsonify({"error": "project not found", "intent": "planner", "context_used": False}), 404
 
     # LLM provider: request body > env vars > default
     llm_url = (data.get("llm_url") or os.environ.get("INTELLIGRAPH_LLM_URL") or "").strip().rstrip("/")
     llm_token = data.get("llm_token") or os.environ.get("INTELLIGRAPH_LLM_TOKEN") or ""
-    model = data.get("model") or os.environ.get("INTELLIGRAPH_LLM_MODEL") or "gpt-4o-mini"
+    model = data.get("model") or os.environ.get("INTELLIGRAPH_LLM_MODEL") or "Qwen/Qwen3.6-27B-FP8"
+    max_tokens = int(data.get("max_tokens") or 4096)
 
     if not llm_url:
-        return jsonify({"error": "llm_url required (set INTELLIGRAPH_LLM_URL env var or pass in body)",
-                        "session_mode": session_mode}), 400
+        return jsonify({"error": "llm_url required (set INTELLIGRAPH_LLM_URL env var or pass in body)", "intent": "planner", "context_used": False}), 400
 
     host = urlparse(llm_url).hostname
     if host not in ALLOWED_LLM_HOSTS:
-        return jsonify({"error": "provider not allowed", "session_mode": session_mode}), 403
+        return jsonify({"error": "provider not allowed", "intent": "planner", "context_used": False}), 403
 
-    # Retrieve fresh context per request (default: yes for automation)
+    # Retrieval always uses the current prompt as-is.
+    # The LLM resolves follow-up references (e.g. "show me code") from
+    # conversation history — no heuristic query composition needed.
+    conversation_history = data.get("conversation_history") or []
+    retrieval_query = prompt
+
+    # Retrieve fresh context per request (default: yes)
     include_context = data.get("include_context")
     if include_context is None:
         include_context = True
     retrieved = ""
+    retrieved_files = []
     context_stats = {}
+    matched_nodes = []
+    retrieval_strategy = "planner"
+
+    # ── Lightweight intent routing ──
+    # For simple intents (what_is, coverage), use graph traversal instead of
+    # the heavy 7-step pipeline. Saves ~80% tokens for simple questions.
     if include_context and proj.get("graphify_data"):
         try:
+            from planner import detect_intent
+            intent_info = detect_intent(prompt)
+            intent = intent_info.get("intent", "what_is")
+            target = intent_info.get("target", prompt[:80])
+            retrieval_strategy = intent
+
+            if intent in ("what_is", "coverage") and target:
+                # Read tuning params
+                embedding_weight = float(data.get("embedding_weight", 0.4))
+                snippet_chars = int(data.get("snippet_chars", 1500))
+                traversal_depth = int(data.get("traversal_depth", 1))
+
+                # Lightweight path: search CRG + get node from graph
+                gf = proj["graphify_data"]
+                nodes = gf.get("nodes", [])
+                links = gf.get("links", [])
+                target_lower = target.lower().strip()
+
+                # Find node (exact → substring)
+                matched_node = None
+                for n in nodes:
+                    for key in (n.get("id"), n.get("label"), n.get("qualified_name")):
+                        if key and key.lower() == target_lower:
+                            matched_node = n
+                            break
+                    if matched_node:
+                        break
+                if not matched_node:
+                    for n in nodes:
+                        label = (n.get("label") or "").lower()
+                        if target_lower in label:
+                            matched_node = n
+                            break
+
+                # Semantic search fallback: if no graphify match, try CRG hybrid search
+                # to find the closest symbol by meaning (e.g. "add entity" → "upsertEntity")
+                if not matched_node and proj.get("crg_db_path"):
+                    try:
+                        from crg_intelligence import get_providers
+                        proj["id"] = pid
+                        providers = get_providers(proj)
+                        if providers:
+                            provider = providers[0]
+                            sem_results = provider.hybrid_search(target, max_results=5, embedding_weight=embedding_weight)
+                            for sr in sem_results:
+                                sem_name = sr.get("name", "")
+                                if sem_name:
+                                    for n in nodes:
+                                        for key in (n.get("id"), n.get("label"), n.get("qualified_name")):
+                                            if key and key.lower() == sem_name.lower():
+                                                matched_node = n
+                                                break
+                                        if matched_node:
+                                            break
+                                if matched_node:
+                                    break
+                    except Exception:
+                        pass
+
+                if matched_node:
+                    node_id = matched_node.get("id") or matched_node.get("label")
+                    # Build 1-hop neighbors
+                    neighbors_list = []
+                    for l in links:
+                        src = l.get("source") or l.get("from")
+                        tgt = l.get("target") or l.get("to")
+                        edge_type = l.get("type") or l.get("kind") or "link"
+                        conf = l.get("confidence", "")
+                        if src == node_id:
+                            tgt_node = next((n for n in nodes if (n.get("id") or n.get("label")) == tgt), {})
+                            fp = tgt_node.get("source_file", "")
+                            if not _is_junk_path(fp):
+                                neighbors_list.append(f"  -> {tgt} ({edge_type}) -- {fp}")
+                        elif tgt == node_id:
+                            src_node = next((n for n in nodes if (n.get("id") or n.get("label")) == src), {})
+                            fp = src_node.get("source_file", "")
+                            if not _is_junk_path(fp):
+                                neighbors_list.append(f"  <- {src} ({edge_type}) -- {fp}")
+
+                    retrieved_files = list(set(
+                        n.get("source_file", "") for n in nodes
+                        if (n.get("id") or n.get("label")) == node_id or
+                           any((n.get("id") or n.get("label")) == l.get("target", l.get("to")) and (l.get("source", l.get("from")) == node_id) for l in links)
+                    ))
+                    retrieved_files = [f for f in retrieved_files if f and not _is_junk_path(f)]
+
+                    # Build compact context
+                    # Try to enrich community name from CRG
+                    comm_name = f"Community {matched_node.get('community', '?')}"
+                    crg_db = proj.get("crg_db_path")
+                    if crg_db and os.path.exists(crg_db) and matched_node.get("community") is not None:
+                        try:
+                            import sqlite3 as _sqlite3
+                            _conn = _sqlite3.connect(f"file:{crg_db}?mode=ro", uri=True)
+                            _conn.row_factory = _sqlite3.Row
+                            _row = _conn.execute("SELECT name FROM communities WHERE id = ?", (matched_node["community"],)).fetchone()
+                            if _row and _row["name"]:
+                                comm_name = _row["name"]
+                            _conn.close()
+                        except Exception:
+                            pass
+
+                    context_parts = [
+                        f"Symbol: {matched_node.get('label', node_id)}",
+                        f"File: {matched_node.get('source_file', 'unknown')}",
+                        f"Community: {comm_name}",
+                        f"Connections ({len(neighbors_list)}):",
+                        "\n".join(neighbors_list[:20]),
+                    ]
+
+                    # Source code snippets (from CRG node_snippets table)
+                    snippet_count = 0
+                    if snippet_chars > 0 and crg_db and os.path.exists(crg_db):
+                        try:
+                            from crg_intelligence import get_providers
+                            providers = get_providers(proj)
+                            if providers:
+                                provider = providers[0]
+                                snippet_names = [matched_node.get("label", node_id)] + [n.split("(")[0].strip().replace("-> ", "").replace("<- ", "") for n in neighbors_list[:3]]
+                                snippets = provider.get_snippets(snippet_names, max_chars=snippet_chars // 3)
+                                if snippets:
+                                    snippet_lines = ["Source:"]
+                                    chars_used = 0
+                                    for sname, sdata in snippets.items():
+                                        snip = sdata.get("snippet", "")
+                                        if snip and chars_used + len(snip) < snippet_chars:
+                                            snippet_lines.append(f"  {sname} ({sdata.get('file_path', '')}:{sdata.get('line_start', 0)}):")
+                                            snippet_lines.append(f"    {snip[:snippet_chars // 3]}")
+                                            chars_used += len(snip)
+                                            snippet_count += 1
+                                    if snippet_count > 0:
+                                        context_parts.append("\n".join(snippet_lines))
+                        except Exception:
+                            pass
+
+                    # Rationale notes (from graphify rationale_for edges)
+                    rationale_count = 0
+                    try:
+                        rationale_nodes = {n.get("id") or n.get("label"): n for n in nodes if n.get("file_type") == "rationale"}
+                        if rationale_nodes:
+                            notes = []
+                            for l in links:
+                                src = l.get("source") or l.get("from")
+                                tgt = l.get("target") or l.get("to")
+                                rel = l.get("type") or l.get("kind") or ""
+                                rn = None
+                                if src == node_id and rel == "rationale_for" and tgt in rationale_nodes:
+                                    rn = rationale_nodes[tgt]
+                                elif tgt == node_id and rel == "rationale_for" and src in rationale_nodes:
+                                    rn = rationale_nodes[src]
+                                if rn:
+                                    text = rn.get("label") or rn.get("id") or ""
+                                    if text and len(notes) < 5:
+                                        notes.append(f"  {text[:200]}")
+                                        rationale_count += 1
+                            if notes:
+                                context_parts.append("Notes:")
+                                context_parts.extend(notes)
+                    except Exception:
+                        pass
+
+                    retrieved = "\n".join(context_parts)
+                    context_stats = {
+                        "mode": "lightweight", "intent": intent,
+                        "neighbors": len(neighbors_list),
+                        "snippets": snippet_count,
+                        "rationale": rationale_count,
+                    }
+                    matched_nodes = [{"id": node_id, "label": matched_node.get("label", node_id)}]
+                else:
+                    # Node not found — fall through to heavy pipeline
+                    retrieval_strategy = "planner"  # reset, will be set by retrieve_context
+                    raise RuntimeError("node not found, falling back to heavy pipeline")
+
+            if retrieval_strategy in ("what_is", "coverage") and retrieved:
+                pass  # Already have lightweight context
+            else:
+                raise RuntimeError("use heavy pipeline")
+
+        except RuntimeError:
+            # Fall through to heavy pipeline
+            pass
+        except Exception as e:
+            app.logger.warning("Lightweight intent routing failed: %s", e)
+
+    # Heavy pipeline (for complex intents or lightweight fallback)
+    if include_context and proj.get("graphify_data") and not retrieved:
+        try:
             from retrieval import retrieve_context
-            result = retrieve_context(proj, prompt)
+            overrides = {}
+            # Budget chars — explicit context budget (from TuningPanel slider)
+            budget_chars = data.get("budget_chars")
+            if budget_chars is not None:
+                try:
+                    overrides["budget_chars"] = max(3000, min(48000, int(budget_chars)))
+                except (ValueError, TypeError):
+                    pass
+            # Chunk caps — per-task-type chunk count overrides (from TuningPanel table)
+            chunk_caps = data.get("chunk_caps")
+            if chunk_caps and isinstance(chunk_caps, dict):
+                overrides["chunk_caps"] = chunk_caps
+            result = retrieve_context(proj, retrieval_query, overrides=overrides if overrides else None)
             retrieved = result.get("context", "")
+            retrieved_files = result.get("files", [])
+            retrieval_strategy = result.get("strategy", "planner")
             context_stats = result.get("context_stats", {})
+            matched_nodes = result.get("matched_nodes", [])
         except Exception as e:
             app.logger.warning("Completions context retrieval failed: %s", e)
 
-    # Build fresh LLM messages: system + context + prompt
+    # ── Build LLM messages ──
     system_msg = (
-        "You are an expert software architect helping a developer understand a codebase. "
-        "Give a direct, concise answer. Do not output your thinking process or say \"Let me analyze\" -- just answer. "
-        "Use the provided context as your only source of truth. Mention specific file paths. "
-        "If context is insufficient, state what is missing. "
-        "Do not invent files, functions, imports, or APIs. Format file references as a markdown list with newlines."
+        "You are an expert software architect helping a developer understand a codebase.\n\n"
+        "Answer in this structure:\n"
+        "## Summary\n"
+        "2-3 sentences answering the question directly.\n\n"
+        "## Explanation\n"
+        "Detailed walk-through of the logic. Why, not just what.\n\n"
+        "## Code\n"
+        "Include code snippets when the question is about implementation. "
+        "For coverage, find-all, or architecture questions, list the relevant files "
+        "and explain what they do -- code is not always needed.\n\n"
+        "## References\n"
+        "- `path/to/file.py` -- what it does\n\n"
+        "Do not give one-line answers. Be thorough.\n"
+        "Do not invent files, functions, imports, or APIs.\n"
+        "Answer based on what you have -- do not declare context insufficient."
     )
     messages = [{"role": "system", "content": system_msg}]
+
+    # Inject retrieved context as a separate user message (ground truth)
     if retrieved:
-        messages.append({"role": "user", "content": f"Project context:\n{retrieved}\n\nQuestion: {prompt}"})
-    else:
-        messages.append({"role": "user", "content": prompt})
+        messages.append({"role": "user", "content": f"Project context:\n{retrieved}"})
+
+    # Add conversation history (last 4 messages, each capped at 2000 chars)
+    history = conversation_history[-4:] if conversation_history else []
+    for m in history:
+        role = m.get("role", "user")
+        content = (m.get("content") or "")[:2000]
+        if content:
+            messages.append({"role": role, "content": content})
+
+    # Current prompt (after context + history so LLM sees it last)
+    messages.append({"role": "user", "content": prompt})
 
     payload = {
         "model": model,
         "messages": messages,
-        "max_tokens": 4096,
+        "max_tokens": max_tokens,
         "temperature": 0.2,
     }
 
@@ -2145,46 +2902,213 @@ def project_completions(pid):
             return jsonify({
                 "error": f"LLM returned {resp.status_code}",
                 "detail": resp.text[:1000],
+                "intent": retrieval_strategy,
+                "context_used": bool(retrieved),
+                "context_preview": retrieved[:500] if retrieved else "",
+                "context_stats": context_stats,
+                "files": retrieved_files[:10],
                 "trace_id": trace_id,
-                "session_mode": session_mode,
-                "conversation_reused": False,
             }), 502
         body = resp.json()
         choices = body.get("choices", [])
         if not choices:
             return jsonify({
                 "error": "empty LLM response",
+                "intent": retrieval_strategy,
+                "context_used": bool(retrieved),
+                "context_preview": retrieved[:500] if retrieved else "",
+                "context_stats": context_stats,
                 "trace_id": trace_id,
-                "session_mode": session_mode,
-                "conversation_reused": False,
             }), 502
         answer = choices[0].get("message", {}).get("content", "")
+        if not answer.strip():
+            answer = "(No response content. Try rephrasing your question.)"
         path_warnings = _verify_paths(pid, answer) or []
+
+        # Compute context savings metadata
+        context_tokens = len(retrieved) // 4 if retrieved else 0
+        full_corpus_tokens = (proj.get("nodes", 0) * 200) // 4
+        reduction_factor = round(full_corpus_tokens / context_tokens, 1) if context_tokens > 0 else 0
+        context_savings = {
+            "context_tokens": context_tokens,
+            "full_corpus_tokens": full_corpus_tokens,
+            "reduction_factor": reduction_factor,
+            "baseline": "full_corpus",
+        }
+
+        # Beta telemetry: log query for analytics
+        try:
+            uk = _user_key()
+            conn = _db_conn()
+            log_id = secrets.token_hex(12)
+            conn.execute(
+                "INSERT INTO query_logs(id, project_id, user_key, prompt, intent, strategy, context_tokens, answer_tokens, retrieval_mode, trace_id, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (log_id, pid, uk, prompt[:500], retrieval_strategy, context_stats.get("mode", "heavy"),
+                 context_tokens, len(answer) // 4, "lightweight" if context_stats.get("mode") == "lightweight" else "heavy",
+                 trace_id, datetime.now(timezone.utc).isoformat())
+            )
+            conn.commit()
+        except Exception:
+            pass
+
         return jsonify({
             "answer": answer,
+            "intent": retrieval_strategy,
+            "sources": {
+                "context": retrieved,
+                "files": retrieved_files,
+                "context_stats": context_stats,
+            } if retrieved else None,
+            "matched_nodes": matched_nodes,
             "model": model,
-            "session_mode": session_mode,
             "trace_id": trace_id,
-            "conversation_reused": False,
             "context_used": bool(retrieved),
             "context_stats": context_stats if retrieved else {},
+            "context_savings": context_savings,
             "path_warnings": path_warnings,
             "usage": body.get("usage", {}),
         })
     except requests.exceptions.Timeout:
         return jsonify({
             "error": "LLM request timed out",
+            "intent": retrieval_strategy,
+            "context_used": bool(retrieved),
+            "context_preview": retrieved[:500] if retrieved else "",
+            "context_stats": context_stats,
+            "files": retrieved_files[:10],
             "trace_id": trace_id,
-            "session_mode": session_mode,
-            "conversation_reused": False,
         }), 504
     except Exception as e:
         return jsonify({
             "error": str(e),
+            "intent": retrieval_strategy,
+            "context_used": bool(retrieved),
+            "context_preview": retrieved[:500] if retrieved else "",
+            "context_stats": context_stats,
+            "files": retrieved_files[:10],
             "trace_id": trace_id,
-            "session_mode": session_mode,
-            "conversation_reused": False,
         }), 502
+
+
+# ── Conversation persistence (SQLite-backed) ────────────────────
+
+@app.route("/api/v1/projects/<int:pid>/conversations", methods=["GET"])
+def get_conversations(pid):
+    """Load all conversations for a project from SQLite."""
+    uk = _user_key()
+    try:
+        conn = _db_conn()
+        rows = conn.execute(
+            "SELECT data FROM conversations WHERE project_id = ? AND user_key = ? ORDER BY created_at DESC",
+            (pid, uk)
+        ).fetchall()
+        convs = [json.loads(r["data"]) for r in rows]
+        return jsonify(convs)
+    except Exception as e:
+        app.logger.warning("Failed to load conversations: %s", e)
+        return jsonify([])
+
+
+@app.route("/api/v1/projects/<int:pid>/conversations", methods=["PUT"])
+def save_conversations(pid):
+    """Save full conversation list for a project (replace all)."""
+    uk = _user_key()
+    convs = request.get_json(force=True) or []
+    if not isinstance(convs, list):
+        return jsonify({"error": "expected array"}), 400
+    try:
+        conn = _db_conn()
+        conn.execute("DELETE FROM conversations WHERE project_id = ? AND user_key = ?", (pid, uk))
+        now = datetime.now(timezone.utc).isoformat()
+        for c in convs[:50]:
+            cid = c.get("id") or secrets.token_hex(8)
+            conn.execute(
+                "INSERT OR REPLACE INTO conversations(id, project_id, user_key, data, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?)",
+                (cid, pid, uk, json.dumps(c), c.get("createdAt", now), now)
+            )
+        conn.commit()
+        return jsonify({"status": "ok", "count": len(convs)})
+    except Exception as e:
+        app.logger.warning("Failed to save conversations: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/v1/projects/<int:pid>/conversations/<conv_id>", methods=["DELETE"])
+def delete_conversation(pid, conv_id):
+    """Delete a single conversation from SQLite."""
+    uk = _user_key()
+    try:
+        conn = _db_conn()
+        conn.execute(
+            "DELETE FROM conversations WHERE id = ? AND project_id = ? AND user_key = ?",
+            (conv_id, pid, uk)
+        )
+        conn.commit()
+        return jsonify({"status": "ok"})
+    except Exception as e:
+        app.logger.warning("Failed to delete conversation: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+# ── Beta telemetry: feedback + query logs ────────────────────────
+
+@app.route("/api/v1/projects/<int:pid>/feedback", methods=["POST"])
+def submit_feedback(pid):
+    """Submit feedback (thumbs up/down + optional comment) for a response."""
+    uk = _user_key()
+    data = request.get_json(force=True) or {}
+    trace_id = data.get("trace_id", "")
+    rating = int(data.get("rating", 0))  # 1 = up, -1 = down, 0 = neutral
+    comment = (data.get("comment") or "").strip()[:1000]
+    if not trace_id:
+        return jsonify({"error": "trace_id required"}), 400
+    try:
+        conn = _db_conn()
+        fb_id = secrets.token_hex(12)
+        conn.execute(
+            "INSERT INTO feedback(id, project_id, user_key, trace_id, rating, comment, created_at) VALUES(?, ?, ?, ?, ?, ?, ?)",
+            (fb_id, pid, uk, trace_id, rating, comment, datetime.now(timezone.utc).isoformat())
+        )
+        conn.commit()
+        return jsonify({"status": "ok"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/v1/projects/<int:pid>/query-logs", methods=["GET"])
+def get_query_logs(pid):
+    """Get query logs for analytics (beta telemetry dashboard)."""
+    uk = _user_key()
+    try:
+        conn = _db_conn()
+        rows = conn.execute(
+            "SELECT prompt, intent, strategy, context_tokens, answer_tokens, retrieval_mode, trace_id, created_at "
+            "FROM query_logs WHERE project_id = ? AND user_key = ? ORDER BY created_at DESC LIMIT 200",
+            (pid, uk)
+        ).fetchall()
+        logs = [dict(r) for r in rows]
+        # Aggregate stats
+        total = len(logs)
+        lightweight_count = sum(1 for l in logs if l["retrieval_mode"] == "lightweight")
+        avg_context = sum(l["context_tokens"] or 0 for l in logs) / total if total else 0
+        avg_answer = sum(l["answer_tokens"] or 0 for l in logs) / total if total else 0
+        intent_counts = defaultdict(int)
+        for l in logs:
+            intent_counts[l["intent"] or "unknown"] += 1
+        return jsonify({
+            "logs": logs,
+            "stats": {
+                "total_queries": total,
+                "lightweight_queries": lightweight_count,
+                "heavy_queries": total - lightweight_count,
+                "avg_context_tokens": round(avg_context),
+                "avg_answer_tokens": round(avg_answer),
+                "intent_distribution": dict(intent_counts),
+            }
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 
 @app.route("/")
 def index():
@@ -2208,6 +3132,7 @@ def status():
     from build_queue import build_queue
     return jsonify({
         "sso_configured": bool(SSO_ISSUER),
+        "site_url": SITE_URL,
         "downloads": {"mcp_server": "/download/mcp-server",
                      "graph_builder": "/download/graph-builder",
                      "agent": "/download/agent",
@@ -2292,4 +3217,4 @@ if __name__ == "__main__":
     print(f"Downloads: /download/mcp-server, /download/graph-builder")
     print(f"LLM relay: /llm/ask")
     print(f"Server:    http://{args.host}:{args.port}")
-    app.run(host=args.host, port=args.port, debug=False)
+    app.run(host=args.host, port=args.port, debug=False, threaded=True)

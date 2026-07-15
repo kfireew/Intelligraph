@@ -19,7 +19,7 @@ export function useLLM() {
     () => localStorage.getItem("llm-token") || ""
   );
   const [model, setModel] = useState(
-    () => localStorage.getItem("llm-model") || ""
+    () => localStorage.getItem("llm-model") || "Qwen/Qwen3.6-27B-FP8"
   );
   const [models, setModels] = useState(() => {
     try {

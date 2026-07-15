@@ -181,7 +181,7 @@ def _build_routes():
             score_threshold=_SCORE_THRESHOLD,
         ),
         Route(
-            name="tests",
+            name="coverage",
             utterances=[
                 "find tests for this module",
                 "show test coverage",
@@ -194,6 +194,15 @@ def _build_routes():
                 "find test cases for",
                 "show me the test suite",
                 "what is covered by tests",
+                "find all occurrences of this",
+                "show me every place this is used",
+                "all instances of this pattern",
+                "where does this happen everywhere",
+                "find all places this function appears",
+                "show me all files that use this",
+                "every place this pattern occurs",
+                "find all usages of this",
+                "all places this is referenced",
             ],
             score_threshold=_SCORE_THRESHOLD,
         ),
@@ -228,21 +237,7 @@ def _build_routes():
             ],
             score_threshold=_SCORE_THRESHOLD,
         ),
-        Route(
-            name="security",
-            utterances=[
-                "security vulnerabilities in this",
-                "is this vulnerable to injection",
-                "check for security issues",
-                "what are the security risks",
-                "is this code safe",
-                "find potential security flaws",
-                "check for XSS or CSRF",
-                "are there any exploits in this",
-                "security audit of this module",
-            ],
-            score_threshold=_SCORE_THRESHOLD,
-        ),
+        # (security route removed — not needed)
         Route(
             name="nx_architecture",
             utterances=[
@@ -414,7 +409,7 @@ def _get_encoder():
 
         _vmsg("SEMANTIC PLANNER: loading encoder from %s", _MODEL_DIR)
         _encoder_instance = SentenceTransformer(_MODEL_DIR)
-        _vmsg("SEMANTIC PLANNER: encoder ready (dim=%d)", _encoder_instance.get_embedding_dimension())
+        _vmsg("SEMANTIC PLANNER: encoder ready (dim=%d)", _encoder_instance.get_sentence_embedding_dimension())
         return _encoder_instance
     except Exception as e:
         _encoder_error = str(e)
@@ -561,8 +556,8 @@ def _extract_target(clause: str, intent: str, full_prompt: str, graphify_data: d
     """
     # If the clause is just the intent word itself (e.g. "architecture"),
     # it's a generic query — no specific target to extract.
-    _GENERIC_CLAUSES = {"architecture", "overview", "structure", "tests",
-                        "security", "impact", "debug", "refactor"}
+    _GENERIC_CLAUSES = {"architecture", "overview", "structure", "coverage",
+                        "impact", "debug", "refactor"}
     if clause.lower().strip() in _GENERIC_CLAUSES:
         return clause.lower().strip()
 
@@ -611,8 +606,8 @@ _TASK_EXTRACTORS = {
     "debug":         r"(?:bug|error|issue|problem|debug|trace)\s*(?:in|of|with)?\s*(.+)?",
     "refactor":      r"(?:refactor|rewrite|improve|optimize)\s*(.+)?",
     "nx_architecture": r"(?:nx|workspace|project|app|lib)\s*(?:architectur|structure|layout|organized|depend|target)?\s*(.+)?",
-    "security":      r"(?:security|vulnerability|exploit|injection|xss|csrf)\s*(?:in|of|for)?\s*(.+)?",
-    "tests":         r"(?:test|coverage|spec|unit|integration)\s*(?:for|of|in)?\s*(.+)?",
+    # (security extractor removed — not needed)
+    "coverage":      r"(?:test|coverage|spec|unit|integration|find all|all (?:places|occurrences|instances)|every (?:file|place|location))\s*(?:of|for|in)?\s*(.+)?",
 }
 
 

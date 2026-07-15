@@ -32,11 +32,15 @@ JUDGE_MODEL = "qwen/qwen3.6-35b-a3b"
 GRID_FILE_COUNTS = [5, 10, 15, 20, 25, 30]
 GRID_CRG_RATIOS = [0.0, 0.2, 0.33, 0.5, 0.66, 1.0]
 GRID_DEPTHS = [1, 2, 3]
+GRID_EMBEDDING_WEIGHTS = [0.0, 0.2, 0.4, 0.5, 0.6, 0.8, 1.0]
+GRID_SNIPPET_CHARS = [0, 500, 1000, 1500, 2000, 3000]
 
 # Reduced grid for quick runs (24 combos instead of 108)
 GRID_FILE_COUNTS_FAST = [5, 10, 15, 20]
 GRID_CRG_RATIOS_FAST = [0.0, 0.33, 0.5]
 GRID_DEPTHS_FAST = [1, 2]
+GRID_EMBEDDING_WEIGHTS_FAST = [0.0, 0.5, 1.0]
+GRID_SNIPPET_CHARS_FAST = [0, 1000, 2000]
 
 JUDGE_SYSTEM_PROMPT = """You are evaluating a code assistant's answer for quality.
 Rate the answer from 1-5 on three dimensions:
@@ -58,7 +62,8 @@ def load_benchmark(path):
         return json.load(f)
 
 
-def retrieve(base_url, project_id, prompt, file_count=None, crg_ratio=None, depth=None):
+def retrieve(base_url, project_id, prompt, file_count=None, crg_ratio=None, depth=None,
+             embedding_weight=None, snippet_chars=None):
     params = {}
     if file_count is not None:
         params["file_count"] = file_count
@@ -66,6 +71,10 @@ def retrieve(base_url, project_id, prompt, file_count=None, crg_ratio=None, dept
         params["crg_ratio"] = crg_ratio
     if depth is not None:
         params["depth"] = depth
+    if embedding_weight is not None:
+        params["embedding_weight"] = embedding_weight
+    if snippet_chars is not None:
+        params["snippet_chars"] = snippet_chars
     try:
         r = requests.post(
             f"{base_url}/graph/retrieve-context",
@@ -97,6 +106,34 @@ def score_retrieval(result, expected_files):
         "context_chars": len(context),
         "context_tokens": len(context) // 4,
     }
+
+
+def compute_mrr(retrieved_files, expected_files):
+    """Compute Mean Reciprocal Rank across queries.
+
+    For each query, find the rank (1-indexed) of the first relevant file in the
+    retrieved list. The reciprocal rank (RR) is 1/rank, or 0 if no relevant
+    file appears in the retrieved list. MRR is the mean RR across all queries.
+
+    Args:
+        retrieved_files: list of ordered lists, one per query (retrieval order).
+        expected_files: list of relevant-file lists, one per query.
+
+    Returns:
+        float in [0.0, 1.0].
+    """
+    rrs = []
+    for retrieved, expected in zip(retrieved_files, expected_files):
+        expected_set = set(expected)
+        rr = 0.0
+        for rank, f in enumerate(retrieved, start=1):
+            if f in expected_set:
+                rr = 1.0 / rank
+                break
+        rrs.append(rr)
+    if not rrs:
+        return 0.0
+    return sum(rrs) / len(rrs)
 
 
 def llm_answer(base_url, openrouter_key, model, context, prompt, max_tokens=500):
@@ -207,8 +244,10 @@ def main():
     # Select grid
     if args.fast:
         grid_fc, grid_crg, grid_depth = GRID_FILE_COUNTS_FAST, GRID_CRG_RATIOS_FAST, GRID_DEPTHS_FAST
+        grid_ew, grid_sc = GRID_EMBEDDING_WEIGHTS_FAST, GRID_SNIPPET_CHARS_FAST
     else:
         grid_fc, grid_crg, grid_depth = GRID_FILE_COUNTS, GRID_CRG_RATIOS, GRID_DEPTHS
+        grid_ew, grid_sc = GRID_EMBEDDING_WEIGHTS, GRID_SNIPPET_CHARS
 
     # Group by task_type
     by_type = {}
@@ -218,31 +257,42 @@ def main():
     print(f"Task types: {', '.join(f'{k}({len(v)})' for k, v in by_type.items())}")
 
     # ── Stage 1: Free retrieval sweep ──
-    combos = list(itertools.product(grid_fc, grid_crg, grid_depth))
+    combos = list(itertools.product(grid_fc, grid_crg, grid_depth, grid_ew, grid_sc))
     print(f"\n=== STAGE 1: Retrieval Sweep ({len(combos)} combos x {len(benchmark)} queries = {len(combos) * len(benchmark)} calls) ===")
 
     results = {}
-    for i, (fc, crg, depth) in enumerate(combos):
-        print(f"[{i+1}/{len(combos)}] files={fc} crg={crg} depth={depth}", end="")
+    for i, (fc, crg, depth, ew, sc) in enumerate(combos):
+        print(f"[{i+1}/{len(combos)}] files={fc} crg={crg} depth={depth} emb={ew} snip={sc}", end="")
         combo_scores = []
+        retrieved_lists = []
+        expected_lists = []
         for q in benchmark:
-            r = retrieve(args.base, args.project_id, q["prompt"], file_count=fc, crg_ratio=crg, depth=depth)
+            r = retrieve(args.base, args.project_id, q["prompt"], file_count=fc, crg_ratio=crg,
+                         depth=depth, embedding_weight=ew, snippet_chars=sc)
             if r:
                 s = score_retrieval(r, q.get("expected_files", []))
                 combo_scores.append(s)
+                retrieved_lists.append(r.get("files", []))
+                expected_lists.append(q.get("expected_files", []))
             else:
                 combo_scores.append({"recall": 0, "precision": 0, "f1": 0, "context_tokens": 0})
+                retrieved_lists.append([])
+                expected_lists.append(q.get("expected_files", []))
         avg_f1 = sum(s["f1"] for s in combo_scores) / max(len(combo_scores), 1)
         avg_recall = sum(s["recall"] for s in combo_scores) / max(len(combo_scores), 1)
         avg_tokens = sum(s["context_tokens"] for s in combo_scores) / max(len(combo_scores), 1)
-        print(f"  recall={avg_recall:.3f}  f1={avg_f1:.3f}  tokens={int(avg_tokens)}")
-        results[(fc, crg, depth)] = {
+        avg_mrr = compute_mrr(retrieved_lists, expected_lists)
+        print(f"  recall={avg_recall:.3f}  f1={avg_f1:.3f}  mrr={avg_mrr:.3f}  tokens={int(avg_tokens)}")
+        results[(fc, crg, depth, ew, sc)] = {
             "file_count": fc,
             "crg_ratio": crg,
             "depth": depth,
+            "embedding_weight": ew,
+            "snippet_chars": sc,
             "avg_f1": round(avg_f1, 3),
             "avg_recall": round(avg_recall, 3),
             "avg_tokens": int(avg_tokens),
+            "avg_mrr": round(avg_mrr, 3),
         }
 
     # Find top K per task type (using all queries for now, can refine per-type)
@@ -250,7 +300,7 @@ def main():
     top_combos = ranked_combos[:args.top_k]
     print(f"\nTop {args.top_k} combos:")
     for c in top_combos:
-        print(f"  files={c['file_count']} crg={c['crg_ratio']} depth={c['depth']}  f1={c['avg_f1']}  tokens={c['avg_tokens']}")
+        print(f"  files={c['file_count']} crg={c['crg_ratio']} depth={c['depth']} emb={c.get('embedding_weight')} snip={c.get('snippet_chars')}  f1={c['avg_f1']}  mrr={c['avg_mrr']}  tokens={c['avg_tokens']}")
 
     # ── Stage 2: LLM judge ──
     if args.stage == 2:
@@ -263,11 +313,13 @@ def main():
         stage2_results = []
         for combo in top_combos:
             fc, crg, depth = combo["file_count"], combo["crg_ratio"], combo["depth"]
-            print(f"\n  Combo: files={fc} crg={crg} depth={depth}")
+            ew, sc = combo.get("embedding_weight"), combo.get("snippet_chars")
+            print(f"\n  Combo: files={fc} crg={crg} depth={depth} emb={ew} snip={sc}")
             scores = []
             for j, q in enumerate(benchmark):
                 print(f"    [{j+1}/{len(benchmark)}] {q['prompt'][:60]}...", end="")
-                r = retrieve(args.base, args.project_id, q["prompt"], file_count=fc, crg_ratio=crg, depth=depth)
+                r = retrieve(args.base, args.project_id, q["prompt"], file_count=fc, crg_ratio=crg,
+                             depth=depth, embedding_weight=ew, snippet_chars=sc)
                 if not r or not r.get("context"):
                     print(" — no context, skip")
                     continue
@@ -294,28 +346,36 @@ def main():
             })
             print(f"  → avg_judge={avg_judge:.2f}  halluc_rate={halluc_rate:.3f}")
 
-        # Final ranking: normalize f1, judge, token savings
+        # Final ranking: normalize f1, judge, token savings, mrr
         f1_vals = [r["avg_f1"] for r in stage2_results]
         judge_vals = [r["judge_score"] for r in stage2_results]
         token_vals = [r["avg_tokens"] for r in stage2_results]
+        mrr_vals = [r["avg_mrr"] for r in stage2_results]
         norm_f1 = normalize(f1_vals)
         norm_judge = normalize(judge_vals)
         norm_tokens = [1 - n for n in normalize(token_vals)]  # fewer tokens = better
+        norm_mrr = normalize(mrr_vals)
         for i, r in enumerate(stage2_results):
-            r["final_score"] = round(0.5 * norm_f1[i] + 0.3 * norm_judge[i] + 0.2 * norm_tokens[i], 3)
+            r["final_score"] = round(0.4 * norm_f1[i] + 0.25 * norm_judge[i] + 0.15 * norm_tokens[i] + 0.2 * norm_mrr[i], 3)
 
         stage2_results.sort(key=lambda x: -x["final_score"])
         best = stage2_results[0]
         print(f"\n=== BEST: files={best['file_count']} crg={best['crg_ratio']} depth={best['depth']} ===")
-        print(f"  f1={best['avg_f1']}  judge={best['judge_score']}  halluc={best['hallucination_rate']}  tokens={best['avg_tokens']}  final={best['final_score']}")
+        print(f"  f1={best['avg_f1']}  judge={best['judge_score']}  halluc={best['hallucination_rate']}  mrr={best['avg_mrr']}  tokens={best['avg_tokens']}  final={best['final_score']}")
     else:
         best = top_combos[0]
         print(f"\n=== BEST (Stage 1 only): files={best['file_count']} crg={best['crg_ratio']} depth={best['depth']}  f1={best['avg_f1']} ===")
 
     profile = {
         best.get("task_type", "architecture"): {
-            "optimal": {"files": best["file_count"], "crg_ratio": best["crg_ratio"], "depth": best["depth"]},
-            "scores": {k: v for k, v in best.items() if k not in ("file_count", "crg_ratio", "depth")},
+            "optimal": {
+                "files": best["file_count"],
+                "crg_ratio": best["crg_ratio"],
+                "depth": best["depth"],
+                "embedding_weight": best.get("embedding_weight"),
+                "snippet_chars": best.get("snippet_chars"),
+            },
+            "scores": {k: v for k, v in best.items() if k not in ("file_count", "crg_ratio", "depth", "embedding_weight", "snippet_chars")},
         },
         "_generated": datetime.now().isoformat(),
         "_stage": args.stage,

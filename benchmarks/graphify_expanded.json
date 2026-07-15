@@ -1,0 +1,95 @@
+[
+  {
+    "prompt": "How does the graph builder work?",
+    "expected_files": ["graphify/build.py", "graphify/extract.py"],
+    "task_type": "how_works"
+  },
+  {
+    "prompt": "How does clustering work?",
+    "expected_files": ["graphify/cluster.py"],
+    "task_type": "how_works"
+  },
+  {
+    "prompt": "How does HTML export work?",
+    "expected_files": ["graphify/export.py", "graphify/callflow_html.py"],
+    "task_type": "how_works"
+  },
+  {
+    "prompt": "How does the LLM integration work?",
+    "expected_files": ["graphify/llm.py"],
+    "task_type": "how_works"
+  },
+  {
+    "prompt": "What is the main entry point?",
+    "expected_files": ["graphify/__main__.py", "graphify/__init__.py"],
+    "task_type": "what_is"
+  },
+  {
+    "prompt": "How does deduplication work?",
+    "expected_files": ["graphify/dedup.py"],
+    "task_type": "how_works"
+  },
+  {
+    "prompt": "add entity",
+    "expected_files": ["graphify/extract.py"],
+    "task_type": "semantic",
+    "note": "Tests semantic search: 'add entity' should match 'upsertEntity' or similar via embeddings"
+  },
+  {
+    "prompt": "remove item from collection",
+    "expected_files": ["graphify/extract.py"],
+    "task_type": "semantic",
+    "note": "Tests semantic search: 'remove item' should match 'delete' functions"
+  },
+  {
+    "prompt": "how are nodes connected to each other",
+    "expected_files": ["graphify/build.py"],
+    "task_type": "semantic",
+    "note": "Tests semantic search: 'connected' should match 'edges' or 'links' logic"
+  },
+  {
+    "prompt": "where is the validation logic",
+    "expected_files": ["graphify/extract.py"],
+    "task_type": "semantic",
+    "note": "Tests semantic search: 'validation' should match 'validate' functions"
+  },
+  {
+    "prompt": "what calls the build function and what do those callers call",
+    "expected_files": ["graphify/build.py", "graphify/__main__.py"],
+    "task_type": "multihop",
+    "note": "Tests multi-hop traversal: 2-hop from build function"
+  },
+  {
+    "prompt": "trace the path from entry point to graph export",
+    "expected_files": ["graphify/__main__.py", "graphify/export.py"],
+    "task_type": "multihop",
+    "note": "Tests path traversal between two symbols"
+  },
+  {
+    "prompt": "what is the blast radius of changing the extract function",
+    "expected_files": ["graphify/extract.py", "graphify/build.py"],
+    "task_type": "impact",
+    "note": "Tests impact analysis (already supported, now with multi-hop depth)"
+  },
+  {
+    "prompt": "why does the dedup module exist",
+    "expected_files": ["graphify/dedup.py"],
+    "task_type": "rationale",
+    "note": "Tests rationale node surfacing"
+  },
+  {
+    "prompt": "show test coverage for the clustering module",
+    "expected_files": ["graphify/cluster.py"],
+    "task_type": "coverage"
+  },
+  {
+    "prompt": "find all occurrences of the build_from_json function",
+    "expected_files": ["graphify/build.py"],
+    "task_type": "coverage"
+  },
+  {
+    "prompt": "architecture overview of the graphify system",
+    "expected_files": ["graphify/__main__.py"],
+    "task_type": "architecture"
+  }
+]

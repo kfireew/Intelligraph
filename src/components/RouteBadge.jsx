@@ -8,7 +8,7 @@ const iconMap = {
   impact: Zap,
   how_works: Lightbulb,
   what_is: HelpCircle,
-  tests: FlaskConical,
+  coverage: FlaskConical,
 };
 
 const colorMap = {
@@ -19,7 +19,7 @@ const colorMap = {
   impact: "text-orange bg-orange/10",
   how_works: "text-purple-400 bg-purple-400/10",
   what_is: "text-accent-light bg-accent/10",
-  tests: "text-green bg-green/10",
+  coverage: "text-green bg-green/10",
 };
 
 export function RouteBadge({ route }) {

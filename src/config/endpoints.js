@@ -19,5 +19,6 @@ export const endpoints = {
 
   // Downloads
   downloadMCPServer: "/download/mcp-server",
-  downloadGraphBuilder: "/download/graph-builder"
+  downloadGraphBuilder: "/download/graph-builder",
+  downloadAgent: "/download/agent"
 };

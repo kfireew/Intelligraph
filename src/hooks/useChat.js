@@ -1,34 +1,46 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from "react";
-import { llmService } from "../services/llmService";
 
-// ── Prompt builders (graphify + CRG + code-chunks context) ──
-
-const SYSTEM_PROMPT = `You are an expert software architect helping a developer understand a codebase.
-
-Give a direct, concise answer. Do not output your thinking process or say "Let me analyze" -- just answer.
-Use the provided context as your only source of truth. Mention specific file paths.
-If context is insufficient, append a section at the very end starting with "## Missing Information" followed by a concise list of what files, functions, or symbols you need to fully answer. Do not weave "missing" notes into the main answer body.
-Do not invent files, functions, imports, or APIs. Format file references as a markdown list with newlines (one per line).`;
-
-
-
-// ── LocalStorage persistence for conversations ──
+// ── Conversation persistence (SQLite backend + localStorage cache) ──
 
 const STORAGE_PREFIX = "intelligraph-chat-";
+const SAVE_DEBOUNCE_MS = 1000;
 
-function loadConversations(pid) {
+async function loadConversations(pid) {
   if (!pid) return [];
+  try {
+    const r = await fetch(`/api/v1/projects/${pid}/conversations`);
+    if (r.ok) return await r.json();
+  } catch { /* server unavailable */ }
+  // Fallback to localStorage
   try {
     const raw = localStorage.getItem(STORAGE_PREFIX + pid);
     return raw ? JSON.parse(raw) : [];
   } catch { return []; }
 }
 
-function saveConversations(pid, conversations) {
+function cacheConversations(pid, conversations) {
   if (!pid) return;
   try {
-    localStorage.setItem(STORAGE_PREFIX + pid, JSON.stringify(conversations.slice(-20)));
+    localStorage.setItem(STORAGE_PREFIX + pid, JSON.stringify(conversations.slice(-50)));
   } catch { /* quota exceeded, ignore */ }
+}
+
+async function saveConversationsToServer(pid, conversations) {
+  if (!pid) return;
+  try {
+    await fetch(`/api/v1/projects/${pid}/conversations`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(conversations.slice(-50)),
+    });
+  } catch { /* server unavailable, localStorage cache is fallback */ }
+}
+
+async function deleteConversationFromServer(pid, convId) {
+  if (!pid || !convId) return;
+  try {
+    await fetch(`/api/v1/projects/${pid}/conversations/${convId}`, { method: "DELETE" });
+  } catch { /* server unavailable */ }
 }
 
 // ── Helpers ──
@@ -50,6 +62,9 @@ export function useChat({ activePid, llmUrl, llmToken, model, onMatchedNodes, on
   const [pathWarnings, setPathWarnings] = useState(null);
   const abortRef = useRef(null);
   const prevPidRef = useRef(activePid);
+  const hasLoadedRef = useRef(false);
+  const saveTimerRef = useRef(null);
+  const _lastTraceId = useRef("");
 
   // ── Derived: active conversation + messages ──
 
@@ -74,14 +89,17 @@ export function useChat({ activePid, llmUrl, llmToken, model, onMatchedNodes, on
   }, []);
 
   const deleteConversation = useCallback((id) => {
+    // Delete from server immediately (not debounced) so it survives restarts
+    if (activePid) deleteConversationFromServer(activePid, id);
     setConversations((prev) => {
       const next = prev.filter((c) => c.id !== id);
       if (activeConvId === id) {
         setActiveConvId(next.length > 0 ? next[0].id : null);
       }
+      if (activePid) cacheConversations(activePid, next);
       return next;
     });
-  }, [activeConvId]);
+  }, [activeConvId, activePid]);
 
   const switchConversation = useCallback((id) => {
     setActiveConvId(id);
@@ -116,21 +134,44 @@ export function useChat({ activePid, llmUrl, llmToken, model, onMatchedNodes, on
 
   // ── Persistence effects ──
 
+  // Save effect — debounced, skipped until first load completes
   useEffect(() => {
-    if (activePid && conversations.length > 0) {
-      saveConversations(prevPidRef.current, conversations);
-    }
-  }, [conversations]);
+    if (!activePid) return;
+    // Skip save until we've loaded from server (fixes race condition:
+    // on mount, conversations is [] and would overwrite saved chats)
+    if (!hasLoadedRef.current) return;
+    // Cache to localStorage immediately
+    cacheConversations(activePid, conversations);
+    // Debounce server save
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = setTimeout(() => {
+      saveConversationsToServer(activePid, conversations);
+    }, SAVE_DEBOUNCE_MS);
+    return () => {
+      if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    };
+  }, [conversations, activePid]);
 
+  // Load effect — runs when activePid changes (including on mount)
   useEffect(() => {
+    if (!activePid) return;
+    let cancelled = false;
     const prev = prevPidRef.current;
-    if (prev && prev !== activePid && conversations.length > 0) {
-      saveConversations(prev, conversations);
+    // Save previous project's conversations before switching
+    if (prev && prev !== activePid && hasLoadedRef.current) {
+      cacheConversations(prev, conversations);
+      saveConversationsToServer(prev, conversations);
     }
-    const convs = loadConversations(activePid);
-    setConversations(convs);
-    setActiveConvId(convs.length > 0 ? convs[0].id : null);
-    prevPidRef.current = activePid;
+    hasLoadedRef.current = false;
+    (async () => {
+      const convs = await loadConversations(activePid);
+      if (cancelled) return;
+      setConversations(convs);
+      setActiveConvId(convs.length > 0 ? convs[0].id : null);
+      hasLoadedRef.current = true;
+      prevPidRef.current = activePid;
+    })();
+    return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activePid]);
 
@@ -163,38 +204,10 @@ export function useChat({ activePid, llmUrl, llmToken, model, onMatchedNodes, on
 
     addMessage({ role: "user", content: trimmed }, targetConvId);
 
-    setStatus("classifying");
+    setStatus("thinking");
     setStreamingContent("");
     setPathWarnings(null);
-    // Intent handled server-side by retrieval.py planner
-    let intent = "architecture"
-
-    // Build rich context — backend-owned retrieval
-    setStatus("thinking");
-    // We keep the old single-value return for caller compatibility;
-    // but also extract matchedNodes from the full response
-    let matchedNodes = [];
-    const richContextResp = await (async () => {
-      if (!activePid) return { context: "", matchedNodes: [] };
-      try {
-        const resp = await fetch("/graph/retrieve-context", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ prompt: trimmed, project_id: activePid }),
-        });
-        if (!resp.ok) return { context: "", matchedNodes: [] };
-        const data = await resp.json();
-        matchedNodes = data.matched_nodes || [];
-        if (data.token_status === "expired_or_invalid" && onTokenExpired) {
-          onTokenExpired(activePid);
-        }
-        return { context: data.context || "", matchedNodes };
-      } catch {
-        return { context: "", matchedNodes: [] };
-      }
-    })();
-    const richContext = richContextResp.context;
-    if (onMatchedNodes && matchedNodes?.length) onMatchedNodes(matchedNodes);
+    let intent = "planner";
 
     if (!llmUrl) {
       addMessage({ role: "assistant", content: "No LLM endpoint configured. Click the settings icon to set your LLM URL and token.", metadata: { intent, route: { category: intent, label: intent } } }, targetConvId);
@@ -208,64 +221,93 @@ export function useChat({ activePid, llmUrl, llmToken, model, onMatchedNodes, on
       return;
     }
 
-    // LLM call — non-streaming relay (LLM provider doesn't support streaming)
+    // Read tuning settings directly from localStorage (not stale props)
+    const maxTokens = parseInt(localStorage.getItem("tuning-max-tokens") || "4096", 10);
+    const budgetChars = parseInt(localStorage.getItem("tuning-budget-chars") || "12000", 10);
+    const embeddingWeight = parseFloat(localStorage.getItem("tuning-embedding-weight") || "0.4");
+    const traversalDepth = parseInt(localStorage.getItem("tuning-traversal-depth") || "2", 10);
+    const snippetChars = parseInt(localStorage.getItem("tuning-snippet-chars") || "1500", 10);
+    let chunkCaps = null;
+    try { chunkCaps = JSON.parse(localStorage.getItem("tuning-chunk-caps") || "null"); } catch {}
+
+    // Single request to completions endpoint — backend does retrieval + LLM internally
     setStatus("answering");
     let fullText = "";
+    let sources = null;
+    let matchedNodes = [];
     let pw = null;
+    let savings = null;
     try {
+      // Chat compaction: most recent 2 messages full, older messages compressed into a summary
       const priorMessages = (activeConv?.messages || [])
         .filter(m => !m.content.startsWith("(LLM error") && !m.content.startsWith("(LLM request failed") && !m.content.startsWith("(No response"))
-        .slice(-8);
-      const historyMessages = priorMessages.map(m => ({
-        role: m.role,
-        content: m.content.length > 200 ? m.content.slice(0, 200) + "..." : m.content,
-      }));
+        .slice(-6);
+      let conversationHistory;
+      if (priorMessages.length <= 2) {
+        conversationHistory = priorMessages.map(m => ({
+          role: m.role,
+          content: m.content.length > 2000 ? m.content.slice(0, 2000) + "..." : m.content,
+        }));
+      } else {
+        const recent = priorMessages.slice(-2);
+        const older = priorMessages.slice(0, -2);
+        const summaryParts = older.map(m => {
+          const c = m.content.length > 300 ? m.content.slice(0, 300) + "..." : m.content;
+          return `${m.role}: ${c}`;
+        });
+        conversationHistory = [
+          { role: "user", content: `Previous conversation context:\n${summaryParts.join("\n")}` },
+          ...recent.map(m => ({
+            role: m.role,
+            content: m.content.length > 2000 ? m.content.slice(0, 2000) + "..." : m.content,
+          })),
+        ];
+      }
 
-      const systemContent = richContext
-        ? `${SYSTEM_PROMPT}\n\nProject context:\n${richContext}`
-        : SYSTEM_PROMPT;
-
-      const payload = {
-        model: model || undefined,
-        messages: [
-          { role: "system", content: systemContent },
-          ...historyMessages,
-          { role: "user", content: trimmed },
-        ],
-        max_tokens: 4096,
-        temperature: 0.2,
-      };
-
-      console.log("[useChat] LLM ask →", { url: llmUrl, model: payload.model, msgCount: payload.messages.length, maxTokens: payload.max_tokens, hasStream: "stream" in payload });
-
-      const j = await llmService.relay({
-        url: llmUrl,
-        token: llmToken,
-        payload,
-        projectId: activePid,
+      const resp = await fetch(`/api/v1/projects/${activePid}/completions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt: trimmed,
+          conversation_history: conversationHistory,
+          llm_url: llmUrl,
+          llm_token: llmToken,
+          model: model,
+          max_tokens: maxTokens,
+          budget_chars: budgetChars,
+          chunk_caps: chunkCaps,
+          embedding_weight: embeddingWeight,
+          traversal_depth: traversalDepth,
+          snippet_chars: snippetChars,
+        }),
       });
 
-      console.log("[useChat] LLM ask ←", { status: j.status, bodyLen: j.body?.length, bodyPreview: j.body?.slice(0, 300) });
-
-      if (j.status !== 200) {
-        const errBody = JSON.parse(j.body || "{}");
-        fullText = `(LLM error ${j.status}: ${errBody.error?.message || errBody.detail || j.body?.slice(0, 200) || "unknown"})`;
+      if (!resp.ok) {
+        const errBody = await resp.json().catch(() => ({}));
+        fullText = `(LLM error ${resp.status}: ${errBody.error?.message || errBody.detail || errBody.error || "unknown"})`;
       } else {
-        const body = JSON.parse(j.body || "{}");
-        fullText = body.choices?.[0]?.message?.content || "";
+        const data = await resp.json();
+        fullText = data.answer || "";
         if (!fullText) {
           fullText = "(No response -- the LLM returned empty output. Try rephrasing your question.)";
         }
+        intent = data.intent || "planner";
+        sources = data.sources || null;
+        matchedNodes = data.matched_nodes || [];
+        pw = data.path_warnings || [];
+        savings = data.context_savings || null;
+        _lastTraceId.current = data.trace_id || "";
       }
     } catch (e) {
       fullText = `(LLM request failed: ${e.message || "unknown error"})`;
     }
 
+    if (onMatchedNodes && matchedNodes?.length) onMatchedNodes(matchedNodes);
     setPathWarnings(pw);
     addMessage({
       role: "assistant",
       content: fullText,
-      metadata: { intent, route: { category: intent, label: intent }, pathWarnings: pw },
+      metadata: { intent, route: { category: intent, label: intent }, pathWarnings: pw, sources, savings },
     }, targetConvId);
     setStreamingContent("");
     setStatus("idle");
@@ -274,9 +316,22 @@ export function useChat({ activePid, llmUrl, llmToken, model, onMatchedNodes, on
 
   const clearChats = useCallback((pid) => {
     localStorage.removeItem(STORAGE_PREFIX + pid);
+    if (pid) saveConversationsToServer(pid, []);
     setConversations([]);
     setActiveConvId(null);
   }, []);
+
+  const sendFeedback = useCallback(async (rating, comment) => {
+    const traceId = _lastTraceId.current;
+    if (!activePid || !traceId) return;
+    try {
+      await fetch(`/api/v1/projects/${activePid}/feedback`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ trace_id: traceId, rating, comment: comment || "" }),
+      });
+    } catch { /* non-blocking */ }
+  }, [activePid]);
 
   return {
     clearChats,
@@ -291,5 +346,6 @@ export function useChat({ activePid, llmUrl, llmToken, model, onMatchedNodes, on
     deleteConversation,
     switchConversation,
     renameConversation,
+    sendFeedback,
   };
 }

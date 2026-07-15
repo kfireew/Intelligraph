@@ -1,5 +1,5 @@
 import { Download, Server, Copy, Check, FileCode, KeyRound, Loader2, AlertCircle } from "lucide-react";
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { endpoints } from "../config/endpoints";
 import { requestJson } from "../services/apiClient";
 
@@ -10,12 +10,58 @@ function copy(text) {
 export function GuidePanel({ activePid, activeProject }) {
   const [copied, setCopied] = useState(null);
   const [scriptPath, setScriptPath] = useState("");
-  const [mcpUrl, setMcpUrl] = useState("");
   const [mcpToken, setMcpToken] = useState("");
   const [tokenLoading, setTokenLoading] = useState(false);
   const [tokenError, setTokenError] = useState("");
+  const [siteUrl, setSiteUrl] = useState("");
   const isReady = activeProject && ["ready", "cloned", "indexed"].includes(activeProject.status);
   const pid = activeProject?.id;
+
+  // Auto-fill site URL: prefer INTELLIGRAPH_SITE_URL from /status,
+  // fall back to window.location.origin, then to localhost:5050.
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch("/status");
+        const data = await res.json();
+        if (data.site_url) { setSiteUrl(data.site_url); return; }
+      } catch {}
+      setSiteUrl(typeof window !== "undefined" ? window.location.origin : "http://localhost:5050");
+    })();
+  }, []);
+
+  // Load saved MCP token for this project on mount / project switch.
+  // Try localStorage first (fast), then the backend GET endpoint (source of
+  // truth, survives browser data clears / different machines).
+  const loadToken = useCallback(async (pid) => {
+    if (!pid) return;
+    const cacheKey = `mcp-token-${pid}`;
+    const cached = (typeof localStorage !== "undefined" && localStorage.getItem(cacheKey)) || "";
+    if (cached) { setMcpToken(cached); return; }
+    try {
+      const res = await requestJson(`/projects/${pid}/mcp-token`, { method: "GET" });
+      if (res.mcp_token) {
+        setMcpToken(res.mcp_token);
+        if (typeof localStorage !== "undefined") localStorage.setItem(cacheKey, res.mcp_token);
+      }
+    } catch { /* 401 / not found — user will click Generate */ }
+  }, []);
+
+  useEffect(() => { loadToken(pid); }, [pid, loadToken]);
+
+  const persistToken = useCallback((pid, token) => {
+    setMcpToken(token);
+    if (pid && typeof localStorage !== "undefined") {
+      localStorage.setItem(`mcp-token-${pid}`, token);
+    }
+  }, []);
+
+  const clearToken = useCallback((pid) => {
+    setMcpToken("");
+    if (pid && typeof localStorage !== "undefined") {
+      localStorage.removeItem(`mcp-token-${pid}`);
+    }
+  }, []);
 
   // Auto-fill from what the user already has
   const containerUrl = typeof window !== "undefined" ? window.location.origin : "http://localhost:5050";
@@ -34,23 +80,21 @@ export function GuidePanel({ activePid, activeProject }) {
   }'`
     : null;
 
-  // MCP config — MCP server sends X-MCP-Token header to authenticate against /graph/ endpoints.
-  // Default to localhost:5050 (container port mapping). User can override for remote/pod setups.
-  const mcpContainerUrl = (mcpUrl.trim().replace(/\/+$/, "") || "http://localhost:5050");
-  // scriptPath is the full path to mcp_server_standalone.py on the user's machine.
-  // Without it, the MCP runner can't find the script (relative paths break).
+  // MCP config — standard python launch (works on host workstation, os4, localhost).
+  // mcpUrl auto-fills from INTELLIGRAPH_SITE_URL env var or window.location.origin.
+  const mcpContainerUrl = siteUrl || "http://localhost:5050";
   const scriptArg = (scriptPath.trim().replace(/^["']|["']$/g, "") || "mcp_server_standalone.py");
   const tokenArg = mcpToken.trim() || "YOUR-MCP-TOKEN";
-  const mcpCommand = pid
-    ? `python ${scriptArg} --intelligraph-url ${mcpContainerUrl} --project-id ${pid} --mcp-token ${tokenArg} --repo-dir .`
-    : null;
+  const scriptArgs = [scriptArg, "--intelligraph-url", mcpContainerUrl, "--project-id", String(pid), "--mcp-token", tokenArg, "--repo-dir", "."];
+
+  const mcpCommand = pid ? `python ${scriptArgs.join(" ")}` : null;
 
   const claudeMcp = pid
     ? JSON.stringify({
         mcpServers: {
           intelligraph: {
             command: "python",
-            args: [scriptArg, "--intelligraph-url", mcpContainerUrl, "--project-id", String(pid), "--mcp-token", tokenArg, "--repo-dir", "."],
+            args: scriptArgs,
           },
         },
       }, null, 2)
@@ -62,7 +106,7 @@ export function GuidePanel({ activePid, activeProject }) {
         mcp: {
           intelligraph: {
             type: "local",
-            command: ["python", scriptArg, "--intelligraph-url", mcpContainerUrl, "--project-id", String(pid), "--mcp-token", tokenArg, "--repo-dir", "."],
+            command: ["python", ...scriptArgs],
             timeout: 10000,
           },
         },
@@ -75,7 +119,7 @@ export function GuidePanel({ activePid, activeProject }) {
     setTokenError("");
     try {
       const res = await requestJson(`/projects/${pid}/mcp-token`, { method: "POST" });
-      setMcpToken(res.mcp_token || "");
+      persistToken(pid, res.mcp_token || "");
     } catch (e) {
       setTokenError(e.message || "Failed to generate token");
     } finally {
@@ -89,7 +133,7 @@ export function GuidePanel({ activePid, activeProject }) {
     setTokenError("");
     try {
       await requestJson(`/projects/${pid}/mcp-token`, { method: "DELETE" });
-      setMcpToken("");
+      clearToken(pid);
     } catch (e) {
       setTokenError(e.message || "Failed to revoke token");
     } finally {
@@ -128,87 +172,6 @@ export function GuidePanel({ activePid, activeProject }) {
         </div>
       )}
 
-      {/* ── API Endpoints ── */}
-      <Section title="API Endpoints" icon={Server}>
-        {activeProject && (
-          <div className="mb-3 p-2 rounded-lg bg-accent/5 border border-accent/10">
-            <p className="text-xs text-text-secondary m-0">
-              Project: <span className="text-text font-semibold">{activeProject.name}</span> &nbsp;|&nbsp; ID: <span className="text-accent-light font-mono">{pid}</span> &nbsp;|&nbsp; Status: <span className={isReady ? "text-green" : "text-yellow-400"}>{activeProject.status}</span> &nbsp;|&nbsp; Nodes: <span className="text-accent-light font-mono">{activeProject.nodes || 0}</span> &nbsp;|&nbsp; Edges: <span className="text-accent-light font-mono">{activeProject.edges || 0}</span>
-            </p>
-          </div>
-        )}
-
-        {/* Project Completions */}
-        <div className="space-y-3">
-          {!activeProject ? (
-            <p className="text-xs text-muted-subtle m-0">Select a project on the left. The endpoint, cURL, and n8n config below will auto-fill with that project's ID and your container URL.</p>
-          ) : !isReady ? (
-            <p className="text-xs text-muted-subtle m-0">Project is still <span className="text-yellow-400">{activeProject.status}</span>. Wait for it to finish before using the API.</p>
-          ) : (
-            <>
-              <div>
-                <p className="text-xs text-text-secondary m-0 mb-1 leading-relaxed">
-                  Send a POST with a <code className="px-1 py-0.5 rounded bg-accent/10 text-accent-light text-[11px] font-mono">prompt</code> and your LLM credentials. Intelligraph retrieves relevant code context from the graph and sends it to the LLM for you.
-                </p>
-              </div>
-
-              <CodeBlock id="endpoint" label={`Endpoint for "${activeProject.name}"`} code={`POST ${fullCompletionsUrl}`} />
-
-              <div className="mt-3">
-                <p className="text-[11px] font-bold text-muted uppercase tracking-wider mb-1.5">cURL — copy &amp; paste</p>
-                <CodeBlock id="curl" code={curlExample} />
-              </div>
-
-              <div className="mt-3">
-                <p className="text-[11px] font-bold text-muted uppercase tracking-wider mb-1.5">n8n HTTP Request node</p>
-                <p className="text-[10px] text-muted-subtle m-0 mb-1.5">Set Method = POST, URL = the endpoint above, Auth = Bearer. Body parameters:</p>
-                <CodeBlock id="n8n" code={JSON.stringify({
-                  method: "POST",
-                  url: fullCompletionsUrl,
-                  authentication: "genericCredentialType",
-                  genericAuthType: "httpBearerAuth",
-                  sendBody: true,
-                  bodyParameters: {
-                    parameters: [
-                      { name: "prompt", value: "Explain the architecture" },
-                      { name: "include_context", value: true },
-                      { name: "llm_url", value: llmUrl },
-                      { name: "llm_token", value: "YOUR-TOKEN-HERE" },
-                    ],
-                  },
-                }, null, 2)} />
-              </div>
-
-              <details className="mt-3">
-                <summary className="text-[11px] font-bold text-muted cursor-pointer hover:text-text transition-colors">What the response looks like</summary>
-                <div className="mt-2"><CodeBlock id="respExample" code={JSON.stringify({
-                  answer: "The authentication module lives in src/auth/...",
-                  model: "qwen/Qwen2.5-Coder-7B-Instruct",
-                  context_used: true,
-                  context_stats: { chunks: 12, tokens: 3400 },
-                  path_warnings: [],
-                }, null, 2)} /></div>
-              </details>
-            </>
-          )}
-        </div>
-
-        {/* Clone Repository */}
-        <div className="mt-4 pt-4 border-t border-white/5">
-          <p className="text-[11px] font-bold text-muted uppercase tracking-wider mb-1.5">Clone Repository</p>
-          <p className="text-xs text-text-secondary m-0 mb-2 leading-relaxed">Clone a new repo into Intelligraph via API.</p>
-          <CodeBlock id="clone" code={`POST ${containerUrl}/projects/clone`} />
-          <details className="mt-2">
-            <summary className="text-[11px] font-bold text-muted cursor-pointer hover:text-text transition-colors">Example payload</summary>
-            <div className="mt-2"><CodeBlock id="clonePayload" code={JSON.stringify({
-              git_url: "https://bitbucket.example.com/scm/PROJ/repo.git",
-              access_token: "BBDC-...",
-              auth_mode: "bitbucket_datacenter_bearer",
-            }, null, 2)} /></div>
-          </details>
-        </div>
-      </Section>
-
       {/* ── MCP Server ── */}
       <Section title="MCP Server" icon={Download}>
         <p className="text-xs text-text-secondary m-0 mb-3 leading-relaxed">
@@ -234,7 +197,7 @@ export function GuidePanel({ activePid, activeProject }) {
               <p className="text-xs text-muted-subtle m-0 mb-2">
                 The MCP server authenticates with this token (not your SSO session). Click generate, then copy it into the config below.
               </p>
-              <div className="flex gap-2 items-start">
+              <div className="flex gap-2 items-center">
                 {mcpToken ? (
                   <>
                     <input
@@ -251,14 +214,12 @@ export function GuidePanel({ activePid, activeProject }) {
                     </button>
                   </>
                 ) : (
-                  <>
-                    <button onClick={handleGenerateToken} disabled={tokenLoading}
-                      className="px-3 py-1.5 rounded-lg text-xs font-bold text-white disabled:opacity-40"
-                      style={{ background: "linear-gradient(135deg, #8b5cf6, #d946ef)" }}>
-                      {tokenLoading ? <Loader2 size={14} className="animate-spin" /> : <KeyRound size={14} />}
-                      <span className="ml-1.5">Generate Token</span>
-                    </button>
-                  </>
+                  <button onClick={handleGenerateToken} disabled={tokenLoading}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold text-white disabled:opacity-40"
+                    style={{ background: "linear-gradient(135deg, #8b5cf6, #d946ef)" }}>
+                    {tokenLoading ? <Loader2 size={14} className="animate-spin" /> : <KeyRound size={14} />}
+                    <span>Generate Token</span>
+                  </button>
                 )}
               </div>
               {tokenError && (
@@ -278,23 +239,12 @@ export function GuidePanel({ activePid, activeProject }) {
               </a>
               <div className="mt-3">
                 <p className="text-[11px] font-bold text-muted uppercase tracking-wider mb-1.5">Full path to the script</p>
-                <p className="text-[10px] text-muted-subtle m-0 mb-1.5">Paste the full path where you saved the file. Without it, your AI assistant can't find the script.</p>
+                <p className="text-[10px] text-muted-subtle m-0 mb-1.5">Paste the full path where you saved the file (with or without quotes). Without it, your AI assistant can't find the script.</p>
                 <input
                   type="text"
                   value={scriptPath}
                   onChange={(e) => setScriptPath(e.target.value)}
                   placeholder="C:\Users\me\projects\myapp\mcp_server_standalone.py"
-                  className="w-full px-2.5 py-1.5 rounded-lg bg-white/5 border border-glass-border text-[11px] text-text font-mono outline-none focus:border-accent/40 transition-colors"
-                />
-              </div>
-              <div className="mt-3">
-                <p className="text-[11px] font-bold text-muted uppercase tracking-wider mb-1.5">Container URL</p>
-                <p className="text-[10px] text-muted-subtle m-0 mb-1.5">The MCP server connects to this URL with the token. Use the container address (works for pods and remote setups — token authenticates through SSO).</p>
-                <input
-                  type="text"
-                  value={mcpUrl}
-                  onChange={(e) => setMcpUrl(e.target.value)}
-                  placeholder="http://localhost:5050"
                   className="w-full px-2.5 py-1.5 rounded-lg bg-white/5 border border-glass-border text-[11px] text-text font-mono outline-none focus:border-accent/40 transition-colors"
                 />
               </div>
@@ -342,6 +292,116 @@ export function GuidePanel({ activePid, activeProject }) {
             </details>
           </>
         )}
+      </Section>
+
+      {/* ── Agent Guide ── */}
+      <Section title="Agent Guide" icon={FileCode}>
+        <p className="text-xs text-text-secondary m-0 mb-3 leading-relaxed">
+          Some models (like Qwen3.6) tend to ignore MCP tools and answer from memory. Download this agent guide and add it to your AI assistant's instructions. It tells the model when and how to use each Intelligraph tool — without being so aggressive that it wastes tokens on unnecessary calls.
+        </p>
+        <a href={endpoints.downloadAgent} download
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-accent/10 hover:bg-accent/20 text-accent-light text-xs font-medium transition-colors no-underline">
+          <Download size={14} /> Download intelligraph-agent.md
+        </a>
+
+        <details className="mt-3">
+          <summary className="text-[11px] font-bold text-muted cursor-pointer hover:text-text transition-colors">Claude Code</summary>
+          <div className="mt-2 space-y-2">
+            <p className="text-xs text-text-secondary m-0">
+              Save the file as <code className="px-1 py-0.5 rounded bg-accent/10 text-accent-light text-[11px] font-mono">CLAUDE.md</code> in your project root. Claude Code reads this automatically as project instructions.
+            </p>
+            <CodeBlock id="claudeAgent" code={`# Save as CLAUDE.md in your project root\n# Claude Code reads this automatically\n\n@intelligraph-agent.md`} />
+          </div>
+        </details>
+
+        <details className="mt-2">
+          <summary className="text-[11px] font-bold text-muted cursor-pointer hover:text-text transition-colors">opencode</summary>
+          <div className="mt-2 space-y-2">
+            <p className="text-xs text-text-secondary m-0">
+              Save the file in your project as <code className="px-1 py-0.5 rounded bg-accent/10 text-accent-light text-[11px] font-mono">AGENTS.md</code>. opencode reads this automatically as project instructions.
+            </p>
+            <CodeBlock id="opencodeAgent" code={`# Save as AGENTS.md in your project root\n# opencode reads this automatically\n\n@intelligraph-agent.md`} />
+          </div>
+        </details>
+      </Section>
+
+      {/* ── API Endpoints ── */}
+      <Section title="API Endpoints" icon={Server}>
+        {activeProject && (
+          <div className="mb-3 p-2 rounded-lg bg-accent/5 border border-accent/10">
+            <p className="text-xs text-text-secondary m-0">
+              Project: <span className="text-text font-semibold">{activeProject.name}</span> &nbsp;|&nbsp; ID: <span className="text-accent-light font-mono">{pid}</span> &nbsp;|&nbsp; Status: <span className={isReady ? "text-green" : "text-yellow-400"}>{activeProject.status}</span> &nbsp;|&nbsp; Nodes: <span className="text-accent-light font-mono">{activeProject.nodes || 0}</span> &nbsp;|&nbsp; Edges: <span className="text-accent-light font-mono">{activeProject.edges || 0}</span>
+            </p>
+          </div>
+        )}
+
+        <div className="space-y-3">
+          {!activeProject ? (
+            <p className="text-xs text-muted-subtle m-0">Select a project on the left. The endpoint, cURL, and n8n config below will auto-fill with that project's ID and your container URL.</p>
+          ) : !isReady ? (
+            <p className="text-xs text-muted-subtle m-0">Project is still <span className="text-yellow-400">{activeProject.status}</span>. Wait for it to finish before using the API.</p>
+          ) : (
+            <>
+              <div>
+                <p className="text-xs text-text-secondary m-0 mb-1 leading-relaxed">
+                  Send a POST with a <code className="px-1 py-0.5 rounded bg-accent/10 text-accent-light text-[11px] font-mono">prompt</code> and your LLM credentials. Intelligraph retrieves relevant code context from the graph and sends it to the LLM for you.
+                </p>
+              </div>
+
+              <CodeBlock id="endpoint" label={`Endpoint for "${activeProject.name}"`} code={`POST ${fullCompletionsUrl}`} />
+
+              <div className="mt-3">
+                <p className="text-[11px] font-bold text-muted uppercase tracking-wider mb-1.5">cURL — copy &amp; paste</p>
+                <CodeBlock id="curl" code={curlExample} />
+              </div>
+
+              <div className="mt-3">
+                <p className="text-[11px] font-bold text-muted uppercase tracking-wider mb-1.5">n8n HTTP Request node</p>
+                <p className="text-[10px] text-muted-subtle m-0 mb-1.5">Set Method = POST, URL = the endpoint above, Auth = Bearer. Body parameters:</p>
+                <CodeBlock id="n8n" code={JSON.stringify({
+                  method: "POST",
+                  url: fullCompletionsUrl,
+                  authentication: "genericCredentialType",
+                  genericAuthType: "httpBearerAuth",
+                  sendBody: true,
+                  bodyParameters: {
+                    parameters: [
+                      { name: "prompt", value: "Explain the architecture" },
+                      { name: "include_context", value: true },
+                      { name: "llm_url", value: llmUrl },
+                      { name: "llm_token", value: "YOUR-TOKEN-HERE" },
+                    ],
+                  },
+                }, null, 2)} />
+              </div>
+
+              <details className="mt-3">
+                <summary className="text-[11px] font-bold text-muted cursor-pointer hover:text-text transition-colors">What the response looks like</summary>
+                <div className="mt-2"><CodeBlock id="respExample" code={JSON.stringify({
+                  answer: "The authentication module lives in src/auth/...",
+                  model: "Qwen/Qwen3.6-27B-FP8",
+                  context_used: true,
+                  context_stats: { chunks: 12, tokens: 3400 },
+                  path_warnings: [],
+                }, null, 2)} /></div>
+              </details>
+            </>
+          )}
+        </div>
+
+        <div className="mt-4 pt-4 border-t border-white/5">
+          <p className="text-[11px] font-bold text-muted uppercase tracking-wider mb-1.5">Clone Repository</p>
+          <p className="text-xs text-text-secondary m-0 mb-2 leading-relaxed">Clone a new repo into Intelligraph via API.</p>
+          <CodeBlock id="clone" code={`POST ${containerUrl}/projects/clone`} />
+          <details className="mt-2">
+            <summary className="text-[11px] font-bold text-muted cursor-pointer hover:text-text transition-colors">Example payload</summary>
+            <div className="mt-2"><CodeBlock id="clonePayload" code={JSON.stringify({
+              git_url: "https://bitbucket.example.com/scm/PROJ/repo.git",
+              access_token: "BBDC-...",
+              auth_mode: "bitbucket_datacenter_bearer",
+            }, null, 2)} /></div>
+          </details>
+        </div>
       </Section>
 
       {/* ── How it works ── */}

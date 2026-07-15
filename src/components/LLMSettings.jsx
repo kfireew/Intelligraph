@@ -168,7 +168,7 @@ export function LLMSettings({ llmUrl, llmToken, model, models, modelsLoading, te
               type="text"
               value={model}
               onChange={(e) => onSelectModel(e.target.value)}
-              placeholder="gpt-4o-mini"
+              placeholder="Qwen/Qwen3.6-27B-FP8"
               className="w-full px-3 py-2 rounded-lg bg-white/5 border border-border text-text text-xs outline-none focus:border-accent transition-colors"
             />
           </div>

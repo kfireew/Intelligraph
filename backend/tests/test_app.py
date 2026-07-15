@@ -695,21 +695,21 @@ def test_mcp_with_project_token(client):
 def _inject_project(client):
     """Inject a project directly into _PROJECTS without clone endpoint."""
     import flask
-    # Get or create anon session key
     with client.application.app_context():
         with client.session_transaction() as sess:
             uk = sess.get("_anon_key", "anon-test-1")
             sess["_anon_key"] = uk
-    # Ensure key exists in _PROJECTS (avoids recursion in _load_projects)
-    if uk not in app_module._PROJECTS:
-        app_module._PROJECTS[uk] = {}
-    pid = app_module._NEXT_PID.get(uk, 1)
-    app_module._NEXT_PID[uk] = pid + 1
+    # With no SSO_ISSUER, _user_key() returns "local" — use that as the key
+    actual_uk = "local" if not app_module.SSO_ISSUER else uk
+    if actual_uk not in app_module._PROJECTS:
+        app_module._PROJECTS[actual_uk] = {}
+    pid = app_module._NEXT_PID.get(actual_uk, 1)
+    app_module._NEXT_PID[actual_uk] = pid + 1
     proj = {"name": "completion-test", "status": "ready", "nodes": 1, "edges": 0,
             "graphify_data": {"nodes": [{"label": "test", "source_file": "test.py",
                                           "file_type": "py"}], "links": []}}
-    app_module._PROJECTS[uk][pid] = proj
-    return pid, uk
+    app_module._PROJECTS[actual_uk][pid] = proj
+    return pid, actual_uk
 
 
 def test_completions_no_prompt(client):
@@ -728,7 +728,7 @@ def test_completions_project_not_found(client):
 
 
 def test_completions_stateless_default(client):
-    """Default session_mode is stateless and returns session_mode in response."""
+    """Default completion returns answer + sources + trace_id."""
     import unittest.mock
     pid, _ = _inject_project(client)
     with unittest.mock.patch("requests.post") as mock_post:
@@ -740,38 +740,38 @@ def test_completions_stateless_default(client):
         mock_post.return_value.text = "ok"
         r = client.post(f"/api/v1/projects/{pid}/completions", json={
             "prompt": "hello",
-            "llm_url": "https://openrouter.ai/api/v1/chat/completions",
+            "llm_url": "https://models.ai-services.idf.cts/v1/chat/completions",
         })
         assert r.status_code == 200
         d = json.loads(r.data)
-        assert d["session_mode"] == "stateless"
-        assert d["conversation_reused"] is False
         assert d["trace_id"].startswith("req_")
         assert d["answer"] == "mock answer"
 
 
 def test_completions_unsupported_session_mode(client):
-    """session_mode other than stateless returns 400 (project not required)."""
+    """session_mode is no longer required — endpoint is always stateless. The
+    field is silently ignored if passed (backward compat)."""
     r = client.post("/api/v1/projects/1/completions", json={
-        "prompt": "hello", "session_mode": "stateful"
+        "prompt": "hello", "session_mode": "stateful",
+        "llm_url": "https://openrouter.ai/api/v1/chat/completions",
     })
-    assert r.status_code == 400
-    d = json.loads(r.data)
-    assert "unsupported_session_mode" in d["error"]
+    # Should NOT 400 — session_mode is ignored now
+    assert r.status_code in (200, 404)  # 404 if project 1 doesn't exist
 
 
 def test_completions_conversation_id_rejected(client):
-    """conversation_id in stateless mode returns 400 (project not required)."""
+    """conversation_id is no longer rejected — it's silently ignored
+    (backward compat). conversation_history is the new way to pass context."""
     r = client.post("/api/v1/projects/1/completions", json={
-        "prompt": "hello", "conversation_id": "abc-123"
+        "prompt": "hello", "conversation_id": "abc-123",
+        "llm_url": "https://openrouter.ai/api/v1/chat/completions",
     })
-    assert r.status_code == 400
-    d = json.loads(r.data)
-    assert "conversation_id not supported" in d["error"]
+    # Should NOT 400 — conversation_id is ignored now
+    assert r.status_code in (200, 404)
 
 
 def test_completions_no_previous_messages_included(client):
-    """Each call sends only system + current prompt; no prior messages appended."""
+    """Without conversation_history, only system + context + prompt are sent."""
     import unittest.mock
     pid, _ = _inject_project(client)
     sent_payloads = []
@@ -788,13 +788,15 @@ def test_completions_no_previous_messages_included(client):
         r1 = client.post(f"/api/v1/projects/{pid}/completions", json={
             "prompt": "Remember the word banana.",
             "model": "gpt-4o-mini",
-            "llm_url": "https://openrouter.ai/api/v1/chat/completions",
+            "llm_url": "https://models.ai-services.idf.cts/v1/chat/completions",
+            "include_context": False,
         })
         assert r1.status_code == 200
         r2 = client.post(f"/api/v1/projects/{pid}/completions", json={
             "prompt": "What word did I ask you to remember?",
             "model": "gpt-4o-mini",
-            "llm_url": "https://openrouter.ai/api/v1/chat/completions",
+            "llm_url": "https://models.ai-services.idf.cts/v1/chat/completions",
+            "include_context": False,
         })
         assert r2.status_code == 200
 
@@ -802,6 +804,7 @@ def test_completions_no_previous_messages_included(client):
     for p in sent_payloads:
         msgs = p.get("messages", [])
         roles = [m["role"] for m in msgs]
+        # Without conversation_history: system + user (prompt only, no context)
         assert roles == ["system", "user"]
         assert all(m["role"] != "assistant" for m in msgs)
 
@@ -827,7 +830,7 @@ def test_completions_no_provider_thread_reuse(client):
             r = client.post(f"/api/v1/projects/{pid}/completions", json={
                 "prompt": "hello",
                 "include_context": False,
-                "llm_url": "https://openrouter.ai/api/v1/chat/completions",
+                "llm_url": "https://models.ai-services.idf.cts/v1/chat/completions",
             })
             assert r.status_code == 200
 

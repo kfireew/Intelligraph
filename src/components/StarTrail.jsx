@@ -1,152 +1,277 @@
 import { useRef, useEffect, useMemo } from "react";
 
-export function StarTrail({ matchedNodes, links, hovered, active }) {
+// Known constellation patterns — normalized coordinates (0-1 range, x, y)
+// Stars are listed in order; edges connect consecutive stars
+const CONSTELLATIONS = [
+  { name: "Orion", stars: [
+    [0.5, 0.15], [0.4, 0.3], [0.6, 0.3], [0.45, 0.45], [0.55, 0.45],
+    [0.35, 0.6], [0.65, 0.6], [0.48, 0.75], [0.52, 0.75],
+  ]},
+  { name: "Big Dipper", stars: [
+    [0.2, 0.3], [0.35, 0.25], [0.5, 0.3], [0.6, 0.4], [0.55, 0.55], [0.4, 0.6], [0.3, 0.5],
+  ]},
+  { name: "Cassiopeia", stars: [
+    [0.15, 0.5], [0.3, 0.4], [0.45, 0.55], [0.6, 0.4], [0.75, 0.5],
+  ]},
+  { name: "Lyra", stars: [
+    [0.5, 0.2], [0.45, 0.35], [0.55, 0.35], [0.48, 0.5], [0.52, 0.5],
+  ]},
+  { name: "Southern Cross", stars: [
+    [0.5, 0.3], [0.5, 0.5], [0.5, 0.7], [0.35, 0.5], [0.65, 0.5],
+  ]},
+];
+
+function randomConstellations(count, seedKey) {
+  let seed = seedKey;
+  const rng = () => { seed = (seed * 9301 + 49297) % 233280; return seed / 233280; };
+  const indices = [...CONSTELLATIONS.keys()];
+  // Shuffle
+  for (let i = indices.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    [indices[i], indices[j]] = [indices[j], indices[i]];
+  }
+  const picked = indices.slice(0, Math.min(count, CONSTELLATIONS.length));
+  const placed = [];
+  for (const idx of picked) {
+    const base = CONSTELLATIONS[idx];
+    // Semi-random position offset (avoid overlap with placed constellations)
+    let ox, oy, ok = false;
+    for (let attempt = 0; attempt < 20; attempt++) {
+      ox = 0.1 + rng() * 0.5;
+      oy = 0.1 + rng() * 0.6;
+      ok = placed.every(p => {
+        const dx = Math.abs(ox - p.ox), dy = Math.abs(oy - p.oy);
+        return dx > 0.2 || dy > 0.2;
+      });
+      if (ok) break;
+    }
+    placed.push({ ox, oy });
+    const stars = base.stars.map((s, i) => ({
+      id: `${base.name}-${i}`,
+      x: Math.min(0.95, Math.max(0.05, s[0] * 0.3 + ox)),
+      y: Math.min(0.9, Math.max(0.05, s[1] * 0.3 + oy)),
+      r: 1.5 + rng() * 1.5,
+    }));
+    const edges = [];
+    for (let i = 0; i < stars.length - 1; i++) {
+      edges.push({ s: stars[i].id, t: stars[i + 1].id });
+    }
+    return { stars, edges, name: base.name };
+  }
+  return null;
+}
+
+export function StarTrail({ matchedNodes, links, hovered, active, loading }) {
   const canvasRef = useRef(null);
-  const fadeRef = useRef(0);
-  const hoveredRef = useRef(false);
-  const lastNodesRef = useRef([]);
-  const phaseRef = useRef(0);
-  const wasActiveRef = useRef(false);
-  const timerRef = useRef(null);
+  const rafRef = useRef(null);
+  const stateRef = useRef({
+    stars: [],
+    fallingStars: [],
+    constStars: [],
+    constEdges: [],
+    phase: 0,
+    fade: 0,
+    nextFall: 0,
+  });
 
-  hoveredRef.current = hovered;
+  // Build starfield once
+  const starfield = useMemo(() => {
+    const arr = [];
+    for (let i = 0; i < 200; i++) {
+      arr.push({
+        x: Math.random(),
+        y: Math.random(),
+        r: 0.4 + Math.random() * 1.6,
+        baseOp: 0.08 + Math.random() * 0.35,
+        twinkleSpeed: 0.5 + Math.random() * 2,
+        twinklePhase: Math.random() * Math.PI * 2,
+      });
+    }
+    return arr;
+  }, []);
 
-  if (matchedNodes?.length > 0) lastNodesRef.current = matchedNodes;
-  const nodes = active ? matchedNodes : lastNodesRef.current;
-  const effectiveNodes = nodes?.length > 0 ? nodes : matchedNodes;
-  const MAX_STARS = 8;
-  const mn = useMemo(() => effectiveNodes.slice(0, MAX_STARS), [effectiveNodes]);
+  // Build loading constellations when loading starts — different each time
+  const loadingConstellations = useMemo(() => {
+    if (!loading) return null;
+    return randomConstellations(4 + Math.floor(Math.random() * 2), Date.now() % 100000);
+  }, [loading]);
+
+  // Build matched-node constellation from response
+  const matchedConstData = useMemo(() => {
+    if (!matchedNodes?.length) return { stars: [], edges: [] };
+    const MAX = 10;
+    const nodes = matchedNodes.slice(0, MAX);
+    const matchedIds = new Set(nodes.map(n => n.id));
+    let seed = 0;
+    for (const n of nodes) for (let c of (n.id || "")) seed += c.charCodeAt(0);
+    const rng = () => { seed = (seed * 9301 + 49297) % 233280; return seed / 233280; };
+    const stars = nodes.map((n, i) => ({
+      id: n.id,
+      label: n.label || n.id,
+      x: 0.2 + rng() * 0.6,
+      y: 0.15 + rng() * 0.7,
+      r: 1.5 + rng() * 2,
+    }));
+    const edges = [];
+    if (links?.length) {
+      for (const l of links) {
+        const src = (typeof l.source === "object" ? l.source?.id : l.source) || l.from;
+        const tgt = (typeof l.target === "object" ? l.target?.id : l.target) || l.to;
+        if (src && tgt && matchedIds.has(src) && matchedIds.has(tgt)) edges.push({ s: src, t: tgt });
+      }
+    }
+    if (!edges.length) {
+      for (let i = 0; i < stars.length - 1; i++) edges.push({ s: stars[i].id, t: stars[i + 1].id });
+    }
+    return { stars, edges };
+  }, [matchedNodes, links]);
 
   useEffect(() => {
-    if (active && !wasActiveRef.current) {
-      phaseRef.current = 0;
-      const total = mn.length;
-      if (total === 0) return;
-      const stepInterval = setInterval(() => {
-        phaseRef.current = Math.min(phaseRef.current + 1, total);
-        if (phaseRef.current >= total) clearInterval(stepInterval);
-      }, 80);
-      wasActiveRef.current = true;
-      return () => clearInterval(stepInterval);
+    const st = stateRef.current;
+    if (loading && loadingConstellations) {
+      st.constStars = loadingConstellations.stars;
+      st.constEdges = loadingConstellations.edges;
+      st.phase = 0;
+    } else if (matchedConstData.stars.length > 0) {
+      st.constStars = matchedConstData.stars;
+      st.constEdges = matchedConstData.edges;
+      st.phase = 0;
     }
-    if (!active) wasActiveRef.current = false;
-  }, [active, mn.length]);
+  }, [loadingConstellations, matchedConstData, loading]);
 
   useEffect(() => {
     if (!canvasRef.current) return;
     const canvas = canvasRef.current;
-    if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
-
     const ctx = canvas.getContext("2d");
-    const resize = () => { canvas.width = window.innerWidth; canvas.height = window.innerHeight; };
+    let w, h;
+
+    const resize = () => {
+      w = canvas.width = window.innerWidth;
+      h = canvas.height = window.innerHeight;
+    };
     resize();
 
-    const cNodes = mn;
-    const cLinks = links;
-    const matchedIds = new Set(cNodes.map(n => n.id));
-    let seed = 0;
-    for (const n of cNodes) for (let c of (n.id || "")) seed += c.charCodeAt(0);
-    const rng = (max) => ((seed = (seed * 9301 + 49297) % 233280) / 233280) * max;
+    let t0 = performance.now();
+    const loadingRef = { current: false };
+    loadingRef.current = !!loading;
 
-    const vw = window.innerWidth, vh = window.innerHeight;
-    const cx = vw * 0.7, cy = vh * 0.6;
+    const draw = (now) => {
+      const dt = (now - t0) / 1000;
+      t0 = now;
+      const st = stateRef.current;
+      const isLoad = loadingRef.current;
 
-    const pos = {};
+      ctx.clearRect(0, 0, w, h);
 
-    const edges = [];
-    if (cLinks?.length) {
-      for (const l of cLinks) {
-        const src = (typeof l.source === "object" ? l.source?.id || l.source?.name : l.source) || l.from;
-        const tgt = (typeof l.target === "object" ? l.target?.id || l.target?.name : l.target) || l.to;
-        if (src && tgt && matchedIds.has(src) && matchedIds.has(tgt)) edges.push({ source: src, target: tgt });
+      // --- Starfield (density + brightness scales with loading) ---
+      const starCount = isLoad ? starfield.length : Math.floor(starfield.length * 0.3);
+      for (let i = 0; i < starCount; i++) {
+        const s = starfield[i];
+        const tw = Math.sin(now / 1000 * s.twinkleSpeed + s.twinklePhase);
+        const op = s.baseOp * (0.5 + tw * 0.5) * (isLoad ? 1.4 : 0.6);
+        ctx.fillStyle = `rgba(200, 210, 240, ${Math.min(op, 1)})`;
+        ctx.beginPath();
+        ctx.arc(s.x * w, s.y * h, s.r, 0, Math.PI * 2);
+        ctx.fill();
       }
-      if (!edges.length) {
-        const lowerIds = new Set([...matchedIds].map(id => id.toLowerCase()));
-        for (const l of cLinks) {
-          const src = (typeof l.source === "object" ? l.source?.id || l.source?.name : l.source) || l.from;
-          const tgt = (typeof l.target === "object" ? l.target?.id || l.target?.name : l.target) || l.to;
-          if (src && tgt && lowerIds.has(src.toLowerCase()) && lowerIds.has(tgt.toLowerCase())) edges.push({ source: src, target: tgt });
+
+      // --- Falling stars — ONLY during answer loading ---
+      if (isLoad) {
+        st.nextFall -= dt;
+        if (st.nextFall <= 0) {
+          st.nextFall = 0.5 + Math.random() * 1.5;
+          const startX = Math.random() * w;
+          const angle = Math.PI * 0.15 + Math.random() * 0.2;
+          st.fallingStars.push({
+            x: startX, y: -20,
+            vx: Math.cos(angle) * (300 + Math.random() * 200),
+            vy: Math.sin(angle) * (300 + Math.random() * 200),
+            life: 0, maxLife: 0.6 + Math.random() * 0.8,
+          });
         }
       }
-    }
+      st.fallingStars = st.fallingStars.filter(f => {
+        f.x += f.vx * dt; f.y += f.vy * dt; f.life += dt;
+        if (f.life > f.maxLife || f.y > h + 50 || f.x > w + 50) return false;
+        if (!isLoad && f.life > 0.3) return false;
+        const op = Math.sin((f.life / f.maxLife) * Math.PI);
+        const grad = ctx.createLinearGradient(f.x, f.y, f.x - f.vx * 0.08, f.y - f.vy * 0.08);
+        grad.addColorStop(0, `rgba(255, 255, 255, ${op})`);
+        grad.addColorStop(0.3, `rgba(167, 139, 250, ${op * 0.6})`);
+        grad.addColorStop(1, "rgba(139, 92, 246, 0)");
+        ctx.strokeStyle = grad;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(f.x, f.y);
+        ctx.lineTo(f.x - f.vx * 0.08, f.y - f.vy * 0.08);
+        ctx.stroke();
+        ctx.fillStyle = `rgba(255, 255, 255, ${op})`;
+        ctx.beginPath();
+        ctx.arc(f.x, f.y, 1.5, 0, Math.PI * 2);
+        ctx.fill();
+        return true;
+      });
 
-    const connCount = {};
-    for (const n of cNodes) connCount[n.id] = 0;
-    for (const e of edges) { connCount[e.source] = (connCount[e.source] || 0) + 1; connCount[e.target] = (connCount[e.target] || 0) + 1; }
-    const maxConn = Math.max(1, ...Object.values(connCount));
+      // --- Constellations (from loading or matched nodes) ---
+      if (st.constStars.length > 0) {
+        const tgt = (hovered || active) ? 1 : 0.5;
+        st.fade += (tgt - st.fade) * 0.06;
 
-    cNodes.forEach((n, i) => {
-      const deg = connCount[n.id] || 0;
-      const cluster = 1 - (deg / maxConn) * 0.5;
-      pos[n.id] = {
-        x: cx + (rng(vw * 0.14) - vw * 0.07) * cluster,
-        y: cy + (rng(vh * 0.12) - vh * 0.06) * cluster,
-      };
-    });
+        if (st.phase < st.constStars.length) {
+          st.phase += dt * (isLoad ? 10 : 6);
+        }
+        const vc = Math.min(Math.floor(st.phase), st.constStars.length);
+        const visible = st.constStars.slice(0, vc);
+        const vIds = new Set(visible.map(s => s.id));
 
-    const draw = () => {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-      const tgt = hoveredRef.current ? 1 : 0;
-      fadeRef.current += (tgt - fadeRef.current) * 0.08;
-      if (Math.abs(fadeRef.current - tgt) < 0.001) fadeRef.current = tgt;
-      const bright = 0.45 + fadeRef.current * 0.25;
-      const lOp = bright * 0.7;
-      const sOp = bright * 0.8;
-
-      if (cNodes.length > 0) {
-        const vc = Math.min(phaseRef.current, cNodes.length);
-        const vIds = new Set(cNodes.slice(0, vc).map(n => n.id));
-        const arr = cNodes.slice(0, vc);
-
-        for (const e of edges) {
-          if (!vIds.has(e.source) || !vIds.has(e.target)) continue;
-          const p1 = pos[e.source], p2 = pos[e.target];
+        // Draw edges
+        for (const e of st.constEdges) {
+          if (!vIds.has(e.s) || !vIds.has(e.t)) continue;
+          const p1 = st.constStars.find(s => s.id === e.s);
+          const p2 = st.constStars.find(s => s.id === e.t);
           if (!p1 || !p2) continue;
-          ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y);
-          ctx.strokeStyle = `rgba(139, 92, 246, ${lOp})`; ctx.lineWidth = 4; ctx.stroke();
+          ctx.strokeStyle = `rgba(139, 92, 246, ${st.fade * 0.3})`;
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(p1.x * w, p1.y * h);
+          ctx.lineTo(p2.x * w, p2.y * h);
+          ctx.stroke();
         }
 
-        for (let i = 0; i < arr.length - 1; i++) {
-          const p1 = pos[arr[i].id], p2 = pos[arr[i + 1].id];
-          if (!p1 || !p2) continue;
-          ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y);
-          ctx.strokeStyle = `rgba(139, 92, 246, ${lOp * 0.25})`; ctx.lineWidth = 2; ctx.stroke();
-        }
+        // Draw constellation stars
+        for (const s of visible) {
+          const sx = s.x * w, sy = s.y * h;
+          const tw = Math.sin(now / 800 + s.x * 10);
+          const op = (0.5 + st.fade * 0.4) * (0.7 + tw * 0.3);
+          const r = s.r * (1 + tw * 0.2);
 
-        ctx.filter = "blur(1.5px)";
-        for (let i = 0; i < vc; i++) {
-          const n = cNodes[i], p = pos[n.id];
-          if (!p) continue;
-          const r = fadeRef.current > 0.5 ? 3 : 2;
-          const gr = fadeRef.current > 0.5 ? 16 : 12;
-          const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, gr);
-          grad.addColorStop(0, `rgba(139, 92, 246, ${sOp * 0.35})`);
+          // Glow
+          const grad = ctx.createRadialGradient(sx, sy, 0, sx, sy, r * 8);
+          grad.addColorStop(0, `rgba(167, 139, 250, ${st.fade * 0.3})`);
           grad.addColorStop(1, "rgba(139, 92, 246, 0)");
-          ctx.fillStyle = grad; ctx.beginPath(); ctx.arc(p.x, p.y, gr, 0, Math.PI * 2); ctx.fill();
-          ctx.fillStyle = `rgba(167, 139, 250, ${sOp})`;
-          ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2); ctx.fill();
+          ctx.fillStyle = grad;
+          ctx.beginPath();
+          ctx.arc(sx, sy, r * 8, 0, Math.PI * 2);
+          ctx.fill();
+
+          // Core
+          ctx.fillStyle = `rgba(255, 255, 255, ${op})`;
+          ctx.beginPath();
+          ctx.arc(sx, sy, r, 0, Math.PI * 2);
+          ctx.fill();
         }
-        ctx.filter = "none";
       }
+
+      rafRef.current = requestAnimationFrame(draw);
     };
-    draw();
 
-    timerRef.current = setInterval(() => {
-      const tgt = hoveredRef.current ? 1 : 0;
-      if (Math.abs(fadeRef.current - tgt) > 0.001 || phaseRef.current < cNodes.length) draw();
-      else { clearInterval(timerRef.current); timerRef.current = null; }
-    }, 66);
-
+    rafRef.current = requestAnimationFrame(draw);
     window.addEventListener("resize", resize);
     return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
-      timerRef.current = null;
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
       window.removeEventListener("resize", resize);
     };
-  }, [mn, links]);
-
-  if (!effectiveNodes?.length) return null;
+  }, [starfield, loading]);
 
   return (
     <canvas
@@ -155,8 +280,7 @@ export function StarTrail({ matchedNodes, links, hovered, active }) {
         position: "fixed", top: 0, left: 0,
         width: "100%", height: "100%",
         pointerEvents: "none",
-        opacity: 0.7,
-        zIndex: active ? 1 : -1,
+        zIndex: 1,
       }}
     />
   );

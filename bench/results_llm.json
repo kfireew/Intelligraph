@@ -1,0 +1,301 @@
+{
+  "queries": [
+    {
+      "query_id": "q01",
+      "prompt": "how does the search system work",
+      "category": "how_works",
+      "expected": [
+        "code_review_graph/search.py"
+      ],
+      "context_tokens": {
+        "graphify": 1547,
+        "crg": 236,
+        "intelligraph": 338
+      },
+      "scores": {
+        "graphify": {
+          "correctness": 5,
+          "completeness": 5
+        },
+        "crg": {
+          "correctness": 5,
+          "completeness": 4
+        },
+        "intelligraph": {
+          "correctness": 5,
+          "completeness": 4
+        }
+      },
+      "llm_response": "\n\nANSWER_A: The search system operates as a hybrid retrieval pipeline primarily orchestrated in `code_review_graph/search.py`. When a query is submitted, `detect_query_kind_boost()` and `extract_query_identifiers()` analyze it to determine search intent and extract key tokens. The system then executes three parallel search strategies: `_fts_search()` for full-text matching, `_keyword_search()` for exact code identifier matches, and `_embedding_search()` for semantic similarity using vector embeddings managed by `EmbeddingStore`. These independent result sets are combined and ranked using `rrf_merge()` (Reciprocal Rank Fusion) to produce a unified output. Underlying graph data is persisted via `GraphStore` and `sqlite.ts`, while the VSCode extension (`search.ts`) handles command registration and UI rendering.\n\nANSWER_B: The search system bridges a VSCode extension with a Python backend to deliver semantic code navigation. The extension initializes the interface via `registerSearchCommand` in `search.ts`. When triggered, it calls `semantic_search` in `code_review_graph/embeddings.py` to retrieve relevant code nodes based on vector similarity. Raw results are passed through `enrich_search` in `enrich.py` to attach contextual metadata and improve relevance. Back in the extension, `nodeToQuickPickItem` formats the enriched results for the QuickPick UI, and `navigateToNode` handles opening the selected file at the correct location. Search quality and benchmarking are managed by the `run` function in `search_quality.py`.\n\nANSWER_C: The search system relies on a SQLite-backed storage layer and full-text indexing to retrieve and rank code nodes. The `SqliteReader` class in `sqlite.ts` manages the database connection via `_db()` and executes retrieval queries through `searchNodes`. Raw database rows are transformed into graph objects using `_rowToNode()`. Full-text capabilities are driven by `_fts_search` in `code_review_graph/search.py`, while `enrich_search` in `enrich.py` ",
+      "llm_elapsed": 63.9
+    },
+    {
+      "query_id": "q03",
+      "prompt": "how are embeddings stored and used",
+      "category": "how_works",
+      "expected": [
+        "code_review_graph/embeddings.py"
+      ],
+      "context_tokens": {
+        "graphify": 498,
+        "crg": 171,
+        "intelligraph": 452
+      },
+      "scores": {
+        "graphify": {
+          "correctness": 2,
+          "completeness": 2
+        },
+        "crg": {
+          "correctness": 3,
+          "completeness": 3
+        },
+        "intelligraph": {
+          "correctness": 5,
+          "completeness": 5
+        }
+      },
+      "llm_response": "ANSWER_A: Based on Context A, embeddings are referenced in `CHANGELOG.md` (L297) as a tracked feature, but explicit storage or retrieval functions are not present in the provided traversal. Storage and usage appear to be integrated into the broader graph persistence layer via `GraphStore` (`code_review_graph/graph.py`) and extraction via `CodeParser` (`code_review_graph/parser.py`). The `load_custom_languages()` and `_load_uncached()` functions interact with `_CacheEntry` and `write_config()`, suggesting that embedding-related configurations or precomputed vectors may be cached, isolated per language, and managed alongside custom language definitions. However, Context A lacks direct embedding I/O functions, implying they are handled as part of the graph's serialized state or external configuration.\n\nANSWER_B: In Context B, embeddings are managed in `code_review_graph/embeddings.py` using a provider-based architecture. The `EmbeddingProvider` and `LocalEmbeddingProvider` classes generate vectors through `embed()` and `embed_query()`. The `prewarm_local_embeddings()` function indicates that embeddings can be initialized or cached locally for faster access. While explicit storage isn't listed in the symbols, the provider pattern implies that computed vectors are passed to a downstream persistence layer. Metadata methods like `dimension()` and `name()` ensure model compatibility during storage and retrieval. Usage revolves around on-demand generation, local prewarming, and query embedding for downstream graph operations.\n\nANSWER_C: Context C shows that embeddings are stored via the `EmbeddingStore` class in `code_review_graph/embeddings.py`. The workflow begins with `embed_all_nodes()`, which iterates through all non-file nodes from the `GraphStore`. These are processed by `embed_nodes()`, which converts each node to text using `_node_to_text()`, batches them (default batch_size=64), and computes vectors via a provider retrieved by `get_provider()` (e.g., `OpenAIEmbeddi",
+      "llm_elapsed": 49.6
+    },
+    {
+      "query_id": "q05",
+      "prompt": "how does the build process work",
+      "category": "how_works",
+      "expected": [
+        "code_review_graph/incremental.py",
+        "code_review_graph/tools/build.py"
+      ],
+      "context_tokens": {
+        "graphify": 1541,
+        "crg": 190,
+        "intelligraph": 470
+      },
+      "scores": {
+        "graphify": {
+          "correctness": 5,
+          "completeness": 5
+        },
+        "crg": {
+          "correctness": 5,
+          "completeness": 4
+        },
+        "intelligraph": {
+          "correctness": 5,
+          "completeness": 4
+        }
+      },
+      "llm_response": "ANSWER_A: Based on Context A, the build process is orchestrated by `build_or_update_graph()` in `code_review_graph/tools/build.py`. It supports two execution modes: a complete regeneration via `full_build()` in `code_review_graph/incremental.py`, and an optimized `incremental_update()` that identifies modifications using `get_changed_files()` and resolves impact via `find_dependents()`. The pipeline begins by locating the repository (`find_project_root()`) and gathering source files (`collect_all_files()`). These are parsed by `CodeParser` to extract `GraphNode` and `GraphEdge` objects, which are persisted in `GraphStore`. The process then traces execution paths via `trace_flows()` and `store_flows()`, partitions the codebase using `detect_communities()`, and finalizes by running `_run_postprocess()` and `rebuild_fts_index()` for search optimization.\n\nANSWER_B: According to Context B, the build workflow is initiated through `build_or_update_graph_tool()` in `code_review_graph/main.py`, which coordinates the graph construction lifecycle. It starts with `_initial_build()` in `code_review_graph/daemon.py` to prepare the environment, then constructs the core structure using `_build_networkx_graph()` in `code_review_graph/graph.py`. For community detection, `_build_adjacency()` in `code_review_graph/communities.py` transforms graph edges into an adjacency list. The system supports full regeneration via `full_build()` in `code_review_graph/incremental.py`, which handles complete re-indexing. Additional build stages generate developer assistance data through `_build_next_steps()` and `_build_related()` in `hints.py`, and configure runtime components via `_build_server_entry()` in `skills.py`.\n\nANSWER_C: Drawing from Context C, the build process is managed by `build_or_update_graph` in `code_review_graph/tools/build.py`, which delegates to `_initial_build()` in `code_review_graph/daemon.py` for setup and `full_build()` in `code_review_graph/incremental.py` for complete grap",
+      "llm_elapsed": 76.6
+    },
+    {
+      "query_id": "q09",
+      "prompt": "what languages are supported by the parser",
+      "category": "what_is",
+      "expected": [
+        "code_review_graph/parser.py",
+        "code_review_graph/custom_languages.py"
+      ],
+      "context_tokens": {
+        "graphify": 1508,
+        "crg": 186,
+        "intelligraph": 410
+      },
+      "scores": {
+        "graphify": {
+          "correctness": 5,
+          "completeness": 4
+        },
+        "crg": {
+          "correctness": 5,
+          "completeness": 3
+        },
+        "intelligraph": {
+          "correctness": 5,
+          "completeness": 4
+        }
+      },
+      "llm_response": "ANSWER_A: Based on Context A, the parser supports a core set of built-in languages defined in `_builtin_language_names()` within `parser.py`, alongside extensible custom languages loaded via `load_custom_languages()` in `custom_languages.py`. The traversal reveals explicit parsing logic for TypeScript/JavaScript (via `TsconfigResolver`), ReScript (via `_scan_rescript_modules` and `_strip_rescript_noise`), JSON, and Jupyter notebooks (via `CellInfo`). Test fixtures also reference Julia (`.jl`), indicating broad multi-language coverage.\nANSWER_B: Based on Context B, the parser supports languages through two primary mechanisms: built-in languages managed by `_builtin_language_names()` in `parser.py`, and user-defined custom languages handled by `load_custom_languages()` and the `CustomLanguage` class in `custom_languages.py`. Language identification and parser routing are coordinated by `detect_language()` and `_get_parser()` in `parser.py`, enabling dynamic support for various file types.\nANSWER_C: Based on Context C, the parser supports multiple languages including Go and SQL, as demonstrated in `tests/test_multilang.py` and `tests/test_parser.py`. Language detection is handled by `detect_language()` in `parser.py`, while `load_custom_languages()` in `custom_languages.py` allows for additional or project-specific language support. The test suite (`TestGoParsing`, `test_detects_language`) confirms robust multi-language parsing capabilities.\nSCORE_A: 5 (correctness), 4 (completeness)\nSCORE_B: 5 (correctness), 3 (completeness)\nSCORE_C: 5 (correctness), 4 (completeness)",
+      "llm_elapsed": 67.2
+    },
+    {
+      "query_id": "q10",
+      "prompt": "how does community detection work",
+      "category": "how_works",
+      "expected": [
+        "code_review_graph/communities.py"
+      ],
+      "context_tokens": {
+        "graphify": 1556,
+        "crg": 185,
+        "intelligraph": 409
+      },
+      "scores": {
+        "graphify": {
+          "correctness": 4,
+          "completeness": 4
+        },
+        "crg": {
+          "correctness": 5,
+          "completeness": 5
+        },
+        "intelligraph": {
+          "correctness": 4,
+          "completeness": 3
+        }
+      },
+      "llm_response": "ANSWER_A: In the Graphify/code-review-graph context, community detection is orchestrated by the `detect_communities()` function in `code_review_graph/communities.py` (L585). After partitioning the code graph, results are persisted via `store_communities()` (L681) and retrieved using `get_communities()` (L746). The system relies on a `GraphStore` to manage underlying `GraphNode` and `GraphEdge` structures. Higher-level querying and visualization are exposed through `code_review_graph/tools/community_tools.py`, which provides utilities like `list_communities_func()`, `get_community_func()`, and `get_architecture_overview_func()` to interact with the detected communities.\nANSWER_B: Based on the CRG context, community detection in `code_review_graph/communities.py` follows a structured algorithmic pipeline. First, `_build_adjacency()` constructs the relationship graph between code elements. Next, `_compute_cohesion()` and `_compute_cohesion_batch()` calculate connection strengths to measure node similarity. The core partitioning is executed by `_detect_leiden()`, which applies the Leiden algorithm to group nodes into cohesive communities. Finally, post-processing functions like `_generate_community_name()`, `_extract_keywords()`, `_split_name()`, and `_to_slug()` format and label the communities for readability and downstream use.\nANSWER_C: In the Intelligraph context, the community detection workflow culminates in persistence and validation. The `store_communities()` function in `code_review_graph/communities.py` handles the output by clearing previous community data and `community_id` assignments, then inserting the newly detected communities and updating node references in the database. Retrieval and tooling are managed via `get_community_func()` in `code_review_graph/tools/community_tools.py`. The pipeline is validated through integration tests like `test_full_pipeline` and `test_store_communities_clears_previous`, which ensure detection results are correctly seeded",
+      "llm_elapsed": 44.9
+    },
+    {
+      "query_id": "q11",
+      "prompt": "insert a new node into the graph",
+      "category": "semantic",
+      "expected": [
+        "code_review_graph/graph.py"
+      ],
+      "context_tokens": {
+        "graphify": 1584,
+        "crg": 15,
+        "intelligraph": 476
+      },
+      "scores": {
+        "graphify": {
+          "correctness": 5,
+          "completeness": 4
+        },
+        "crg": {
+          "correctness": 3,
+          "completeness": 2
+        },
+        "intelligraph": {
+          "correctness": 5,
+          "completeness": 5
+        }
+      },
+      "llm_response": "\n\nANSWER_A: To insert a new node into the graph, call the `.upsert_node()` method located in `code_review_graph/graph.py` (line 189). This method belongs to the `GraphStore` class and accepts a `NodeInfo` object representing the node's data. It handles both fresh insertions and updates, returning the assigned node ID. For batch operations, you can alternatively use `.store_file_nodes_edges()` or `.store_file_batch()` in the same module.\n\nANSWER_B: The provided context for CRG only lists `embed_all_nodes` in `code_review_graph/embeddings.py` and does not explicitly document node insertion. However, based on the project's architecture, graph mutations are managed by the `GraphStore` class in `code_review_graph/graph.py`. You would typically instantiate `GraphStore` and call its `upsert_node` method with a `NodeInfo` payload to add a node to the underlying SQLite graph database.\n\nANSWER_C: Use the `upsert_node` method within the `GraphStore` class in `code_review_graph/graph.py`. The method signature is `upsert_node(self, node: NodeInfo, file_hash: str = \"\") -> int`. It takes a `NodeInfo` object containing the node's metadata and an optional `file_hash`. Internally, it qualifies the node, serializes any extra fields to JSON, and executes an SQL statement to insert or update the record in the database, returning the new node's integer ID.\n\nSCORE_A: 5 (correctness), 4 (completeness)\nSCORE_B: 3 (correctness), 2 (completeness)\nSCORE_C: 5 (correctness), 5 (completeness)",
+      "llm_elapsed": 79.2
+    },
+    {
+      "query_id": "q13",
+      "prompt": "find similar code by meaning",
+      "category": "semantic",
+      "expected": [
+        "code_review_graph/embeddings.py",
+        "code_review_graph/search.py"
+      ],
+      "context_tokens": {
+        "graphify": 1608,
+        "crg": 3,
+        "intelligraph": 279
+      },
+      "scores": {
+        "graphify": {
+          "correctness": 4,
+          "completeness": 4
+        },
+        "crg": {
+          "correctness": 5,
+          "completeness": 5
+        },
+        "intelligraph": {
+          "correctness": 5,
+          "completeness": 5
+        }
+      },
+      "llm_response": "ANSWER_A: In the Graphify codebase, finding similar code by meaning relies on the embedding and graph storage pipeline. The `CodeParser` extracts code constructs, which are vectorized by `EmbeddingProvider` implementations such as `OpenAIEmbeddingProvider` or `LocalEmbeddingProvider`. These vectors are persisted in `EmbeddingStore`. Semantic similarity search is performed by querying the `EmbeddingStore` for nearest neighbors and mapping them back to `GraphNode` objects in `GraphStore` (`graph.py`). While `find_dead_code()` uses graph traversal for structural analysis, meaning-based similarity is fundamentally handled by the embedding providers and vector store in `embeddings.py`.\nANSWER_B: The provided CRG context contains no results or relevant code nodes. Consequently, there is no implementation or reference for finding similar code by meaning in this specific context.\nANSWER_C: In the Intelligraph context, semantic code similarity is implemented via vector comparison in `code_review_graph/embeddings.py`. The `_cosine_similarity` function calculates the cosine distance between two embedding vectors, serving as the core metric for meaning-based code matching. This is integrated with a `search` function to retrieve semantically related code. The functionality is validated by unit tests in `tests/test_embeddings.py` (e.g., `test_identical_vectors`, `test_opposite_vectors`). The expected implementation files are `code_review_graph/embeddings.py` and `code_review_graph/search.py`.\nSCORE_A: 4 (correctness), 4 (completeness)\nSCORE_B: 5 (correctness), 5 (completeness)\nSCORE_C: 5 (correctness), 5 (completeness)",
+      "llm_elapsed": 57.6
+    },
+    {
+      "query_id": "q15",
+      "prompt": "trace the path from build to graph storage",
+      "category": "multihop",
+      "expected": [
+        "code_review_graph/incremental.py",
+        "code_review_graph/graph.py"
+      ],
+      "context_tokens": {
+        "graphify": 1558,
+        "crg": 190,
+        "intelligraph": 483
+      },
+      "scores": {
+        "graphify": {
+          "correctness": 5,
+          "completeness": 4
+        },
+        "crg": {
+          "correctness": 4,
+          "completeness": 3
+        },
+        "intelligraph": {
+          "correctness": 5,
+          "completeness": 5
+        }
+      },
+      "llm_response": "ANSWER_A: The path originates in `code_review_graph/tools/build.py` with `build_or_update_graph()`, which delegates to `full_build()` or `incremental_update()` in `code_review_graph/incremental.py`. These routines trigger `trace_flows()` and `store_flows()` in `code_review_graph/flows.py` to extract and stage dependency data. The processed structure is then handed to the `GraphStore` class in `code_review_graph/graph.py`, which finalizes persistence by resolving the target database location via `get_db_path()` in `incremental.py`.\n\nANSWER_B: Execution begins with `build_or_update_graph_tool` in `code_review_graph/main.py`, which invokes `_initial_build` in `code_review_graph/daemon.py` or `full_build` in `code_review_graph/incremental.py`. These functions construct the in-memory representation using `_build_networkx_graph` in `code_review_graph/graph.py`. The adjacency relationships are then computed by `_build_adjacency` in `code_review_graph/communities.py` before the graph is serialized and committed to the underlying storage backend.\n\nANSWER_C: The workflow starts at `build_or_update_graph` in `code_review_graph/tools/build.py`, which calls `trace_flows` in `code_review_graph/flows.py` (and `_trace_flows` in `postprocessing.py`) to map code relationships. The resulting data is assembled into a NetworkX graph via `_build_networkx_graph` in `code_review_graph/graph.py`. For persistence, the system calls `get_db_path` in `code_review_graph/incremental.py`, which internally uses `get_data_dir` to resolve the final directory and database file path for graph storage.\n\nSCORE_A: 5, 4\nSCORE_B: 4, 3\nSCORE_C: 5, 5",
+      "llm_elapsed": 113.0
+    },
+    {
+      "query_id": "q16",
+      "prompt": "what is the blast radius of changing graph.py",
+      "category": "impact",
+      "expected": [
+        "code_review_graph/graph.py",
+        "code_review_graph/changes.py"
+      ],
+      "context_tokens": {
+        "graphify": 1542,
+        "crg": 302,
+        "intelligraph": 665
+      },
+      "scores": {
+        "graphify": {
+          "correctness": 5,
+          "completeness": 4
+        },
+        "crg": {
+          "correctness": 4,
+          "completeness": 2
+        },
+        "intelligraph": {
+          "correctness": 5,
+          "completeness": 5
+        }
+      },
+      "llm_response": "ANSWER_A: Based on the BFS traversal, changing `graph.py` has a broad blast radius. It directly impacts the `GraphStore` class and core graph structures (`GraphNode`, `GraphEdge`, `FlowAdjacency`). Key affected methods include data persistence (`upsert_node`, `store_file_batch`, `store_file_nodes_edges`, `commit`), querying (`_batch_get_nodes`, `get_edges_among`, `_row_to_node`, `_row_to_edge`), and impact analysis (`_get_impact_radius_networkx`, `get_impact_radius_sql`). Downstream, it affects `parser.py` (which supplies `NodeInfo`/`EdgeInfo`), `migrations.py` (schema/version management), and the VSCode extension's TypeScript layer (`sqlite.ts`, `blastRadius.ts`, `treeView.ts`, `cursorResolver.ts`) that consume these graph operations for UI rendering and feature logic.\nANSWER_B: Based on the provided context, the blast radius of changing `graph.py` appears minimal or indirect. The context primarily lists VSCode extension build scripts (`esbuild.mjs`), CLI wrappers (`cli.ts`, `CliWrapper`), and git hooks. There are no direct references to `graph.py` or its consumers in this snippet. Any impact would likely be indirect, potentially requiring a rebuild of the extension or updates to the CLI wrapper if it interfaces with the Python backend, but the immediate dependency chain is not visible here.\nANSWER_C: Changing `graph.py` carries a high blast radius. It directly modifies the `GraphStore` class, the core SQLite-backed knowledge graph. This change propagates to `changes.py` (`analyze_changes`), `graph_diff.py`, and `visualization.py` (`export_graph_data`), as well as the VSCode webview (`graph.ts`). Crucially, the subgraph indicates it is tightly coupled with a wide suite of tests: `test_graph.py`, `test_eval.py`, `test_multilang.py`, `test_incremental.py`, `test_tools.py`, `test_visualization.py`, and `test_embeddings.py`. Modifying it will likely require updating these tests and verifying downstream analysis and visualization pipelines.\nSCORE_A: 5 (correctness), 4 (",
+      "llm_elapsed": 49.7
+    },
+    {
+      "query_id": "q19",
+      "prompt": "how does wiki generation work",
+      "category": "how_works",
+      "expected": [
+        "code_review_graph/wiki.py",
+        "code_review_graph/tools/docs.py"
+      ],
+      "context_tokens": {
+        "graphify": 1579,
+        "crg": 173,
+        "intelligraph": 460
+      },
+      "scores": {
+        "graphify": {
+          "correctness": 4,
+          "completeness": 3
+        },
+        "crg": {
+          "correctness": 5,
+          "completeness": 4
+        },
+        "intelligraph": {
+          "correctness": 5,
+          "completeness": 5
+        }
+      },
+      "llm_response": "\n\nANSWER_A: In the Graphify context, wiki generation is tightly coupled with the codebase's graph analysis pipeline. It begins by analyzing the `GraphStore` to identify architectural groupings via `detect_communities()` in `communities.py`. The core `generate_wiki()` function in `wiki.py` then iterates over these detected communities, calling `_generate_community_page()` to produce structured markdown documentation for each. The process leverages flow analysis from `flows.py` and optionally incorporates LLM-generated summaries to enrich the content. Finally, it outputs a directory of markdown pages that reflect the underlying community structure and code dependencies.\n\nANSWER_B: In the CRG context, wiki generation is exposed through a dedicated tooling layer that wraps the core logic. Entry points like `generate_wiki_tool()` and `generate_wiki_func()` in `code_review_graph/tools/docs.py` handle CLI/API invocation and delegate to the main `generate_wiki()` function in `code_review_graph/wiki.py`. This function processes community data, uses `_slugify()` to create filesystem-safe filenames, and invokes `_generate_community_page()` to write individual markdown files. It also provides `get_wiki_page()` for dynamic retrieval and includes security safeguards against path traversal attacks, as validated by integration tests.\n\nANSWER_C: In the Intelligraph context, wiki generation is implemented as a deterministic pipeline in `code_review_graph/wiki.py`. The `generate_wiki(store, wiki_dir, force)` function accepts a `GraphStore` instance and a target directory. It iterates through pre-detected communities, calling `_generate_community_page()` to create a markdown file for each. Additionally, it automatically generates an `index.md` that contains links to all community pages. The entire workflow is validated by tests like `test_generate_wiki_creates_files` in `tests/test_wiki.py`, which seed mock graph data via `_seed_communities()` to verify file creation, handle slug colli",
+      "llm_elapsed": 70.1
+    }
+  ],
+  "model": "qwen/qwen3.6-27b"
+}

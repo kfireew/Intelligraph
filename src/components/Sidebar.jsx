@@ -4,7 +4,7 @@ import {
   MessageSquare, Settings, Server, GitBranch,
   Plus, X, LogIn, LogOut, ChevronLeft,
   Loader2, CheckCircle2, AlertCircle, Clock,
-  RefreshCw, Share2, KeyRound, AlertTriangle,
+  RefreshCw, Share2, KeyRound, AlertTriangle, SlidersHorizontal,
 } from "lucide-react";
 
 const STATUS_ICONS = {
@@ -35,6 +35,10 @@ const NAV_ITEMS = [
 
 const CLONED_NAV_ITEMS = [
   { panel: "branch", label: "Branch", icon: GitBranch },
+];
+
+const TUNING_NAV_ITEMS = [
+  { panel: "tuning", label: "Tuning", icon: SlidersHorizontal },
 ];
 
 export function Sidebar({
@@ -304,6 +308,21 @@ export function Sidebar({
           </motion.button>
         ))}
         {activeProjectHasGitUrl && CLONED_NAV_ITEMS.map(({ panel, label, icon: Icon }) => (
+          <motion.button
+            key={panel}
+            whileHover={{ scale: 1.02, backgroundColor: "rgba(255,255,255,0.06)" }}
+            onClick={() => onSwitchPanel(panel)}
+            className={`w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors ${
+              activePanel === panel
+                ? "text-accent-light bg-accent/10"
+                : "text-muted hover:text-text"
+            }`}
+          >
+            <Icon size={14} className="flex-shrink-0" />
+            {!collapsed && label}
+          </motion.button>
+        ))}
+        {TUNING_NAV_ITEMS.map(({ panel, label, icon: Icon }) => (
           <motion.button
             key={panel}
             whileHover={{ scale: 1.02, backgroundColor: "rgba(255,255,255,0.06)" }}

@@ -38,6 +38,7 @@ export function ChatPanel({
   newConversation,
   deleteConversation,
   switchConversation,
+  sendFeedback,
 }) {
   const bottomRef = useRef(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -186,7 +187,7 @@ export function ChatPanel({
           ) : (
             <>
                 {messages.map((msg) => (
-                  <ChatMessage key={msg.id} message={msg} />
+                  <ChatMessage key={msg.id} message={msg} sendFeedback={sendFeedback} />
                 ))}
 
               {/* Streaming indicator */}

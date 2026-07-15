@@ -20,11 +20,32 @@ import logging
 import os
 import re
 import sqlite3
-from collections import defaultdict
+from collections import defaultdict, deque
 
 log = logging.getLogger(__name__)
 
 _VERBOSE = os.environ.get("INTELLIGRAPH_VERBOSE", "true").lower() == "true"
+
+try:
+    import numpy as np
+    _HAS_NUMPY = True
+except ImportError:
+    _HAS_NUMPY = False
+
+
+_JUNK_PATH_PATTERNS = [
+    "/build/", "/bundle/", "/devtools/", "/dist/", "/out/",
+    ".min.js", ".chunk.js", ".bundle.js", ".pack.js",
+    "/generated/", "/codegen/", "/__generated__/",
+    ".ngfactory.ts", "redux-dev-tools", "build-resources",
+]
+
+
+def _is_junk_path(fp):
+    if not fp:
+        return True
+    lower = fp.lower() if isinstance(fp, str) else ""
+    return any(p in lower for p in _JUNK_PATH_PATTERNS)
 
 
 def _vmsg(msg, *args):
@@ -38,6 +59,33 @@ def _vmsg(msg, *args):
         except Exception:
             pass
     print(f"[{ts}] {msg}", flush=True)
+
+
+# ── Embedding infrastructure (reuses bundled all-MiniLM-L6-v2) ────
+
+_ENCODER = None
+_ENCODER_ERR = None
+_EMBEDDING_CACHE = {}  # db_path -> {"names": [...], "ids": [...], "embeddings": ndarray, "built_at": float}
+
+
+def _get_encoder():
+    """Lazily load the sentence-transformers encoder. Reuses the same model
+    as semantic_planner.py (all-MiniLM-L6-v2 from backend/models/)."""
+    global _ENCODER, _ENCODER_ERR
+    if _ENCODER is not None:
+        return _ENCODER
+    if _ENCODER_ERR is not None:
+        return None
+    try:
+        from semantic_planner import _get_encoder as _sp_encoder
+        _ENCODER = _sp_encoder()
+        if _ENCODER is None:
+            _ENCODER_ERR = "semantic_planner encoder unavailable"
+        return _ENCODER
+    except Exception as e:
+        _ENCODER_ERR = str(e)
+        log.warning("Encoder init failed: %s", e)
+        return None
 
 
 # ── Framework: IntelligenceProvider base class ────────────────────
@@ -355,10 +403,12 @@ class CRGProvider(IntelligenceProvider):
                 ).fetchall()
                 for r in rows:
                     fp = self._normalize_path(r["file_path"])
-                    if not fp:
+                    if not fp or _is_junk_path(fp):
                         continue
+                    # Exact match boost: if the symbol name exactly matches the term
+                    is_exact = r["name"].lower() == term.lower()
                     entry = file_scores[fp]
-                    entry["score"] += weight
+                    entry["score"] += (15.0 if is_exact else weight)
                     entry["names"].append(r["name"])
                     entry["kinds"].add(r["kind"])
                     entry["matched_terms"].add(term)
@@ -385,7 +435,463 @@ class CRGProvider(IntelligenceProvider):
         _vmsg("CRG SEARCH: query='%s' terms=%s -> %d files", query[:50], terms[:5], len(results))
         return results
 
-    # ── Mode 2: Architecture (communities + summaries) ─────────────
+    # ── Mode 1b: Semantic (embedding) search ──────────────────────
+
+    def _build_embedding_index(self):
+        """Build a numpy embedding index of all CRG node names + signatures.
+
+        Caches per db_path. For 28k nodes: ~43MB in RAM, ~2s to build.
+        """
+        if not _HAS_NUMPY:
+            return None
+        encoder = _get_encoder()
+        if encoder is None:
+            return None
+
+        cache_key = self._db_path
+        cached = _EMBEDDING_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+
+        conn = self._get_conn()
+        try:
+            rows = conn.execute(
+                "SELECT id, name, kind, signature, file_path, qualified_name "
+                "FROM nodes WHERE name IS NOT NULL AND kind IN ('Function','Class','Method','File') "
+                "ORDER BY id"
+            ).fetchall()
+        except Exception:
+            rows = conn.execute(
+                "SELECT id, name, '' as kind, '' as signature, file_path, '' as qualified_name "
+                "FROM nodes WHERE name IS NOT NULL ORDER BY id"
+            ).fetchall()
+
+        if not rows:
+            _EMBEDDING_CACHE[cache_key] = None
+            return None
+
+        texts = []
+        ids = []
+        meta = []
+        for r in rows:
+            name = r["name"] or ""
+            sig = r["signature"] or ""
+            text = f"{name} {sig}".strip() if sig else name
+            if not text or len(text) < 2:
+                continue
+            texts.append(text[:200])
+            ids.append(r["id"])
+            meta.append({
+                "id": r["id"], "name": name, "kind": r["kind"] or "",
+                "file_path": self._normalize_path(r["file_path"]) if r["file_path"] else "",
+                "qualified_name": r["qualified_name"] or name,
+            })
+
+        if not texts:
+            _EMBEDDING_CACHE[cache_key] = None
+            return None
+
+        try:
+            embeddings = encoder.encode(texts, show_progress_bar=False, convert_to_numpy=True)
+        except Exception as e:
+            log.warning("Embedding encode failed for %d texts: %s", len(texts), e)
+            _EMBEDDING_CACHE[cache_key] = None
+            return None
+
+        index = {
+            "texts": texts, "ids": ids, "meta": meta,
+            "embeddings": embeddings,
+            "count": len(texts),
+        }
+        _EMBEDDING_CACHE[cache_key] = index
+        _vmsg("CRG EMBED INDEX: built for %s, %d nodes, dim=%d", cache_key, len(texts), embeddings.shape[1])
+        return index
+
+    def semantic_search(self, query: str, max_results: int = 20) -> list[dict]:
+        """Semantic (embedding-based) search for nodes matching query meaning.
+
+        Returns: [{file_path, name, kind, score, reason, source, mode}]
+        Score is raw cosine similarity (0-1). Threshold 0.25 drops weak matches.
+        """
+        if not _HAS_NUMPY:
+            return []
+        encoder = _get_encoder()
+        if encoder is None:
+            return []
+        index = self._build_embedding_index()
+        if index is None:
+            return []
+
+        try:
+            q_emb = encoder.encode([query], show_progress_bar=False, convert_to_numpy=True)[0]
+        except Exception as e:
+            log.warning("Query embedding failed: %s", e)
+            return []
+
+        scores = index["embeddings"] @ q_emb
+        top_indices = np.argsort(scores)[::-1][:max_results * 2]
+
+        results = []
+        for idx in top_indices:
+            if len(results) >= max_results:
+                break
+            score = float(scores[idx])
+            if score < 0.25:
+                break
+            m = index["meta"][idx]
+            fp = m["file_path"]
+            if not fp or _is_junk_path(fp):
+                continue
+            results.append({
+                "file_path": fp,
+                "name": m["name"],
+                "kind": m["kind"],
+                "score": round(score, 3),
+                "reason": ["semantic_match"],
+                "source": "crg",
+                "mode": "semantic",
+                "matched_terms": [],
+            })
+
+        _vmsg("CRG SEMANTIC: query='%s' -> %d results", query[:50], len(results))
+        return results
+
+    def hybrid_search(self, query: str, max_results: int = 20, embedding_weight: float = 0.4) -> list[dict]:
+        """Hybrid search using Reciprocal Rank Fusion (RRF).
+
+        RRF is rank-invariant: it uses each system's ranking, not raw scores,
+        so mismatched score scales don't corrupt the blend. Files appearing
+        in both FTS and semantic results get two additive terms -> higher
+        RRF score. Files in only one system get a single term -> lower score.
+
+        After RRF ranking, an adaptive cutoff drops results below 30% of the
+        top score — so specific queries return 2-3 files and broad queries
+        return 5-8, instead of always returning max_results.
+        """
+        fts_weight = 1.0 - embedding_weight
+        fts_results = self.search(query, max_results=max_results * 2)
+
+        if embedding_weight <= 0.0:
+            ranked = sorted(fts_results, key=lambda x: -x.get("score", 0))
+            if ranked:
+                top = ranked[0].get("score", 0)
+                ranked = [r for r in ranked if r.get("score", 0) >= top * 0.3]
+            return ranked[:max_results]
+
+        sem_results = self.semantic_search(query, max_results=max_results * 2)
+        if embedding_weight >= 1.0:
+            ranked = sorted(sem_results, key=lambda x: -x.get("score", 0))
+            if ranked:
+                top = ranked[0].get("score", 0)
+                ranked = [r for r in ranked if r.get("score", 0) >= top * 0.3]
+            return ranked[:max_results]
+
+        k = 30  # RRF constant — lower k = steeper drop-off (k=60 is too flat for 10-20 results)
+        fts_rank = {}
+        for i, r in enumerate(fts_results):
+            fp = r.get("file_path", "")
+            if fp and fp not in fts_rank:
+                fts_rank[fp] = i + 1
+
+        sem_rank = {}
+        for i, r in enumerate(sem_results):
+            fp = r.get("file_path", "")
+            if fp and fp not in sem_rank:
+                sem_rank[fp] = i + 1
+
+        lookup = {}
+        for r in sem_results:
+            fp = r.get("file_path", "")
+            if fp:
+                lookup[fp] = r
+        for r in fts_results:
+            fp = r.get("file_path", "")
+            if fp:
+                lookup[fp] = r
+
+        all_fps = set(fts_rank.keys()) | set(sem_rank.keys())
+        scored = []
+        for fp in all_fps:
+            rrf = 0.0
+            if fp in fts_rank:
+                rrf += fts_weight / (k + fts_rank[fp])
+            if fp in sem_rank:
+                rrf += embedding_weight / (k + sem_rank[fp])
+            base = lookup.get(fp, {})
+            entry = dict(base)
+            entry["file_path"] = fp
+            entry["score"] = round(rrf * 1000, 1)
+            entry["mode"] = "hybrid" if fp in fts_rank and fp in sem_rank else base.get("mode", "hybrid")
+            reasons = set(base.get("reason", []))
+            if fp in fts_rank:
+                reasons.add("rrf_fts")
+            if fp in sem_rank:
+                reasons.add("rrf_semantic")
+            entry["reason"] = sorted(reasons)
+            scored.append(entry)
+
+        ranked = sorted(scored, key=lambda x: -x["score"])
+
+        if ranked:
+            top_score = ranked[0]["score"]
+            cutoff = top_score * 0.5
+            ranked = [r for r in ranked if r["score"] >= cutoff]
+
+        results = ranked[:max_results]
+        _vmsg("CRG HYBRID(RRF): query='%s' ew=%.1f -> %d results (fts=%d sem=%d, cutoff=%.1f)",
+              query[:50], embedding_weight, len(results), len(fts_results), len(sem_results),
+              ranked[0]["score"] * 0.3 if ranked else 0)
+        return results
+
+    # ── Mode 1c: Multi-hop graph traversal ────────────────────────
+
+    _ADJACENCY_CACHE = {}  # db_path -> {adj: dict, node_lookup: dict}
+
+    def _build_adjacency(self):
+        """Build and cache bidirectional adjacency from CRG edges.
+
+        For 140k edges: ~20MB in RAM, built once per project.
+        """
+        cache_key = self._db_path
+        cached = CRGProvider._ADJACENCY_CACHE.get(cache_key)
+        if cached is not None:
+            return cached
+
+        conn = self._get_conn()
+        adj = defaultdict(list)
+        node_lookup = {}
+        qname_lookup = {}
+
+        try:
+            nodes = conn.execute("SELECT id, name, kind, file_path, qualified_name FROM nodes").fetchall()
+            for n in nodes:
+                info = {
+                    "name": n["name"], "kind": n["kind"] or "",
+                    "file_path": self._normalize_path(n["file_path"]) if n["file_path"] else "",
+                    "qualified_name": n["qualified_name"] or n["name"],
+                }
+                node_lookup[n["id"]] = info
+                qname = n["qualified_name"] or n["name"]
+                if qname:
+                    qname_lookup[qname] = info
+
+            edges = conn.execute("SELECT source_qualified, target_qualified, kind FROM edges").fetchall()
+            for e in edges:
+                src = e["source_qualified"]
+                tgt = e["target_qualified"]
+                ek = e["kind"] or "link"
+                if src and tgt:
+                    adj[src].append((tgt, ek))
+                    adj[tgt].append((src, ek))
+        except Exception as e:
+            log.warning("Adjacency build failed: %s", e)
+            CRGProvider._ADJACENCY_CACHE[cache_key] = None
+            return None
+
+        result = {"adj": dict(adj), "node_lookup": node_lookup, "qname_lookup": qname_lookup}
+        CRGProvider._ADJACENCY_CACHE[cache_key] = result
+        _vmsg("CRG ADJACENCY: built for %s, %d nodes, %d edges", cache_key, len(node_lookup), len(adj))
+        return result
+
+    def traverse(self, target: str, max_hops: int = 2, max_nodes: int = 30, max_tokens: int = 400) -> dict:
+        """Multi-hop BFS traversal from target node with token budget.
+
+        Returns: {nodes: [{name, file, kind, depth, degree}], edges: [{source, target, type}],
+                  stats: {hops, nodes, edges, est_tokens}}
+        """
+        if not target:
+            return {"nodes": [], "edges": [], "stats": {"hops": 0, "nodes": 0, "edges": 0, "est_tokens": 0}}
+
+        adj_data = self._build_adjacency()
+        if adj_data is None:
+            return {"nodes": [], "edges": [], "stats": {"hops": 0, "nodes": 0, "edges": 0, "est_tokens": 0}}
+
+        adj = adj_data["adj"]
+        node_lookup = adj_data["node_lookup"]
+        qname_lookup = adj_data.get("qname_lookup", {})
+
+        target_lower = target.lower()
+        start_qnames = []
+        for nid, ninfo in node_lookup.items():
+            if ninfo["name"].lower() == target_lower or (ninfo["qualified_name"] and target_lower in ninfo["qualified_name"].lower()):
+                start_qnames.append(ninfo["qualified_name"])
+                break
+        if not start_qnames:
+            for nid, ninfo in node_lookup.items():
+                if target_lower in ninfo["name"].lower():
+                    start_qnames.append(ninfo["qualified_name"])
+                    break
+
+        if not start_qnames:
+            return {"nodes": [], "edges": [], "stats": {"hops": 0, "nodes": 0, "edges": 0, "est_tokens": 0}}
+
+        visited = set()
+        edges_result = []
+        nodes_result = []
+        queue = deque()
+
+        for sq in start_qnames:
+            if sq not in visited:
+                visited.add(sq)
+                ni = qname_lookup.get(sq, {})
+                if ni and not _is_junk_path(ni.get("file_path", "")):
+                    nodes_result.append({
+                        "name": ni.get("name", sq), "file": ni.get("file_path", ""),
+                        "kind": ni.get("kind", ""), "depth": 0,
+                        "degree": len(adj.get(sq, [])),
+                    })
+                    queue.append((sq, 0))
+
+        est_tokens = len(nodes_result) * 15
+        current_hop = 0
+
+        while queue and len(nodes_result) < max_nodes and est_tokens < max_tokens:
+            current, depth = queue.popleft()
+            if depth >= max_hops:
+                continue
+            neighbors = adj.get(current, [])
+            neighbors_sorted = sorted(neighbors, key=lambda x: len(adj.get(x[0], [])), reverse=True)
+
+            for neighbor_qname, edge_type in neighbors_sorted:
+                if neighbor_qname in visited:
+                    continue
+                if len(nodes_result) >= max_nodes or est_tokens >= max_tokens:
+                    break
+                visited.add(neighbor_qname)
+                ni = qname_lookup.get(neighbor_qname, {})
+                fp = ni.get("file_path", "")
+                if _is_junk_path(fp):
+                    continue
+                nodes_result.append({
+                    "name": ni.get("name", neighbor_qname), "file": fp,
+                    "kind": ni.get("kind", ""), "depth": depth + 1,
+                    "degree": len(adj.get(neighbor_qname, [])),
+                })
+                edges_result.append({
+                    "source": qname_lookup.get(current, {}).get("name", current),
+                    "target": ni.get("name", neighbor_qname),
+                    "type": edge_type,
+                })
+                est_tokens += 15
+                queue.append((neighbor_qname, depth + 1))
+
+        stats = {"hops": max(n["depth"] for n in nodes_result) if nodes_result else 0,
+                 "nodes": len(nodes_result), "edges": len(edges_result), "est_tokens": est_tokens}
+        _vmsg("CRG TRAVERSE: target='%s' hops=%d -> %d nodes, %d edges (%d est tokens)",
+              target[:30], max_hops, len(nodes_result), len(edges_result), est_tokens)
+        return {"nodes": nodes_result, "edges": edges_result, "stats": stats}
+
+    # ── Mode 1d: Source code snippets ─────────────────────────────
+
+    def get_snippets(self, node_names: list[str], max_chars: int = 500) -> dict:
+        """Fetch source code snippets for given node names from CRG DB.
+
+        Returns: {node_name: {snippet, file_path, line_start, line_end}}
+        """
+        if not node_names:
+            return {}
+        conn = self._get_conn()
+        result = {}
+        placeholders = ",".join("?" * min(len(node_names), 50))
+        query_names = node_names[:50]
+
+        try:
+            rows = conn.execute(
+                f"SELECT name, file_path, line_start, line_end FROM nodes "
+                f"WHERE name IN ({placeholders}) AND file_path IS NOT NULL "
+                f"ORDER BY LENGTH(name) ASC LIMIT 50",
+                query_names
+            ).fetchall()
+
+            for r in rows:
+                name = r["name"]
+                if name in result:
+                    continue
+                fp = self._normalize_path(r["file_path"])
+                if not fp or _is_junk_path(fp):
+                    continue
+                snippet = ""
+                try:
+                    snip_row = conn.execute(
+                        "SELECT snippet FROM node_snippets WHERE node_name = ?",
+                        (name,)
+                    ).fetchone()
+                    if snip_row and snip_row["snippet"]:
+                        snippet = snip_row["snippet"][:max_chars]
+                except Exception:
+                    pass
+                result[name] = {
+                    "snippet": snippet,
+                    "file_path": fp,
+                    "line_start": r["line_start"] or 0,
+                    "line_end": r["line_end"] or 0,
+                }
+        except Exception as e:
+            log.warning("get_snippets failed: %s", e)
+
+        return result
+
+    # ── Mode 1e: Rationale/doc nodes from graphify ────────────────
+
+    def get_rationale(self, node_name: str) -> list[dict]:
+        """Find rationale/doc nodes connected to a symbol in graphify data.
+
+        Returns: [{text, confidence, source_file}]
+        """
+        gf = self.proj.get("graphify_data")
+        if not gf:
+            return []
+
+        nodes = gf.get("nodes", [])
+        links = gf.get("links", [])
+        name_lower = node_name.lower()
+
+        matched_id = None
+        for n in nodes:
+            for key in (n.get("id"), n.get("label"), n.get("qualified_name")):
+                if key and key.lower() == name_lower:
+                    matched_id = n.get("id") or n.get("label")
+                    break
+            if matched_id:
+                break
+        if not matched_id:
+            for n in nodes:
+                label = (n.get("label") or "").lower()
+                if name_lower in label:
+                    matched_id = n.get("id") or n.get("label")
+                    break
+
+        if not matched_id:
+            return []
+
+        rationale_nodes = {n.get("id") or n.get("label"): n for n in nodes if n.get("file_type") == "rationale"}
+        if not rationale_nodes:
+            return []
+
+        result = []
+        for l in links:
+            src = l.get("source") or l.get("from")
+            tgt = l.get("target") or l.get("to")
+            rel = l.get("type") or l.get("kind") or ""
+            conf = l.get("confidence", "")
+
+            connected_rationale = None
+            if src == matched_id and rel == "rationale_for" and tgt in rationale_nodes:
+                connected_rationale = rationale_nodes[tgt]
+            elif tgt == matched_id and rel == "rationale_for" and src in rationale_nodes:
+                connected_rationale = rationale_nodes[src]
+
+            if connected_rationale:
+                text = connected_rationale.get("label") or connected_rationale.get("id") or ""
+                if text:
+                    result.append({
+                        "text": text[:500],
+                        "confidence": conf,
+                        "source_file": connected_rationale.get("source_file", ""),
+                    })
+
+        _vmsg("CRG RATIONALE: target='%s' -> %d notes", node_name[:30], len(result))
+        return result
 
     def architecture(self) -> list[dict]:
         """Get community structure with summaries for architecture context.

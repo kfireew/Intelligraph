@@ -63,20 +63,46 @@ _SECTION_BUDGETS = {
 }
 
 
-def merge_tasks(tasks: list, per_task_results: list, graphify_data: dict, nx_metadata: dict = None) -> tuple:
+def merge_tasks(tasks: list, per_task_results: list, graphify_data: dict, nx_metadata: dict = None,
+                resolution_pct: int = 100, budget_chars: int = None, chunk_caps: dict = None) -> tuple:
     """Merge results from multiple tasks into a single deduplicated context.
-    
+
     Args:
         tasks:             [{ id, type, target, ... }] from ExecutionPlanner
         per_task_results:  [{ task_id, files, chunks, expanded_nodes }] per task
         graphify_data:     raw graph data for structure overview
         nx_metadata:       optional Nx workspace metadata dict
-    
+        resolution_pct:    1-100, scales DEFAULT_TOKEN_BUDGET/ARCHITECTURE_BUDGET.
+                           Ignored when budget_chars is provided.
+        budget_chars:      Explicit context budget in chars (from TuningPanel).
+                           Overrides resolution_pct scaling. Floor at 2000.
+        chunk_caps:        Dict of {task_type: max_chunks} overriding _TASK_CHUNK_CAPS.
+                           From TuningPanel table. None = use defaults.
+
     Returns:
         (context_string, stats_dict)
     """
     if not tasks:
         return "", {}
+
+    # Determine context budgets: explicit budget_chars takes priority,
+    # otherwise scale by resolution_pct. Floor at 2000 chars.
+    if budget_chars is not None:
+        _token_budget = max(int(budget_chars), 2000)
+        _arch_budget = max(int(budget_chars), 2000)
+    else:
+        _rpct = max(1, min(100, int(resolution_pct or 100)))
+        _token_budget = max(int(DEFAULT_TOKEN_BUDGET * _rpct / 100), 2000)
+        _arch_budget = max(int(ARCHITECTURE_BUDGET * _rpct / 100), 2000)
+
+    # Per-task chunk caps: use user overrides if provided, else defaults
+    _effective_chunk_caps = dict(_TASK_CHUNK_CAPS)
+    if chunk_caps and isinstance(chunk_caps, dict):
+        for k, v in chunk_caps.items():
+            try:
+                _effective_chunk_caps[k] = max(1, int(v))
+            except (ValueError, TypeError):
+                pass
 
     parts = []
 
@@ -159,15 +185,15 @@ def merge_tasks(tasks: list, per_task_results: list, graphify_data: dict, nx_met
             structure += f"- `{f}`\n"
         parts.append(structure)
 
-    # 4. Token budget allocation — priority-weighted
-    total_budget = ARCHITECTURE_BUDGET if is_architecture else DEFAULT_TOKEN_BUDGET
+    # 4. Token budget allocation — priority-weighted (scaled by resolution_pct)
+    total_budget = _arch_budget if is_architecture else _token_budget
     # Subtract architecture overhead from code budget
     code_budget = max(total_budget - arch_overhead_chars, 2000)
     budget_per_task = _allocate_budget(tasks, code_budget)
 
     # 5. Code chunks — deduplicated, globally ranked, budgeted per-task TOTAL
     code_blocks = _collect_code_blocks(
-        ranked, per_task_results, tasks, budget_per_task, is_architecture
+        ranked, per_task_results, tasks, budget_per_task, is_architecture, _effective_chunk_caps
     )
 
     if code_blocks:
@@ -372,7 +398,7 @@ def _build_architecture_sections(graphify_data, per_task_results, _all_source_fi
     return text, total_chars, _crg_domain_found, _domain_layers
 
 
-def _collect_code_blocks(ranked, per_task_results, tasks, budget_per_task, is_architecture):
+def _collect_code_blocks(ranked, per_task_results, tasks, budget_per_task, is_architecture, effective_chunk_caps=None):
     """Collect code chunks with per-task TOTAL budget enforcement and chunk count caps."""
     code_blocks = []
     seen_chunks = set()
@@ -381,6 +407,8 @@ def _collect_code_blocks(ranked, per_task_results, tasks, budget_per_task, is_ar
 
     # Build task type lookup
     task_type_map = {t["id"]: t.get("type", "how_works") for t in tasks}
+
+    _caps = effective_chunk_caps or _TASK_CHUNK_CAPS
 
     for rank_entry in ranked:
         fp = rank_entry["file_path"]
@@ -395,7 +423,7 @@ def _collect_code_blocks(ranked, per_task_results, tasks, budget_per_task, is_ar
                 task_id = result["task_id"]
                 task_type = task_type_map.get(task_id, "how_works")
                 task_budget = budget_per_task.get(task_id, 2000)
-                chunk_cap = _TASK_CHUNK_CAPS.get(task_type, 10)
+                chunk_cap = _caps.get(task_type, 10)
 
                 # Check chunk count cap per task
                 if task_chunk_count.get(task_id, 0) >= chunk_cap:

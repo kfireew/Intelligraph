@@ -17,7 +17,7 @@ import re
 # ── Regex patterns (fallback when semantic-router unavailable) ──
 
 _INTENT_PATTERNS = [
-    (r"test|coverage", "tests"),
+    (r"test|coverage|find all|all places|all occurrences|all instances|every (?:file|place|location)|where .*(?:used|happens|appears|occurs)", "coverage"),
     (r"impact|blast radius|what breaks|what is affected|what would break|affect.*chang", "impact"),
     (r"who calls|what calls|who uses|what uses|who imports|depends on|callers of", "callers"),
     (r"what does.*(?:call|use|import|depend on)|callees", "callees"),
@@ -44,7 +44,7 @@ def _OLD_detect_intent(prompt: str) -> dict:
 # Known compound patterns that produce multiple tasks (regex fallback)
 _COMPOUND_PATTERNS = [
     (r".*(?:how|explain)\s+.*(?:and|also|then).*(?:what\s+breaks|impact|affect).*", ["how_works", "impact"]),
-    (r".*(?:architecture|structure|overview).*(?:and|also).*(?:security|safety|risk).*", ["architecture", "security"]),
+    # (security intent removed — not needed)
     (r".*(?:what\s+is|find|where).*(?:and|also).*(?:how|explain).*", ["what_is", "how_works"]),
     (r".*(?:bug|error|issue|problem).*(?:and|also|then).*(?:fix|patch|solve|resolve).*", ["debug", "refactor"]),
 ]
@@ -60,8 +60,8 @@ _TASK_EXTRACTORS = {
     "debug":         r"(?:bug|error|issue|problem|debug|trace)\s*(?:in|of|with)?\s*(.+)?",
     "refactor":      r"(?:refactor|rewrite|improve|optimize)\s*(.+)?",
     "nx_architecture": r"(?:nx|workspace|project|app|lib)\s*(?:architectur|structure|layout|organized|depend|target)?\s*(.+)?",
-    "security":      r"(?:security|vulnerability|exploit|injection|xss|csrf)\s*(?:in|of|for)?\s*(.+)?",
-    "tests":         r"(?:test|coverage|spec|unit|integration)\s*(?:for|of|in)?\s*(.+)?",
+    # (security extractor removed — not needed)
+    "coverage":      r"(?:test|coverage|spec|unit|integration|find all|all (?:places|occurrences|instances)|every (?:file|place|location))\s*(?:of|for|in)?\s*(.+)?",
 }
 
 
@@ -293,7 +293,7 @@ def _operations_for(task_type: str) -> list:
         "callees":      ["find_symbols", "outgoing_callers"],
         "debug":        ["find_symbols", "expand_callers", "expand_callees"],
         "refactor":     ["find_symbols", "expand_callers", "expand_callees", "incoming_callers"],
-        "security":     ["find_symbols", "incoming_callers", "expand_callers"],
-        "tests":        ["find_symbols", "expand_callers"],
+        # (security ops removed — not needed)
+        "coverage":      ["find_symbols", "expand_callers"],
     }
     return ops.get(task_type, ["find_symbols"])

@@ -70,12 +70,10 @@ export function useProjects() {
   const cloneProject = useCallback(async ({ gitUrl, name, accessToken, useLinkedCredentials, authProvider }) => {
     try {
       const p = await projectsService.clone({ gitUrl, name, accessToken, useLinkedCredentials, authProvider });
-      // Clone returns immediately with "queued" status — start polling
       setActivePid(p.id);
       await fetchProjects();
-      if (p.status === "queued" || p.status === "building") {
-        startPolling(p.id);
-      }
+      // Always start polling — clone may return "ready" but build might still be finishing
+      startPolling(p.id);
       return p;
     } catch (e) {
       throw e;

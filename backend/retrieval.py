@@ -16,7 +16,7 @@ log = logging.getLogger(__name__)
 # NOTE: The "compression" field is a PLANNED policy target.
 # Headroom is NOT implemented. _apply_policy in retriever.py is a no-op.
 # "full", "partial", "none" are future targets only.
-# Exact-code tasks ("debug", "refactor", "security", "impact", "what_is")
+# Exact-code tasks ("debug", "refactor", "impact", "what_is")
 # should never be compressed when Headroom is added.
 def task_policy(task_type: str) -> dict:
     """Return compression + traversal policy for a task type.
@@ -33,7 +33,8 @@ def task_policy(task_type: str) -> dict:
         "impact":       {"compression": "none",    "depth": 3, "include_callgraph": True},
         "debug":        {"compression": "none",    "depth": 2, "include_callgraph": True},
         "refactor":     {"compression": "none",    "depth": 2, "include_callgraph": True},
-        "security":     {"compression": "none",    "depth": 3, "include_callgraph": True},
+        # (security policy removed — not needed)
+        "coverage":      {"compression": "full",    "depth": 1, "include_callgraph": False},
     }
     return policies.get(task_type, policies["how_works"])
 
@@ -136,23 +137,15 @@ def retrieve_context(proj: dict, prompt: str, overrides: dict = None) -> dict:
             })
             all_files.update(p["root"] for p in nx_matched_dedup)
             continue
-        # ── Live Nx task (requires Nx MCP bridge) ──
+        # ── Live Nx task — not available in chat/endpoint. ──
+        # Live Nx commands (run, affected, generators) need the Nx binary +
+        # node_modules on disk. repo_dir is deleted after build. The MCP server
+        # (running on the user's host) handles live Nx via its own nx tool.
         if task.get("requires_live_nx"):
-            nx_mcp_result = {"note": "Nx MCP is disabled by default", "result": None}
-            if os.environ.get("INTELLIGRAPH_ENABLE_NX_MCP", "false").lower() == "true":
-                try:
-                    from nx_mcp_bridge import query_offline_nx_mcp, get_nx_mcp_status
-                    status = get_nx_mcp_status(proj.get("repo_dir", ""))
-                    if status.get("available"):
-                        nx_mcp_result = query_offline_nx_mcp(
-                            proj.get("repo_dir", ""),
-                            task.get("nx_capability", "status"),
-                            {"target": task.get("target", ""), "prompt": prompt},
-                        )
-                    else:
-                        nx_mcp_result = {"note": "Nx MCP not available locally", "result": None}
-                except Exception as e:
-                    nx_mcp_result = {"note": f"Nx MCP error: {str(e)[:100]}", "result": None}
+            nx_mcp_result = {
+                "note": "Live Nx commands are available through the MCP server's nx tool, not through chat. Install the MCP server with --repo-dir pointing to your project.",
+                "result": None,
+            }
             per_task_results.append({
                 "task_id": task["id"],
                 "files": [],
@@ -235,7 +228,7 @@ def retrieve_context(proj: dict, prompt: str, overrides: dict = None) -> dict:
                             # Also do FTS search for the query
                             search_results = provider.search(prompt, max_results=10)
                             intel_files.extend(search_results)
-                    elif ttype in ("impact", "debug", "refactor", "security"):
+                    elif ttype in ("impact", "debug", "refactor"):
                         # Impact: blast-radius over CALLS edges
                         impact_results = provider.impact(target, max_depth=2)
                         intel_files.extend(impact_results)
@@ -254,6 +247,17 @@ def retrieve_context(proj: dict, prompt: str, overrides: dict = None) -> dict:
                         intel_files.extend(search_results)
                         if not intel_mode and search_results:
                             intel_mode = "search"
+                    elif ttype == "coverage":
+                        # Coverage: find all files related to the target — tests, usages, occurrences.
+                        # Read lots of files from the graph, minimal logic.
+                        search_results = provider.search(f"test {target}", max_results=20)
+                        intel_files.extend(search_results)
+                        if target:
+                            target_results = provider.search(target, max_results=20)
+                            intel_files.extend(target_results)
+                        prompt_results = provider.search(prompt[:80], max_results=15)
+                        intel_files.extend(prompt_results)
+                        intel_mode = "search"
                     elif ttype in ("what_is", "search", "callers", "callees"):
                         # Search: FTS symbol search
                         search_results = provider.search(target or prompt, max_results=15)
@@ -310,7 +314,19 @@ def retrieve_context(proj: dict, prompt: str, overrides: dict = None) -> dict:
 
     # 3. ContextMerger: deduplicate, rank, budget, assemble
     from merger import merge_tasks
-    context, merger_stats = merge_tasks(tasks, per_task_results, graphify_data, nx_metadata)
+    _resolution_pct = 100
+    if overrides and "resolution_pct" in overrides:
+        _resolution_pct = overrides["resolution_pct"]
+    _budget_chars = None
+    if overrides and "budget_chars" in overrides:
+        _budget_chars = overrides["budget_chars"]
+    _chunk_caps = None
+    if overrides and "chunk_caps" in overrides:
+        _chunk_caps = overrides["chunk_caps"]
+    context, merger_stats = merge_tasks(tasks, per_task_results, graphify_data, nx_metadata,
+                                        resolution_pct=_resolution_pct,
+                                        budget_chars=_budget_chars,
+                                        chunk_caps=_chunk_caps)
     # Prepend intelligence context (community summaries, flow paths, etc.)
     if intel_context_text:
         context = intel_context_text + "\n" + context

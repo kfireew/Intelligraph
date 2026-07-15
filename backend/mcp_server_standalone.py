@@ -55,6 +55,16 @@ REPO_DIR = None
 MCP_TOKEN = os.environ.get("INTELLIGRAPH_MCP_TOKEN", "")
 SSL_VERIFY = os.environ.get("LLM_SSL_VERIFY", "false").lower() == "true"
 
+# Module-level requests Session with trust_env disabled.
+# Corporate transparent TLS interceptors (Zscaler, Cisco AnyConnect, etc.)
+# mangle even localhost TCP. trust_env=False stops requests from honoring
+# HTTP_PROXY/HTTPS_PROXY env vars so plain-HTTP localhost calls are not routed
+# through a TLS-bumping proxy. (Does not help against WFP/TDI network-layer
+# interceptors — for those use the `docker exec -i` launch form, which uses the
+# Docker daemon named pipe and never touches host TCP.)
+_session = requests.Session()
+_session.trust_env = False
+
 
 def _build_tools() -> list[types.Tool]:
     """Build tool list, including local_files only if repo_dir is set."""
@@ -62,30 +72,53 @@ def _build_tools() -> list[types.Tool]:
         types.Tool(
             name="search",
             description=(
-                "Search the codebase graph for symbols, files, or concepts. "
-                "Returns symbol names, signatures, file paths, and community IDs from the CRG database. "
-                "Use this to find where a function, class, or variable is defined."
+                "Search the codebase for symbols, files, or concepts using hybrid search (keyword + semantic embeddings). "
+                "Finds symbols by meaning, not just exact text match. "
+                "For example, searching 'add entity' will find 'upsertEntity'. "
+                "Returns symbol names, signatures, file paths, and scores. "
+                "Build artifacts are filtered out automatically."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "What to search for (symbol name, concept, file pattern)"},
+                    "query": {"type": "string", "description": "Symbol name or concept to search for"},
+                    "semantic": {"type": "boolean", "description": "Use semantic-only search (default: false, uses hybrid)", "default": False},
                 },
                 "required": ["query"],
             },
         ),
         types.Tool(
-            name="architecture",
+            name="node",
             description=(
-                "Get architecture overview of the codebase. "
-                "Returns community structure with purpose summaries, key symbols, risk levels, "
-                "and dominant languages for each module/community."
+                "Get a symbol's details, neighbors, source code snippets, and rationale notes. "
+                "Returns: file path, kind, community, degree, signature, 1-hop connections, "
+                "optional multi-hop subgraph (depth 2-3), source code snippets, and #NOTE/#WHY rationale. "
+                "Use this after search to understand what a symbol connects to and how it works."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "prompt": {"type": "string", "description": "Architecture question or component name (optional)"},
+                    "name": {"type": "string", "description": "Symbol name (exact or partial match)"},
+                    "depth": {"type": "integer", "description": "Traversal depth (1-3, default 2 for multi-hop context)", "default": 2},
+                    "include_snippets": {"type": "boolean", "description": "Include source code snippets (default true)", "default": True},
                 },
+                "required": ["name"],
+            },
+        ),
+        types.Tool(
+            name="path",
+            description=(
+                "Trace the shortest path between two symbols in the codebase graph. "
+                "Returns the chain of symbols and edge types connecting them. "
+                "Use this to answer 'how does X connect to Y?' without reading source files."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "from": {"type": "string", "description": "Starting symbol name"},
+                    "to": {"type": "string", "description": "Target symbol name"},
+                },
+                "required": ["from", "to"],
             },
         ),
         types.Tool(
@@ -94,7 +127,7 @@ def _build_tools() -> list[types.Tool]:
                 "Analyze blast-radius of changing a symbol. "
                 "Traverses CALLS and IMPORTS_FROM edges to find all callers, dependents, "
                 "and downstream code that would break if the target is modified. "
-                "Returns a call chain tree showing the full impact path."
+                "Returns a list of affected files with scores and reasons."
             ),
             inputSchema={
                 "type": "object",
@@ -105,50 +138,12 @@ def _build_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
-            name="flows",
-            description=(
-                "Find execution flow paths containing a symbol. "
-                "Returns ordered execution paths from entry points through the target symbol, "
-                "with criticality scores. Use this to understand how data/control flows "
-                "through the system and trace how a function fits into the larger flow."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": "Symbol name to find flows for"},
-                },
-                "required": ["name"],
-            },
-        ),
-        types.Tool(
-            name="callers",
-            description="Find callers of a symbol — who calls this function/method/class.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": "Symbol name to find callers for"},
-                },
-                "required": ["name"],
-            },
-        ),
-        types.Tool(
-            name="callees",
-            description="Find callees of a symbol — what does this function/method call.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": "Symbol name to find callees for"},
-                },
-                "required": ["name"],
-            },
-        ),
-        types.Tool(
             name="retrieve",
             description=(
-                "Full retrieval pipeline — decomposes a natural language question into tasks, "
-                "runs graph traversal + CRG intelligence + sparse code fetch, and returns "
-                "assembled context with source code. Use this for complex questions that "
-                "need both graph structure and actual code contents."
+                "Full retrieval pipeline for complex multi-part questions. "
+                "Decomposes the question into tasks, runs graph traversal + CRG intelligence + "
+                "sparse code fetch, and returns assembled context with source code. "
+                "Use this only when search/node/path are not enough."
             ),
             inputSchema={
                 "type": "object",
@@ -159,14 +154,27 @@ def _build_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
-            name="tests",
-            description="Find test files related to a symbol or component.",
+            name="local_files",
+            description=(
+                "Read full source code from the local repository on disk. "
+                "Pass repo-relative paths (e.g. 'src/parser.py', 'backend/app.py'). "
+                "Use this after search/node to get the actual file contents for the files you found."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "name": {"type": "string", "description": "Symbol name to find tests for"},
+                    "paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Repo-relative file paths to read",
+                    },
+                    "max_bytes": {
+                        "type": "integer",
+                        "description": "Max bytes per file (default 15000)",
+                        "default": 15000,
+                    },
                 },
-                "required": ["name"],
+                "required": ["paths"],
             },
         ),
     ]
@@ -199,6 +207,34 @@ def _build_tools() -> list[types.Tool]:
             },
         ))
 
+    if REPO_DIR:
+        tools.append(types.Tool(
+            name="nx",
+            description=(
+                "Run Nx commands locally on the user's workstation. "
+                "Available when --repo-dir is set and Nx is installed (node_modules/.bin/nx or package.json). "
+                "Capabilities: 'affected' (what projects affected by changes), "
+                "'generators' (list available generators), 'targets' (list targets for a project), "
+                "'status' (Nx version + workspace status). "
+                "This runs Nx directly on the host — not through the container."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "capability": {
+                        "type": "string",
+                        "enum": ["affected", "generators", "targets", "status"],
+                        "description": "What Nx capability to run",
+                    },
+                    "target": {
+                        "type": "string",
+                        "description": "Project name (for targets capability)",
+                    },
+                },
+                "required": ["capability"],
+            },
+        ))
+
     return tools
 
 
@@ -208,7 +244,7 @@ def _retrieve(query: str) -> dict:
     headers = {"Content-Type": "application/json"}
     if MCP_TOKEN:
         headers["X-MCP-Token"] = MCP_TOKEN
-    r = requests.post(
+    r = _session.post(
         url,
         json={"prompt": query, "project_id": PROJECT_ID},
         headers=headers,
@@ -225,7 +261,7 @@ def _crg(mode: str, query: str) -> dict:
     headers = {"Content-Type": "application/json"}
     if MCP_TOKEN:
         headers["X-MCP-Token"] = MCP_TOKEN
-    r = requests.post(
+    r = _session.post(
         url,
         json={"project_id": PROJECT_ID, "mode": mode, "query": query},
         headers=headers,
@@ -395,8 +431,134 @@ def _format_local_files(paths: list[str], max_bytes: int) -> str:
     return "\n".join(lines)
 
 
+def _run_nx_local(capability: str, target: str = "") -> str:
+    """Run Nx commands locally on the user's workstation via nx_mcp_bridge."""
+    if not REPO_DIR:
+        return "ERROR: --repo-dir not set. The nx tool requires the MCP server to run with --repo-dir pointing to your project."
+    try:
+        from nx_mcp_bridge import detect_offline_nx_mcp, query_offline_nx_mcp
+        detection = detect_offline_nx_mcp(REPO_DIR)
+        if not detection.get("available"):
+            return f"Nx not available: {detection.get('error', 'unknown')}. Install Nx in your project (npm install nx)."
+        result = query_offline_nx_mcp(REPO_DIR, capability, {"target": target})
+        if result.get("error"):
+            return f"Nx error: {result['error']}"
+        r = result.get("result")
+        if isinstance(r, (dict, list)):
+            import json
+            return f"## Nx: {capability}\n```json\n{json.dumps(r, indent=2)[:5000]}\n```"
+        return f"## Nx: {capability}\n```\n{str(r)[:5000]}\n```"
+    except ImportError:
+        return "ERROR: nx_mcp_bridge not available. Ensure the MCP server script is up to date."
+    except Exception as e:
+        return f"ERROR running Nx: {e}"
+
+
+def _graph_get(endpoint: str, params: dict) -> dict:
+    """GET request to a graph traversal endpoint."""
+    url = f"{INTELLIGRAPH_URL}/graph/{endpoint}"
+    headers = {}
+    if MCP_TOKEN:
+        headers["X-MCP-Token"] = MCP_TOKEN
+    r = _session.get(url, params=params, headers=headers, timeout=15, verify=SSL_VERIFY)
+    r.raise_for_status()
+    return r.json()
+
+
+def _format_node_result(data: dict, name: str) -> str:
+    node = data.get("node")
+    if not node:
+        return f"No node found matching '{name}'."
+    lines = [f"## {node.get('name', name)} ({node.get('kind', 'unknown')})", ""]
+    lines.append(f"File: `{node.get('file', 'unknown')}`")
+    if node.get("signature"):
+        lines.append(f"Signature: `{node['signature']}`")
+    lines.append(f"Community: {node.get('community', 'unknown')}")
+    lines.append(f"Degree: {node.get('degree', 0)}")
+    if node.get("is_test"):
+        lines.append("Type: Test")
+    neighbors = data.get("neighbors", [])
+    if neighbors:
+        lines.append("")
+        lines.append(f"### Connections ({len(neighbors)})")
+        incoming = [n for n in neighbors if n.get("direction") == "incoming"]
+        outgoing = [n for n in neighbors if n.get("direction") == "outgoing"]
+        if incoming:
+            lines.append("**Called by / imported by:**")
+            for n in incoming[:10]:
+                lines.append(f"  ← `{n['name']}` ({n.get('edge', 'link')}) — `{n.get('file', '')}`")
+        if outgoing:
+            lines.append("**Calls / imports:**")
+            for n in outgoing[:10]:
+                lines.append(f"  → `{n['name']}` ({n.get('edge', 'link')}) — `{n.get('file', '')}`")
+
+    # Multi-hop subgraph
+    subgraph = data.get("subgraph")
+    if subgraph and subgraph.get("nodes"):
+        sg_nodes = subgraph["nodes"]
+        sg_edges = subgraph.get("edges", [])
+        sg_stats = subgraph.get("stats", {})
+        lines.append("")
+        lines.append(f"### Subgraph ({sg_stats.get('hops', 0)} hops, {len(sg_nodes)} nodes)")
+        for sn in sg_nodes[:15]:
+            depth = sn.get("depth", 0)
+            indent = "  " * depth
+            lines.append(f"{indent}{'→ ' if depth > 0 else ''}{sn.get('name', '?')} ({sn.get('kind', '')}) — `{sn.get('file', '')}`")
+
+    # Source code snippets
+    snippets = data.get("snippets")
+    if snippets:
+        lines.append("")
+        lines.append("### Source Code")
+        for sname, sdata in list(snippets.items())[:3]:
+            snip = sdata.get("snippet", "")
+            if snip:
+                fp = sdata.get("file_path", "")
+                ls = sdata.get("line_start", 0)
+                lang = _detect_language(fp)
+                lines.append(f"```{lang}")
+                lines.append(f"// {fp}:{ls}")
+                lines.append(snip[:500])
+                lines.append("```")
+                lines.append("")
+
+    # Rationale notes
+    rationale = data.get("rationale")
+    if rationale:
+        lines.append("### Notes")
+        for rn in rationale[:5]:
+            text = rn.get("text", "")
+            conf = rn.get("confidence", "")
+            conf_tag = f" [{conf}]" if conf else ""
+            lines.append(f"- {text}{conf_tag}")
+
+    return "\n".join(lines)
+
+
+def _format_path_result(data: dict, src: str, dst: str) -> str:
+    path = data.get("path", [])
+    if not path:
+        return f"No path found between '{src}' and '{dst}'."
+    hops = data.get("hops", 0)
+    lines = [f"## Path: {src} → {dst} ({hops} hops)", ""]
+    for i, step in enumerate(path):
+        name = step.get("name", "?")
+        fp = step.get("file", "")
+        edge = step.get("edge", "")
+        prefix = "  " if i > 0 else ""
+        edge_str = f" ({edge})" if edge else ""
+        lines.append(f"{prefix}{'→ ' if i > 0 else ''}{name}{edge_str} — `{fp}`")
+    return "\n".join(lines)
+
+
 def _dispatch_tool(name: str, arguments: dict) -> str:
     """Map a tool call to the appropriate backend and return formatted text."""
+    # Local Nx commands — runs on host, no HTTP needed
+    if name == "nx":
+        capability = arguments.get("capability", "status")
+        target = arguments.get("target", "")
+        return _run_nx_local(capability, target)
+
     # Local file reads — no HTTP needed
     if name == "local_files":
         paths = arguments.get("paths", [])
@@ -409,55 +571,41 @@ def _dispatch_tool(name: str, arguments: dict) -> str:
         result = _retrieve(query)
         return _format_retrieve_result(result)
 
+    # Graph traversal tools
+    if name == "node":
+        sym = arguments.get("name", "")
+        depth = arguments.get("depth", 2)
+        include_snippets = arguments.get("include_snippets", True)
+        data = _graph_get("node", {
+            "project_id": PROJECT_ID, "name": sym,
+            "depth": depth,
+            "include_rationale": "true",
+            "include_snippets": "true" if include_snippets else "false",
+        })
+        return _format_node_result(data, sym)
+
+    if name == "path":
+        src = arguments.get("from", "")
+        dst = arguments.get("to", "")
+        data = _graph_get("path", {"project_id": PROJECT_ID, "from": src, "to": dst})
+        return _format_path_result(data, src, dst)
+
     # CRG direct mode tools
-    crg_modes = {
-        "search": ("search", lambda a: a.get("query", "")),
-        "architecture": ("architecture", lambda a: a.get("prompt", "")),
-        "impact": ("impact", lambda a: a["name"]),
-        "flows": ("flows", lambda a: a["name"]),
-        "callers": ("impact", lambda a: a["name"]),
-        "callees": ("impact", lambda a: a["name"]),
-        "tests": ("search", lambda a: f"test {a['name']}"),
-    }
-
-    if name not in crg_modes:
-        return f"Unknown tool: {name}"
-
-    mode, get_query = crg_modes[name]
-    query = get_query(arguments)
-
-    # For architecture, use full retrieve (gets graph + CRG + communities)
-    if name == "architecture":
-        result = _retrieve(arguments.get("prompt", "architecture overview"))
-        return _format_retrieve_result(result)
-
-    # For callers/callees, use impact mode and filter
-    if name == "callers":
-        result = _crg("impact", query)
+    if name == "search":
+        query = arguments.get("query", "")
+        semantic_only = arguments.get("semantic", False)
+        mode = "semantic" if semantic_only else "hybrid"
+        result = _crg(mode, query)
         results = result.get("results", [])
-        # Filter to incoming (callers)
-        filtered = [r for r in results if "incoming" in r.get("reason", []) or "caller" in str(r.get("reason", [])).lower()]
-        return _format_crg_impact(filtered or results, f"callers of {query}")
-    if name == "callees":
-        result = _crg("impact", query)
-        results = result.get("results", [])
-        filtered = [r for r in results if "outgoing" in r.get("reason", []) or "callee" in str(r.get("reason", [])).lower()]
-        return _format_crg_impact(filtered or results, f"callees of {query}")
-
-    # Direct CRG mode
-    result = _crg(mode, query)
-    results = result.get("results", [])
-
-    if mode == "search":
         return _format_crg_search(results, query)
-    elif mode == "architecture":
-        return _format_crg_architecture(results)
-    elif mode == "impact":
-        return _format_crg_impact(results, query)
-    elif mode == "flows":
-        return _format_crg_flows(results, query)
 
-    return json.dumps(result, indent=2)[:5000]
+    if name == "impact":
+        query = arguments.get("name", "")
+        result = _crg("impact", query)
+        results = result.get("results", [])
+        return _format_crg_impact(results, query)
+
+    return f"Unknown tool: {name}"
 
 
 server = Server("intelligraph")
@@ -482,7 +630,7 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
 
 
 async def main():
-    global INTELLIGRAPH_URL, PROJECT_ID, REPO_DIR
+    global INTELLIGRAPH_URL, PROJECT_ID, REPO_DIR, MCP_TOKEN
     parser = argparse.ArgumentParser(description="Intelligraph MCP Server (stdio)")
     parser.add_argument("--intelligraph-url", default="http://localhost:5050",
                         help="Intelligraph container URL (default: http://localhost:5050)")
@@ -496,6 +644,8 @@ async def main():
                         help="MCP API token (from Intelligraph UI). Required when SSO is enabled.")
     parser.add_argument("--ssl-verify", action="store_true", default=SSL_VERIFY,
                         help="Verify SSL certificates (default: from LLM_SSL_VERIFY env)")
+    parser.add_argument("--self-test", action="store_true",
+                        help="Run connectivity self-test (hits /status and /graph/), print verdict, and exit. Does not start the stdio server.")
     args = parser.parse_args()
     INTELLIGRAPH_URL = args.intelligraph_url.rstrip("/")
     PROJECT_ID = args.project_id
@@ -510,8 +660,73 @@ async def main():
 
     print(f"Intelligraph MCP Server starting (url={INTELLIGRAPH_URL}, pid={PROJECT_ID}, repo={REPO_DIR}, token={'yes' if MCP_TOKEN else 'no'})", file=sys.stderr)
 
+    if args.self_test:
+        _run_self_test()
+        return
+
     async with stdio_server() as (read_stream, write_stream):
         await server.run(read_stream, write_stream, server.create_initialization_options())
+
+
+def _run_self_test():
+    """Connectivity self-test: verify the Intelligraph backend is reachable and
+    the MCP token authenticates against /graph/ endpoints. Prints a clear
+    verdict for each check and exits. Does not start the stdio server.
+
+    Usage:
+        docker exec -i intelligraph python /app/backend/mcp_server_standalone.py \
+            --intelligraph-url http://localhost:5050 --project-id 1 \
+            --mcp-token <TOKEN> --self-test
+    """
+    print("=" * 60, file=sys.stderr)
+    print("Intelligraph MCP self-test", file=sys.stderr)
+    print("=" * 60, file=sys.stderr)
+    ok = True
+
+    # 1. /status — no auth required, plain HTTP health check
+    try:
+        r = _session.get(f"{INTELLIGRAPH_URL}/status", timeout=8, verify=SSL_VERIFY)
+        if r.status_code == 200:
+            print(f"  [PASS] /status reachable (200)", file=sys.stderr)
+        else:
+            print(f"  [FAIL] /status returned HTTP {r.status_code}", file=sys.stderr)
+            ok = False
+    except Exception as e:
+        print(f"  [FAIL] /status unreachable: {e}", file=sys.stderr)
+        ok = False
+
+    # 2. /graph/retrieve-context — requires MCP token when SSO is on
+    if not MCP_TOKEN:
+        print("  [SKIP] /graph/retrieve-context — no --mcp-token provided", file=sys.stderr)
+    else:
+        try:
+            headers = {"Content-Type": "application/json", "X-MCP-Token": MCP_TOKEN}
+            r = _session.post(
+                f"{INTELLIGRAPH_URL}/graph/retrieve-context",
+                json={"prompt": "self-test", "project_id": PROJECT_ID},
+                headers=headers,
+                timeout=15,
+                verify=SSL_VERIFY,
+            )
+            if r.status_code == 200:
+                body = r.json()
+                print(f"  [PASS] /graph/retrieve-context authenticated (200, strategy={body.get('strategy', '?')})", file=sys.stderr)
+            elif r.status_code == 401:
+                print(f"  [FAIL] /graph/retrieve-context returned 401 — token invalid or SSO blocking at gateway", file=sys.stderr)
+                ok = False
+            else:
+                print(f"  [FAIL] /graph/retrieve-context returned HTTP {r.status_code}: {r.text[:200]}", file=sys.stderr)
+                ok = False
+        except Exception as e:
+            print(f"  [FAIL] /graph/retrieve-context error: {e}", file=sys.stderr)
+            ok = False
+
+    print("=" * 60, file=sys.stderr)
+    if ok:
+        print("RESULT: PASS — MCP server can reach Intelligraph and authenticate.", file=sys.stderr)
+    else:
+        print("RESULT: FAIL — see failures above.", file=sys.stderr)
+    print("=" * 60, file=sys.stderr)
 
 
 if __name__ == "__main__":

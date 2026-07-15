@@ -1,0 +1,1381 @@
+{
+  "queries": [
+    {
+      "query_id": "q01",
+      "prompt": "how does the search system work",
+      "category": "how_works",
+      "expected_files": [
+        "code_review_graph/search.py"
+      ],
+      "systems": {
+        "graphify": {
+          "context_tokens": 1541,
+          "context_chars": 6166,
+          "files_returned": [
+            "code_review_graph/graph.py",
+            "code-review-graph-vscode/src/backend/sqlite.ts",
+            "code_review_graph/embeddings.py",
+            "code-review-graph-vscode/src/features/search.ts",
+            "code_review_graph/search.py",
+            "docs/architecture.md"
+          ],
+          "f1": 0.267,
+          "precision": 0.167,
+          "recall": 0.667,
+          "mrr": 0.2,
+          "elapsed_s": 0.81,
+          "error": null
+        },
+        "crg": {
+          "context_tokens": 236,
+          "context_chars": 947,
+          "files_returned": [
+            "code_review_graph/graph.py",
+            "code_review_graph/enrich.py",
+            "code_review_graph/main.py",
+            "code_review_graph/eval/benchmarks/search_quality.py",
+            "code_review_graph/embeddings.py",
+            "code_review_graph/eval/benchmarks/agent_baseline.py",
+            "code-review-graph-vscode/src/features/search.ts",
+            "code_review_graph/search.py"
+          ],
+          "f1": 0.211,
+          "precision": 0.125,
+          "recall": 0.667,
+          "mrr": 0.125,
+          "elapsed_s": 0.06,
+          "error": null
+        },
+        "intelligraph": {
+          "context_tokens": 500,
+          "context_chars": 2003,
+          "files_returned": [
+            "code_review_graph/enrich.py",
+            "tests/test_search.py",
+            "tests/test_tools.py",
+            "code_review_graph/search.py",
+            "tests/test_prompts.py",
+            "tests/fixtures/sample.php",
+            "tests/test_graph.py"
+          ],
+          "f1": 0.235,
+          "precision": 0.143,
+          "recall": 0.667,
+          "mrr": 0.25,
+          "elapsed_s": 17.54,
+          "error": null
+        }
+      }
+    },
+    {
+      "query_id": "q02",
+      "prompt": "how does graph traversal work",
+      "category": "how_works",
+      "expected_files": [
+        "code_review_graph/tools/query.py",
+        "code_review_graph/graph.py"
+      ],
+      "systems": {
+        "graphify": {
+          "context_tokens": 1562,
+          "context_chars": 6248,
+          "files_returned": [
+            "code_review_graph/graph.py",
+            "tests/fixtures/sample.jl",
+            "code_review_graph/migrations.py",
+            "code_review_graph/parser.py",
+            "tests/test_refactor.py",
+            "code_review_graph/custom_languages.py",
+            "code-review-graph-vscode/src/webview/graph.ts",
+            "code_review_graph/refactor.py",
+            "code_review_graph/tsconfig_resolver.py"
+          ],
+          "f1": 0.167,
+          "precision": 0.111,
+          "recall": 0.333,
+          "mrr": 1.0,
+          "elapsed_s": 0.41,
+          "error": null
+        },
+        "crg": {
+          "context_tokens": 302,
+          "context_chars": 1209,
+          "files_returned": [
+            ".beads/hooks/post-merge",
+            ".beads/hooks/pre-commit",
+            ".beads/hooks/post-checkout",
+            ".beads/hooks/pre-push",
+            "code-review-graph-vscode/esbuild.mjs",
+            "code-review-graph-vscode/src/backend/cli.ts",
+            ".beads/hooks/prepare-commit-msg"
+          ],
+          "f1": 0.0,
+          "precision": 0.0,
+          "recall": 0.0,
+          "mrr": 0.0,
+          "elapsed_s": 0.02,
+          "error": null
+        },
+        "intelligraph": {
+          "context_tokens": 899,
+          "context_chars": 3597,
+          "files_returned": [
+            "code_review_graph/graph_diff.py",
+            "code_review_graph/graph.py",
+            "tests/test_integration_git.py",
+            "code_review_graph/main.py",
+            "code_review_graph/visualization.py",
+            "tests/test_refactor.py",
+            "code-review-graph-vscode/src/webview/graph.ts",
+            "code_review_graph/tools/query.py",
+            "tests/test_graph.py"
+          ],
+          "f1": 0.333,
+          "precision": 0.222,
+          "recall": 0.667,
+          "mrr": 0.5,
+          "elapsed_s": 0.08,
+          "error": null
+        }
+      }
+    },
+    {
+      "query_id": "q03",
+      "prompt": "how are embeddings stored and used",
+      "category": "how_works",
+      "expected_files": [
+        "code_review_graph/embeddings.py"
+      ],
+      "systems": {
+        "graphify": {
+          "context_tokens": 498,
+          "context_chars": 1994,
+          "files_returned": [
+            "code_review_graph/graph.py",
+            "CHANGELOG.md",
+            "code_review_graph/parser.py",
+            "code_review_graph/custom_languages.py",
+            "tests/test_custom_languages.py",
+            "tests/test_multilang.py"
+          ],
+          "f1": 0.0,
+          "precision": 0.0,
+          "recall": 0.0,
+          "mrr": 0.0,
+          "elapsed_s": 0.38,
+          "error": null
+        },
+        "crg": {
+          "context_tokens": 171,
+          "context_chars": 684,
+          "files_returned": [
+            "code_review_graph/embeddings.py"
+          ],
+          "f1": 0.8,
+          "precision": 1.0,
+          "recall": 0.667,
+          "mrr": 1.0,
+          "elapsed_s": 0.01,
+          "error": null
+        },
+        "intelligraph": {
+          "context_tokens": 630,
+          "context_chars": 2523,
+          "files_returned": [
+            "code_review_graph/flows.py",
+            "tests/test_communities.py",
+            "tests/test_transactions.py",
+            "tests/test_skills.py",
+            "code_review_graph/embeddings.py",
+            "tests/test_embeddings.py",
+            "tests/test_visualization.py"
+          ],
+          "f1": 0.235,
+          "precision": 0.143,
+          "recall": 0.667,
+          "mrr": 0.2,
+          "elapsed_s": 0.08,
+          "error": null
+        }
+      }
+    },
+    {
+      "query_id": "q04",
+      "prompt": "how does impact analysis work",
+      "category": "how_works",
+      "expected_files": [
+        "code_review_graph/tools/query.py",
+        "code_review_graph/changes.py"
+      ],
+      "systems": {
+        "graphify": {
+          "context_tokens": 1562,
+          "context_chars": 6250,
+          "files_returned": [
+            "code_review_graph/flows.py",
+            "code_review_graph/graph.py",
+            "code_review_graph/eval/benchmarks/impact_accuracy.py",
+            "tests/fixtures/sample.jl",
+            "code_review_graph/tools/analysis_tools.py",
+            "code_review_graph/changes.py",
+            "code_review_graph/analysis.py",
+            "code_review_graph/tools/_common.py",
+            "code_review_graph/incremental.py",
+            "docs/architecture.md"
+          ],
+          "f1": 0.154,
+          "precision": 0.1,
+          "recall": 0.333,
+          "mrr": 0.167,
+          "elapsed_s": 0.42,
+          "error": null
+        },
+        "crg": {
+          "context_tokens": 252,
+          "context_chars": 1010,
+          "files_returned": [
+            "code_review_graph/graph.py",
+            "code_review_graph/eval/benchmarks/impact_accuracy.py",
+            "code-review-graph-vscode/test/sqlite.test.ts",
+            "code_review_graph/main.py",
+            "code-review-graph-vscode/src/views/treeItems.ts",
+            "code-review-graph-vscode/src/views/treeView.ts",
+            "code_review_graph/tools/review.py",
+            "code_review_graph/tools/query.py",
+            "tests/test_eval.py"
+          ],
+          "f1": 0.167,
+          "precision": 0.111,
+          "recall": 0.333,
+          "mrr": 0.125,
+          "elapsed_s": 0.02,
+          "error": null
+        },
+        "intelligraph": {
+          "context_tokens": 681,
+          "context_chars": 2726,
+          "files_returned": [
+            "tests/test_action_render.py",
+            "code_review_graph/graph.py",
+            "code_review_graph/eval/benchmarks/impact_accuracy.py",
+            "tests/test_tools.py",
+            "code_review_graph/main.py",
+            "code-review-graph-vscode/src/backend/sqlite.ts",
+            "code_review_graph/tools/analysis_tools.py",
+            "code_review_graph/analysis.py",
+            "code-review-graph-vscode/src/views/treeItems.ts",
+            "code_review_graph/tools/query.py"
+          ],
+          "f1": 0.154,
+          "precision": 0.1,
+          "recall": 0.333,
+          "mrr": 0.1,
+          "elapsed_s": 0.18,
+          "error": null
+        }
+      }
+    },
+    {
+      "query_id": "q05",
+      "prompt": "how does the build process work",
+      "category": "how_works",
+      "expected_files": [
+        "code_review_graph/incremental.py",
+        "code_review_graph/tools/build.py"
+      ],
+      "systems": {
+        "graphify": {
+          "context_tokens": 1542,
+          "context_chars": 6168,
+          "files_returned": [
+            "code_review_graph/flows.py",
+            "code_review_graph/temporal_resolver.py",
+            "code_review_graph/graph.py",
+            "code_review_graph/search.py",
+            "code_review_graph/tools/build.py",
+            "code_review_graph/postprocessing.py",
+            "code_review_graph/embeddings.py",
+            "code_review_graph/parser.py",
+            "code_review_graph/communities.py",
+            "code_review_graph/tools/_common.py",
+            "code_review_graph/incremental.py",
+            "code_review_graph/registry.py",
+            "code_review_graph/rescript_resolver.py"
+          ],
+          "f1": 0.25,
+          "precision": 0.154,
+          "recall": 0.667,
+          "mrr": 0.2,
+          "elapsed_s": 0.37,
+          "error": null
+        },
+        "crg": {
+          "context_tokens": 190,
+          "context_chars": 762,
+          "files_returned": [
+            "code_review_graph/graph.py",
+            "code_review_graph/tools/build.py",
+            "code_review_graph/daemon.py",
+            "tests/test_cli.py",
+            "code_review_graph/eval/benchmarks/build_performance.py",
+            "code_review_graph/hints.py",
+            "code_review_graph/main.py",
+            "code_review_graph/visualization.py",
+            "code_review_graph/communities.py",
+            "tests/test_daemon.py",
+            "code_review_graph/skills.py",
+            "code_review_graph/incremental.py",
+            "tests/test_custom_languages.py",
+            "scripts/render_pr_comment.py"
+          ],
+          "f1": 0.235,
+          "precision": 0.143,
+          "recall": 0.667,
+          "mrr": 0.5,
+          "elapsed_s": 0.01,
+          "error": null
+        },
+        "intelligraph": {
+          "context_tokens": 636,
+          "context_chars": 2545,
+          "files_returned": [
+            "tests/test_multilang.py",
+            "tests/fixtures/sample_notebook.ipynb",
+            "code_review_graph/tools/build.py",
+            "tests/fixtures/sample.jl",
+            "code_review_graph/daemon.py",
+            "tests/test_tools.py",
+            "tests/fixtures/sample_python.py",
+            "code_review_graph/incremental.py",
+            "tests/test_eval.py",
+            "tests/test_graph.py"
+          ],
+          "f1": 0.308,
+          "precision": 0.2,
+          "recall": 0.667,
+          "mrr": 0.333,
+          "elapsed_s": 0.07,
+          "error": null
+        }
+      }
+    },
+    {
+      "query_id": "q06",
+      "prompt": "what is the main entry point",
+      "category": "what_is",
+      "expected_files": [
+        "code_review_graph/main.py",
+        "code_review_graph/__main__.py"
+      ],
+      "systems": {
+        "graphify": {
+          "context_tokens": 1560,
+          "context_chars": 6243,
+          "files_returned": [
+            "code_review_graph/changes.py",
+            "code_review_graph/flows.py",
+            "code_review_graph/graph.py",
+            "code_review_graph/wiki.py",
+            "code_review_graph/postprocessing.py",
+            "code_review_graph/skills.py",
+            "code_review_graph/context_savings.py",
+            "code_review_graph/tools/build.py",
+            "code_review_graph/eval/runner.py",
+            "code_review_graph/tools/docs.py",
+            "code_review_graph/embeddings.py",
+            "code_review_graph/visualization.py",
+            "code_review_graph/tools/_common.py",
+            "code_review_graph/eval/reporter.py",
+            "code_review_graph/cli.py",
+            "code_review_graph/registry.py",
+            "code_review_graph/main.py",
+            "code_review_graph/parser.py",
+            "code_review_graph/communities.py",
+            "code_review_graph/incremental.py",
+            "code_review_graph/exports.py"
+          ],
+          "f1": 0.083,
+          "precision": 0.048,
+          "recall": 0.333,
+          "mrr": 0.059,
+          "elapsed_s": 0.41,
+          "error": null
+        },
+        "crg": {
+          "context_tokens": 3,
+          "context_chars": 12,
+          "files_returned": [],
+          "f1": 0.0,
+          "precision": 0.0,
+          "recall": 0.0,
+          "mrr": 0.0,
+          "elapsed_s": 0.02,
+          "error": null
+        },
+        "intelligraph": {
+          "context_tokens": 569,
+          "context_chars": 2279,
+          "files_returned": [
+            "tests/fixtures/sample.sh",
+            "tests/fixtures/sample.m",
+            "code_review_graph/daemon_cli.py",
+            "tests/fixtures/sample.c",
+            "tests/fixtures/sample.res",
+            "tests/fixtures/sample.cpp",
+            "scripts/diagnose_pypi_connectivity.py",
+            "tests/fixtures/sample.xs",
+            "code_review_graph/refactor.py",
+            "code-review-graph-vscode/esbuild.mjs"
+          ],
+          "f1": 0.0,
+          "precision": 0.0,
+          "recall": 0.0,
+          "mrr": 0.0,
+          "elapsed_s": 0.08,
+          "error": null
+        }
+      }
+    },
+    {
+      "query_id": "q07",
+      "prompt": "how does code review context generation work",
+      "category": "how_works",
+      "expected_files": [
+        "code_review_graph/tools/review.py"
+      ],
+      "systems": {
+        "graphify": {
+          "context_tokens": 1568,
+          "context_chars": 6273,
+          "files_returned": [
+            "code_review_graph/flows.py",
+            "code_review_graph/graph.py",
+            "tests/fixtures/sample.jl",
+            "code_review_graph/hints.py",
+            "code_review_graph/visualization.py",
+            "code_review_graph/parser.py",
+            "code_review_graph/communities.py",
+            "code_review_graph/changes.py",
+            "code_review_graph/custom_languages.py",
+            "code_review_graph/tools/_common.py",
+            "code_review_graph/incremental.py",
+            "code_review_graph/tools/review.py",
+            "code_review_graph/registry.py",
+            "code_review_graph/context_savings.py",
+            "code_review_graph/tsconfig_resolver.py"
+          ],
+          "f1": 0.121,
+          "precision": 0.067,
+          "recall": 0.667,
+          "mrr": 0.083,
+          "elapsed_s": 0.53,
+          "error": null
+        },
+        "crg": {
+          "context_tokens": 55,
+          "context_chars": 223,
+          "files_returned": [
+            "code_review_graph/tools/review.py",
+            "code_review_graph/main.py",
+            "tests/test_tools.py"
+          ],
+          "f1": 0.444,
+          "precision": 0.333,
+          "recall": 0.667,
+          "mrr": 1.0,
+          "elapsed_s": 0.01,
+          "error": null
+        },
+        "intelligraph": {
+          "context_tokens": 692,
+          "context_chars": 2768,
+          "files_returned": [
+            "tests/test_hints.py",
+            "code_review_graph/main.py",
+            "code_review_graph/tools/context.py",
+            "code_review_graph/communities.py",
+            "code_review_graph/analysis.py",
+            "code_review_graph/skills.py",
+            "code_review_graph/tools/review.py",
+            "code_review_graph/context_savings.py",
+            "tests/test_context_savings.py",
+            "tests/test_eval.py"
+          ],
+          "f1": 0.174,
+          "precision": 0.1,
+          "recall": 0.667,
+          "mrr": 0.143,
+          "elapsed_s": 0.08,
+          "error": null
+        }
+      }
+    },
+    {
+      "query_id": "q08",
+      "prompt": "how does post-processing work after building the graph",
+      "category": "how_works",
+      "expected_files": [
+        "code_review_graph/postprocessing.py"
+      ],
+      "systems": {
+        "graphify": {
+          "context_tokens": 1615,
+          "context_chars": 6462,
+          "files_returned": [
+            "code_review_graph/flows.py",
+            "code_review_graph/graph.py",
+            "tests/fixtures/sample.jl",
+            "code_review_graph/postprocessing.py",
+            "code_review_graph/jedi_resolver.py",
+            "code_review_graph/migrations.py",
+            "code_review_graph/embeddings.py",
+            "code_review_graph/parser.py",
+            "code_review_graph/communities.py",
+            "code_review_graph/custom_languages.py",
+            "code_review_graph/search.py",
+            "code_review_graph/tsconfig_resolver.py"
+          ],
+          "f1": 0.148,
+          "precision": 0.083,
+          "recall": 0.667,
+          "mrr": 0.25,
+          "elapsed_s": 0.43,
+          "error": null
+        },
+        "crg": {
+          "context_tokens": 57,
+          "context_chars": 231,
+          "files_returned": [
+            "code_review_graph/postprocessing.py",
+            "tests/test_postprocessing.py"
+          ],
+          "f1": 0.571,
+          "precision": 0.5,
+          "recall": 0.667,
+          "mrr": 1.0,
+          "elapsed_s": 0.01,
+          "error": null
+        },
+        "intelligraph": {
+          "context_tokens": 711,
+          "context_chars": 2844,
+          "files_returned": [
+            "tests/fixtures/sample_notebook.ipynb",
+            "tests/test_postprocessing.py",
+            "code_review_graph/graph.py",
+            "code_review_graph/tools/build.py",
+            "code_review_graph/graph_diff.py",
+            "code_review_graph/postprocessing.py",
+            "tests/test_tools.py",
+            "tests/test_migrations.py",
+            "tests/test_skills.py",
+            "tests/test_graph.py"
+          ],
+          "f1": 0.174,
+          "precision": 0.1,
+          "recall": 0.667,
+          "mrr": 0.167,
+          "elapsed_s": 0.08,
+          "error": null
+        }
+      }
+    },
+    {
+      "query_id": "q09",
+      "prompt": "what languages are supported by the parser",
+      "category": "what_is",
+      "expected_files": [
+        "code_review_graph/parser.py",
+        "code_review_graph/custom_languages.py"
+      ],
+      "systems": {
+        "graphify": {
+          "context_tokens": 1508,
+          "context_chars": 6034,
+          "files_returned": [
+            "CHANGELOG.md",
+            "SECURITY.md",
+            "tests/fixtures/sample.jl",
+            "code_review_graph/parser.py",
+            "code_review_graph/custom_languages.py",
+            "docs/USAGE.md",
+            "code_review_graph/tsconfig_resolver.py"
+          ],
+          "f1": 0.444,
+          "precision": 0.333,
+          "recall": 0.667,
+          "mrr": 0.25,
+          "elapsed_s": 0.39,
+          "error": null
+        },
+        "crg": {
+          "context_tokens": 186,
+          "context_chars": 745,
+          "files_returned": [
+            "code_review_graph/parser.py",
+            "code_review_graph/custom_languages.py"
+          ],
+          "f1": 0.8,
+          "precision": 1.0,
+          "recall": 0.667,
+          "mrr": 1.0,
+          "elapsed_s": 0.02,
+          "error": null
+        },
+        "intelligraph": {
+          "context_tokens": 582,
+          "context_chars": 2330,
+          "files_returned": [
+            "tests/test_multilang.py",
+            "code_review_graph/parser.py",
+            "tests/test_embeddings.py",
+            "code_review_graph/custom_languages.py",
+            "tests/test_parser.py",
+            "code_review_graph/cli.py",
+            "tests/test_custom_languages.py",
+            "scripts/render_pr_comment.py"
+          ],
+          "f1": 0.364,
+          "precision": 0.25,
+          "recall": 0.667,
+          "mrr": 0.5,
+          "elapsed_s": 0.08,
+          "error": null
+        }
+      }
+    },
+    {
+      "query_id": "q10",
+      "prompt": "how does community detection work",
+      "category": "how_works",
+      "expected_files": [
+        "code_review_graph/communities.py"
+      ],
+      "systems": {
+        "graphify": {
+          "context_tokens": 1556,
+          "context_chars": 6226,
+          "files_returned": [
+            "code_review_graph/flows.py",
+            "code_review_graph/graph.py",
+            "tests/fixtures/sample.jl",
+            "code_review_graph/hints.py",
+            "tests/test_flows.py",
+            "code_review_graph/parser.py",
+            "code_review_graph/communities.py",
+            "code_review_graph/tools/_common.py",
+            "code_review_graph/incremental.py",
+            "code_review_graph/tools/community_tools.py",
+            "code_review_graph/context_savings.py"
+          ],
+          "f1": 0.16,
+          "precision": 0.091,
+          "recall": 0.667,
+          "mrr": 0.143,
+          "elapsed_s": 0.37,
+          "error": null
+        },
+        "crg": {
+          "context_tokens": 185,
+          "context_chars": 741,
+          "files_returned": [
+            "code_review_graph/communities.py",
+            "code_review_graph/enrich.py"
+          ],
+          "f1": 0.571,
+          "precision": 0.5,
+          "recall": 0.667,
+          "mrr": 1.0,
+          "elapsed_s": 0.01,
+          "error": null
+        },
+        "intelligraph": {
+          "context_tokens": 585,
+          "context_chars": 2343,
+          "files_returned": [
+            "tests/test_communities.py",
+            "code_review_graph/communities.py",
+            "code_review_graph/incremental.py",
+            "code_review_graph/tools/community_tools.py",
+            "tests/test_multilang.py"
+          ],
+          "f1": 0.308,
+          "precision": 0.2,
+          "recall": 0.667,
+          "mrr": 0.5,
+          "elapsed_s": 0.08,
+          "error": null
+        }
+      }
+    },
+    {
+      "query_id": "q11",
+      "prompt": "insert a new node into the graph",
+      "category": "semantic",
+      "expected_files": [
+        "code_review_graph/graph.py"
+      ],
+      "systems": {
+        "graphify": {
+          "context_tokens": 1578,
+          "context_chars": 6315,
+          "files_returned": [
+            "code_review_graph/graph.py",
+            "code-review-graph-vscode/src/backend/sqlite.ts",
+            "code_review_graph/migrations.py",
+            "code_review_graph/parser.py",
+            "code_review_graph/custom_languages.py",
+            "tests/fixtures/sample_rust.rs",
+            "code_review_graph/tsconfig_resolver.py"
+          ],
+          "f1": 0.235,
+          "precision": 0.143,
+          "recall": 0.667,
+          "mrr": 1.0,
+          "elapsed_s": 0.43,
+          "error": null
+        },
+        "crg": {
+          "context_tokens": 15,
+          "context_chars": 62,
+          "files_returned": [
+            "code_review_graph/embeddings.py"
+          ],
+          "f1": 0.0,
+          "precision": 0.0,
+          "recall": 0.0,
+          "mrr": 0.0,
+          "elapsed_s": 0.02,
+          "error": null
+        },
+        "intelligraph": {
+          "context_tokens": 643,
+          "context_chars": 2573,
+          "files_returned": [
+            "code_review_graph/graph.py",
+            "tests/test_skills.py",
+            "tests/fixtures/sample.luau",
+            "code_review_graph/embeddings.py",
+            "tests/test_embeddings.py",
+            "tests/test_notebook.py",
+            "tests/fixtures/sample.lua",
+            "tests/fixtures/sample_rust.rs",
+            "tests/fixtures/sample.pl",
+            "code-review-graph-vscode/src/webview/graph.ts"
+          ],
+          "f1": 0.174,
+          "precision": 0.1,
+          "recall": 0.667,
+          "mrr": 1.0,
+          "elapsed_s": 0.08,
+          "error": null
+        }
+      }
+    },
+    {
+      "query_id": "q12",
+      "prompt": "remove a function from the database",
+      "category": "semantic",
+      "expected_files": [
+        "code_review_graph/graph.py",
+        "code_review_graph/incremental.py"
+      ],
+      "systems": {
+        "graphify": {
+          "context_tokens": 343,
+          "context_chars": 1375,
+          "files_returned": [
+            ".beads/metadata.json",
+            "code_review_graph/registry.py",
+            "docs/schema.md",
+            "code_review_graph/daemon.py"
+          ],
+          "f1": 0.0,
+          "precision": 0.0,
+          "recall": 0.0,
+          "mrr": 0.0,
+          "elapsed_s": 0.36,
+          "error": null
+        },
+        "crg": {
+          "context_tokens": 30,
+          "context_chars": 122,
+          "files_returned": [
+            "code-review-graph-vscode/test/sqlite.test.ts"
+          ],
+          "f1": 0.0,
+          "precision": 0.0,
+          "recall": 0.0,
+          "mrr": 0.0,
+          "elapsed_s": 0.01,
+          "error": null
+        },
+        "intelligraph": {
+          "context_tokens": 608,
+          "context_chars": 2433,
+          "files_returned": [
+            "code_review_graph/graph.py",
+            "code-review-graph-vscode/test/sqlite.test.ts",
+            "code_review_graph/daemon.py",
+            "code_review_graph/daemon_cli.py",
+            "code_review_graph/embeddings.py",
+            "tests/test_embeddings.py",
+            "tests/test_daemon.py",
+            "tests/test_graph.py"
+          ],
+          "f1": 0.182,
+          "precision": 0.125,
+          "recall": 0.333,
+          "mrr": 1.0,
+          "elapsed_s": 0.07,
+          "error": null
+        }
+      }
+    },
+    {
+      "query_id": "q13",
+      "prompt": "find similar code by meaning",
+      "category": "semantic",
+      "expected_files": [
+        "code_review_graph/embeddings.py",
+        "code_review_graph/search.py"
+      ],
+      "systems": {
+        "graphify": {
+          "context_tokens": 1602,
+          "context_chars": 6411,
+          "files_returned": [
+            "code_review_graph/flows.py",
+            "code_review_graph/graph.py",
+            "code_review_graph/enrich.py",
+            "code_review_graph/main.py",
+            "code_review_graph/tsconfig_resolver.py",
+            "code_review_graph/embeddings.py",
+            "code_review_graph/parser.py",
+            "tests/test_embeddings.py",
+            "code_review_graph/custom_languages.py",
+            "code_review_graph/tools/analysis_tools.py",
+            "code_review_graph/tools/_common.py",
+            "code_review_graph/analysis.py",
+            "code_review_graph/incremental.py",
+            "code_review_graph/refactor.py"
+          ],
+          "f1": 0.118,
+          "precision": 0.071,
+          "recall": 0.333,
+          "mrr": 0.167,
+          "elapsed_s": 0.42,
+          "error": null
+        },
+        "crg": {
+          "context_tokens": 16,
+          "context_chars": 65,
+          "files_returned": [
+            "code_review_graph/embeddings.py"
+          ],
+          "f1": 0.5,
+          "precision": 1.0,
+          "recall": 0.333,
+          "mrr": 1.0,
+          "elapsed_s": 0.02,
+          "error": null
+        },
+        "intelligraph": {
+          "context_tokens": 442,
+          "context_chars": 1770,
+          "files_returned": [
+            "tests/test_daemon.py",
+            "code_review_graph/embeddings.py"
+          ],
+          "f1": 0.4,
+          "precision": 0.5,
+          "recall": 0.333,
+          "mrr": 0.5,
+          "elapsed_s": 0.08,
+          "error": null
+        }
+      }
+    },
+    {
+      "query_id": "q14",
+      "prompt": "what calls the hybrid_search function and what do those callers call",
+      "category": "multihop",
+      "expected_files": [
+        "code_review_graph/search.py",
+        "code_review_graph/tools/query.py"
+      ],
+      "systems": {
+        "graphify": {
+          "context_tokens": 565,
+          "context_chars": 2262,
+          "files_returned": [
+            "tests/fixtures/caller_example.py",
+            "code_review_graph/graph.py",
+            "code_review_graph/embeddings.py",
+            "tests/test_changes.py",
+            "code_review_graph/changes.py",
+            "code_review_graph/search.py",
+            "docs/schema.md"
+          ],
+          "f1": 0.2,
+          "precision": 0.143,
+          "recall": 0.333,
+          "mrr": 0.167,
+          "elapsed_s": 0.52,
+          "error": null
+        },
+        "crg": {
+          "context_tokens": 32,
+          "context_chars": 131,
+          "files_returned": [
+            "tests/test_search.py",
+            "code_review_graph/search.py"
+          ],
+          "f1": 0.4,
+          "precision": 0.5,
+          "recall": 0.333,
+          "mrr": 0.5,
+          "elapsed_s": 0.01,
+          "error": null
+        },
+        "intelligraph": {
+          "context_tokens": 468,
+          "context_chars": 1872,
+          "files_returned": [
+            "code_review_graph/parser.py",
+            "tests/test_multilang.py"
+          ],
+          "f1": 0.0,
+          "precision": 0.0,
+          "recall": 0.0,
+          "mrr": 0.0,
+          "elapsed_s": 0.07,
+          "error": null
+        }
+      }
+    },
+    {
+      "query_id": "q15",
+      "prompt": "trace the path from build to graph storage",
+      "category": "multihop",
+      "expected_files": [
+        "code_review_graph/incremental.py",
+        "code_review_graph/graph.py"
+      ],
+      "systems": {
+        "graphify": {
+          "context_tokens": 1558,
+          "context_chars": 6233,
+          "files_returned": [
+            "code_review_graph/flows.py",
+            "code_review_graph/graph.py",
+            "code_review_graph/search.py",
+            "code_review_graph/tools/build.py",
+            "code_review_graph/postprocessing.py",
+            "code_review_graph/migrations.py",
+            "code_review_graph/embeddings.py",
+            "code_review_graph/parser.py",
+            "code_review_graph/communities.py",
+            "code_review_graph/tools/_common.py",
+            "code_review_graph/incremental.py",
+            "code_review_graph/registry.py",
+            "code_review_graph/rescript_resolver.py"
+          ],
+          "f1": 0.25,
+          "precision": 0.154,
+          "recall": 0.667,
+          "mrr": 0.5,
+          "elapsed_s": 0.42,
+          "error": null
+        },
+        "crg": {
+          "context_tokens": 153,
+          "context_chars": 614,
+          "files_returned": [
+            "code_review_graph/flows.py",
+            "code_review_graph/postprocessing.py",
+            "tests/test_tools.py",
+            "tests/test_flows.py",
+            "tests/test_graph.py"
+          ],
+          "f1": 0.0,
+          "precision": 0.0,
+          "recall": 0.0,
+          "mrr": 0.0,
+          "elapsed_s": 0.02,
+          "error": null
+        },
+        "intelligraph": {
+          "context_tokens": 679,
+          "context_chars": 2717,
+          "files_returned": [
+            "code_review_graph/flows.py",
+            "code_review_graph/graph.py",
+            "code_review_graph/tools/build.py",
+            "tests/test_graph.py",
+            "code_review_graph/postprocessing.py",
+            "tests/test_tools.py",
+            "tests/test_flows.py",
+            "code_review_graph/tools/_common.py",
+            "code_review_graph/incremental.py",
+            "tests/test_multilang.py"
+          ],
+          "f1": 0.308,
+          "precision": 0.2,
+          "recall": 0.667,
+          "mrr": 0.5,
+          "elapsed_s": 0.08,
+          "error": null
+        }
+      }
+    },
+    {
+      "query_id": "q16",
+      "prompt": "what is the blast radius of changing graph.py",
+      "category": "impact",
+      "expected_files": [
+        "code_review_graph/graph.py",
+        "code_review_graph/changes.py"
+      ],
+      "systems": {
+        "graphify": {
+          "context_tokens": 1546,
+          "context_chars": 6186,
+          "files_returned": [
+            "code_review_graph/graph.py",
+            "code-review-graph-vscode/src/backend/sqlite.ts",
+            "code_review_graph/migrations.py",
+            "code-review-graph-vscode/src/features/blastRadius.ts",
+            "code_review_graph/parser.py",
+            "code-review-graph-vscode/src/views/treeItems.ts",
+            "code-review-graph-vscode/src/views/treeView.ts",
+            "code-review-graph-vscode/src/features/cursorResolver.ts"
+          ],
+          "f1": 0.182,
+          "precision": 0.125,
+          "recall": 0.333,
+          "mrr": 1.0,
+          "elapsed_s": 0.42,
+          "error": null
+        },
+        "crg": {
+          "context_tokens": 222,
+          "context_chars": 891,
+          "files_returned": [
+            "code-review-graph-vscode/src/views/treeItems.ts",
+            "code-review-graph-vscode/src/views/treeView.ts",
+            "code-review-graph-vscode/src/features/blastRadius.ts"
+          ],
+          "f1": 0.0,
+          "precision": 0.0,
+          "recall": 0.0,
+          "mrr": 0.0,
+          "elapsed_s": 0.02,
+          "error": null
+        },
+        "intelligraph": {
+          "context_tokens": 879,
+          "context_chars": 3516,
+          "files_returned": [
+            "code_review_graph/graph_diff.py",
+            "code_review_graph/graph.py",
+            "tests/test_changes.py",
+            "code_review_graph/visualization.py",
+            "code_review_graph/changes.py",
+            "tests/test_cli.py",
+            "code-review-graph-vscode/src/webview/graph.ts",
+            "tests/test_graph.py"
+          ],
+          "f1": 0.364,
+          "precision": 0.25,
+          "recall": 0.667,
+          "mrr": 0.5,
+          "elapsed_s": 0.08,
+          "error": null
+        }
+      }
+    },
+    {
+      "query_id": "q17",
+      "prompt": "how does flow detection work",
+      "category": "how_works",
+      "expected_files": [
+        "code_review_graph/flows.py"
+      ],
+      "systems": {
+        "graphify": {
+          "context_tokens": 1408,
+          "context_chars": 5634,
+          "files_returned": [
+            "code_review_graph/flows.py",
+            "code_review_graph/constants.py",
+            "code_review_graph/graph.py",
+            "tests/fixtures/sample.jl",
+            "code_review_graph/eval/benchmarks/flow_completeness.py",
+            "tests/test_flows.py",
+            "code_review_graph/parser.py"
+          ],
+          "f1": 0.235,
+          "precision": 0.143,
+          "recall": 0.667,
+          "mrr": 1.0,
+          "elapsed_s": 0.45,
+          "error": null
+        },
+        "crg": {
+          "context_tokens": 209,
+          "context_chars": 837,
+          "files_returned": [
+            "code_review_graph/flows.py",
+            "code_review_graph/graph.py",
+            "code_review_graph/enrich.py",
+            "code_review_graph/eval/benchmarks/flow_completeness.py"
+          ],
+          "f1": 0.364,
+          "precision": 0.25,
+          "recall": 0.667,
+          "mrr": 1.0,
+          "elapsed_s": 0.01,
+          "error": null
+        },
+        "intelligraph": {
+          "context_tokens": 581,
+          "context_chars": 2325,
+          "files_returned": [
+            "code_review_graph/flows.py",
+            "code_review_graph/graph.py",
+            "code_review_graph/enrich.py",
+            "tests/test_tools.py",
+            "code_review_graph/main.py",
+            "tests/test_flows.py",
+            "code_review_graph/incremental.py",
+            "code_review_graph/tools/flows_tools.py",
+            "tests/test_multilang.py"
+          ],
+          "f1": 0.19,
+          "precision": 0.111,
+          "recall": 0.667,
+          "mrr": 1.0,
+          "elapsed_s": 0.07,
+          "error": null
+        }
+      }
+    },
+    {
+      "query_id": "q18",
+      "prompt": "how does the MCP server register tools",
+      "category": "how_works",
+      "expected_files": [
+        "code_review_graph/main.py"
+      ],
+      "systems": {
+        "graphify": {
+          "context_tokens": 1581,
+          "context_chars": 6327,
+          "files_returned": [
+            "code_review_graph/flows.py",
+            "code_review_graph/constants.py",
+            "code_review_graph/graph.py",
+            "CHANGELOG.md",
+            "tests/fixtures/sample.jl",
+            ".mcp.json",
+            "code_review_graph/hints.py",
+            "tests/fixtures/sample_map_dispatch.ts",
+            "code_review_graph/tools/_common.py",
+            "code_review_graph/tools/__init__.py",
+            "code_review_graph/skills.py",
+            "code_review_graph/incremental.py",
+            "code_review_graph/tools/flows_tools.py"
+          ],
+          "f1": 0.0,
+          "precision": 0.0,
+          "recall": 0.0,
+          "mrr": 0.0,
+          "elapsed_s": 0.35,
+          "error": null
+        },
+        "crg": {
+          "context_tokens": 63,
+          "context_chars": 253,
+          "files_returned": [
+            "tests/test_main.py",
+            "code_review_graph/skills.py",
+            "tests/test_cli.py"
+          ],
+          "f1": 0.0,
+          "precision": 0.0,
+          "recall": 0.0,
+          "mrr": 0.0,
+          "elapsed_s": 0.01,
+          "error": null
+        },
+        "intelligraph": {
+          "context_tokens": 694,
+          "context_chars": 2776,
+          "files_returned": [
+            "tests/test_registry.py",
+            "tests/test_skills.py",
+            "tests/fixtures/sample_map_dispatch.ts",
+            "code_review_graph/tools/analysis_tools.py",
+            "code_review_graph/skills.py",
+            "tests/test_main.py",
+            "code_review_graph/tools/community_tools.py",
+            "code_review_graph/registry.py"
+          ],
+          "f1": 0.0,
+          "precision": 0.0,
+          "recall": 0.0,
+          "mrr": 0.0,
+          "elapsed_s": 0.07,
+          "error": null
+        }
+      }
+    },
+    {
+      "query_id": "q19",
+      "prompt": "how does wiki generation work",
+      "category": "how_works",
+      "expected_files": [
+        "code_review_graph/wiki.py",
+        "code_review_graph/tools/docs.py"
+      ],
+      "systems": {
+        "graphify": {
+          "context_tokens": 1579,
+          "context_chars": 6319,
+          "files_returned": [
+            "code_review_graph/flows.py",
+            "code_review_graph/constants.py",
+            "code_review_graph/graph.py",
+            "tests/fixtures/sample.jl",
+            "code_review_graph/wiki.py",
+            "docs/TROUBLESHOOTING.md",
+            "code_review_graph/visualization.py",
+            "code_review_graph/parser.py",
+            "code_review_graph/communities.py",
+            "tests/test_visualization.py"
+          ],
+          "f1": 0.154,
+          "precision": 0.1,
+          "recall": 0.333,
+          "mrr": 0.2,
+          "elapsed_s": 0.34,
+          "error": null
+        },
+        "crg": {
+          "context_tokens": 173,
+          "context_chars": 693,
+          "files_returned": [
+            "tests/test_wiki.py",
+            "tests/test_integration_git.py",
+            "code_review_graph/wiki.py",
+            "tests/test_tools.py",
+            "code_review_graph/main.py",
+            "code_review_graph/tools/docs.py"
+          ],
+          "f1": 0.444,
+          "precision": 0.333,
+          "recall": 0.667,
+          "mrr": 0.333,
+          "elapsed_s": 0.01,
+          "error": null
+        },
+        "intelligraph": {
+          "context_tokens": 617,
+          "context_chars": 2469,
+          "files_returned": [
+            "tests/test_wiki.py",
+            "tests/test_hints.py",
+            "code_review_graph/wiki.py",
+            "code_review_graph/main.py",
+            "code_review_graph/tools/docs.py",
+            "code_review_graph/analysis.py",
+            "code_review_graph/skills.py",
+            "tests/test_cli_install.py",
+            "tests/test_eval.py"
+          ],
+          "f1": 0.333,
+          "precision": 0.222,
+          "recall": 0.667,
+          "mrr": 0.333,
+          "elapsed_s": 0.07,
+          "error": null
+        }
+      }
+    },
+    {
+      "query_id": "q20",
+      "prompt": "how does the refactoring tool work",
+      "category": "how_works",
+      "expected_files": [
+        "code_review_graph/refactor.py",
+        "code_review_graph/tools/refactor_tools.py"
+      ],
+      "systems": {
+        "graphify": {
+          "context_tokens": 1572,
+          "context_chars": 6291,
+          "files_returned": [
+            "code_review_graph/flows.py",
+            "code_review_graph/graph.py",
+            "code_review_graph/search.py",
+            "tests/fixtures/sample.jl",
+            "code_review_graph/tools/build.py",
+            "code_review_graph/postprocessing.py",
+            "code_review_graph/hints.py",
+            "code_review_graph/parser.py",
+            "code_review_graph/communities.py",
+            "code_review_graph/tools/_common.py",
+            "code_review_graph/tools/refactor_tools.py",
+            "code_review_graph/incremental.py",
+            "code_review_graph/tools/flows_tools.py",
+            "code_review_graph/refactor.py"
+          ],
+          "f1": 0.235,
+          "precision": 0.143,
+          "recall": 0.667,
+          "mrr": 0.091,
+          "elapsed_s": 0.36,
+          "error": null
+        },
+        "crg": {
+          "context_tokens": 108,
+          "context_chars": 432,
+          "files_returned": [
+            "code_review_graph/main.py",
+            "code_review_graph/tools/refactor_tools.py"
+          ],
+          "f1": 0.4,
+          "precision": 0.5,
+          "recall": 0.333,
+          "mrr": 0.5,
+          "elapsed_s": 0.01,
+          "error": null
+        },
+        "intelligraph": {
+          "context_tokens": 755,
+          "context_chars": 3021,
+          "files_returned": [
+            "tests/test_tools.py",
+            "code_review_graph/main.py",
+            "tests/test_main.py",
+            "tests/test_refactor.py",
+            "code_review_graph/tools/analysis_tools.py",
+            "code_review_graph/tools/refactor_tools.py",
+            "code_review_graph/tools/registry_tools.py",
+            "code_review_graph/tools/community_tools.py",
+            "code_review_graph/refactor.py"
+          ],
+          "f1": 0.333,
+          "precision": 0.222,
+          "recall": 0.667,
+          "mrr": 0.167,
+          "elapsed_s": 0.07,
+          "error": null
+        }
+      }
+    }
+  ],
+  "system": "bench_all.py",
+  "repo": "C:\\Users\\kfirm\\Downloads\\Intelligraph\\bench\\competitors\\code-review-graph"
+}

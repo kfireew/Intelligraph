@@ -3,8 +3,9 @@
   "mcp": {
     "intelligraph": {
       "type": "local",
-      "command": ["python", "C:\\Users\\kfirm\\Downloads\\Intelligraph\\backend\\mcp_server_standalone.py", "--intelligraph-url", "http://127.0.0.1:5050", "--project-id", "1"],
-      "enabled": true
+      "command": ["docker", "exec", "-i", "intelligraph", "python", "/app/backend/mcp_server_standalone.py", "--intelligraph-url", "http://localhost:5050", "--project-id", "1", "--mcp-token", "YOUR-MCP-TOKEN"],
+      "enabled": true,
+      "timeout": 10000
     }
   }
 }

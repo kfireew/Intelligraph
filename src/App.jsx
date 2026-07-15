@@ -9,6 +9,7 @@ import { StarTrail } from "./components/StarTrail";
 import { LLMSettings } from "./components/LLMSettings";
 import { GuidePanel } from "./components/GuidePanel";
 import { BranchPanel } from "./components/BranchPanel";
+import { TuningPanel, useTuning } from "./components/TuningPanel";
 import { CloneModal } from "./components/CloneModal";
 import { LoadingOverlay } from "./components/LoadingOverlay";
 import { useAuth } from "./hooks/useAuth";
@@ -23,6 +24,7 @@ export default function App() {
   const activeProject = projects.projects.find(p => p.id === projects.activePid);
   const graph = useGraph(projects.activePid, activeProject?.status);
   const llm = useLLM();
+  const tuning = useTuning();
   const [matchedNodes, setMatchedNodes] = useState([]);
   const [orbHovered, setOrbHovered] = useState(false);
   const [answerComplete, setAnswerComplete] = useState(0);
@@ -70,7 +72,7 @@ export default function App() {
   return (
     <AppShell>
       <ParticleBackground thinking={chat.status === "classifying" || chat.status === "answering"} />
-      <StarTrail matchedNodes={matchedNodes} links={graph.graphData?.graphify?.links || []} hovered={orbHovered} graphData={graph.graphData} active={chat.status === "answering"} />
+      <StarTrail matchedNodes={matchedNodes} links={graph.graphData?.graphify?.links || []} hovered={orbHovered} graphData={graph.graphData} active={chat.status === "answering"} loading={chat.status === "classifying" || chat.status === "thinking" || chat.status === "answering"} />
       <Sidebar projects={projects.projects} activePid={projects.activePid}
         activePanel={activePanel} auth={auth}
         onSelectProject={projects.selectProject}
@@ -96,6 +98,7 @@ export default function App() {
                 status={chat.status} streamingContent={chat.streamingContent}
                 onSend={chat.sendMessage} activeProject={projects.activeProject}
                 graphData={graph.graphData}
+                sendFeedback={chat.sendFeedback}
                 llmConfigured={!!(llm.llmUrl && llm.llmToken)}
                 onGoToLLM={() => setActivePanel("llm")}
               />
@@ -123,6 +126,12 @@ export default function App() {
               exit={{ opacity: 0 }} transition={{ duration: 0.15 }} className="flex flex-1 min-w-0">
               <BranchPanel activePid={projects.activePid} activeProject={projects.activeProject}
                 onPull={projects.pullProject} fetchBranches={projects.fetchBranches} />
+            </motion.div>
+          )}
+          {activePanel === "tuning" && (
+            <motion.div key="tuning" initial={{ opacity: 0 }} animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }} transition={{ duration: 0.15 }} className="flex flex-1 min-w-0">
+              <TuningPanel />
             </motion.div>
           )}
         </AnimatePresence>
