@@ -230,7 +230,7 @@ def retrieve_context(proj: dict, prompt: str, overrides: dict = None) -> dict:
                             intel_files.extend(search_results)
                     elif ttype in ("impact", "debug", "refactor"):
                         # Impact: blast-radius over CALLS edges
-                        impact_results = provider.impact(target, max_depth=2)
+                        impact_results = provider.impact(target)
                         intel_files.extend(impact_results)
                         intel_mode = "impact"
                     elif ttype == "how_works":

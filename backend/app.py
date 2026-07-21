@@ -2240,7 +2240,7 @@ def graph_crg():
         elif mode == "architecture":
             results = provider.architecture()
         elif mode == "impact":
-            results = provider.impact(query, max_depth=2)
+            results = provider.impact(query)
         elif mode == "flows":
             results = provider.flows(query)
         elif mode == "traverse":

@@ -144,7 +144,7 @@ class IntelligenceProvider:
         """Architecture overview (communities, modules, summaries)."""
         return []
 
-    def impact(self, target: str, max_depth: int = 2) -> list[dict]:
+    def impact(self, target: str) -> list[dict]:
         """Blast-radius analysis: callers, callees, dependents of target."""
         return []
 
@@ -1068,14 +1068,14 @@ class CRGProvider(IntelligenceProvider):
 
     # ── Mode 3: Impact (exhaustive blast-radius over ALL edges) ────
 
-    def impact(self, target: str, max_depth: int = 0) -> list[dict]:
+    def impact(self, target: str) -> list[dict]:
         """Exhaustive BFS over ALL edge types to find the complete blast radius.
 
         This is a SAFETY operation, not context delivery. No caps, no token
-        budget, no confidence score. Traverses both CRG edges AND graphify
-        links to find every file that depends on the target.
+        budget, no depth limit. Traverses both CRG edges AND graphify
+        links until the frontier is empty. The graph is finite — BFS terminates.
 
-        Returns: [{file_path, depth, symbols, edge_types, source, mode}]
+        Returns: [{file_path, depth, symbols, edge_types, sources, mode}]
         """
         if not target:
             return []
@@ -1138,33 +1138,16 @@ class CRGProvider(IntelligenceProvider):
             if n["file_path"]:
                 target_files.add(self._normalize_path(n["file_path"]))
 
-        # Dynamic depth: small fan-out → go deeper, mega-hub → stay shallow
-        if max_depth <= 0:
-            try:
-                degree = conn.execute(
-                    "SELECT COUNT(*) as c FROM edges "
-                    "WHERE source_qualified IN (SELECT qualified_name FROM nodes WHERE LOWER(name) = ?) "
-                    "OR target_qualified IN (SELECT qualified_name FROM nodes WHERE LOWER(name) = ?)",
-                    (target_lower, target_lower)
-                ).fetchone()
-                d = degree["c"] if degree else 0
-                if d <= 5:
-                    max_depth = 3
-                elif d <= 30:
-                    max_depth = 2
-                else:
-                    max_depth = 1
-            except Exception:
-                max_depth = 2
-
-        # BFS over CRG edges — ALL edge kinds, no filter, no cap
+        # BFS over CRG edges — ALL edge kinds, no filter, no cap, no depth limit.
+        # This is a safety operation — traverse until frontier is empty.
+        # The graph is finite; BFS terminates.
         visited_qnames = set()
         file_data = defaultdict(lambda: {"depth": 99, "symbols": set(), "edge_types": set(), "sources": set()})
         frontier = set(target_qnames)
+        depth = 0
 
-        for depth in range(1, max_depth + 1):
-            if not frontier:
-                break
+        while frontier:
+            depth += 1
             next_frontier = set()
             for qname in frontier:
                 if qname in visited_qnames:
@@ -1217,8 +1200,7 @@ class CRGProvider(IntelligenceProvider):
                 except Exception as e:
                     log.warning("CRG impact callees query failed: %s", e)
 
-            # NO CAP — traverse everything
-            frontier = next_frontier
+            frontier = next_frontier - visited_qnames
 
         # Also traverse graphify links (second data source)
         gf = self.proj.get("graphify_data") or {}
@@ -1244,13 +1226,13 @@ class CRGProvider(IntelligenceProvider):
                     gf_target_ids.add(n.get("id") or n.get("label"))
                     break
 
-        # BFS over graphify links — ALL link types
+        # BFS over graphify links — ALL link types, no depth limit
         if gf_target_ids:
             gf_visited = set()
             gf_frontier = set(gf_target_ids)
-            for depth in range(1, max_depth + 1):
-                if not gf_frontier:
-                    break
+            gf_depth = 0
+            while gf_frontier:
+                gf_depth += 1
                 gf_next = set()
                 for nid in gf_frontier:
                     if nid in gf_visited:
@@ -1273,12 +1255,12 @@ class CRGProvider(IntelligenceProvider):
                                 fp_norm = self._normalize_path(fp)
                                 if fp_norm and not _is_junk_path(fp_norm) and not _is_test_path(fp_norm):
                                     entry = file_data[fp_norm]
-                                    entry["depth"] = min(entry["depth"], depth)
+                                    entry["depth"] = min(entry["depth"], gf_depth)
                                     if cn.get("label"):
                                         entry["symbols"].add(cn["label"])
                                     entry["edge_types"].add(edge_type)
                                     entry["sources"].add("graphify")
-                gf_frontier = gf_next
+                gf_frontier = gf_next - gf_visited
 
         # Add target files themselves (depth 0)
         for fp in target_files:
@@ -1299,7 +1281,7 @@ class CRGProvider(IntelligenceProvider):
                 "sources": sorted(data["sources"]),
                 "mode": "impact",
             })
-        _vmsg("CRG IMPACT: target='%s' -> %d files (depth=%d, exhaustive)", target[:40], len(results), max_depth)
+        _vmsg("CRG IMPACT: target='%s' -> %d files (exhaustive, %d hops)", target[:40], len(results), depth)
         return results
 
     # ── Mode 4: Execution flows ────────────────────────────────────
