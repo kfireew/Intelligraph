@@ -903,38 +903,6 @@ class CRGProvider(IntelligenceProvider):
 
     # ── Mode 1d: Source code snippets ─────────────────────────────
 
-    def get_symbols_in_file(self, file_path: str, limit: int = 5) -> list[dict]:
-        """Get the top symbols defined in a file from the CRG DB.
-
-        Used by search() to show the LLM what's in each file — so it can
-        call node() on a specific symbol instead of reading the whole file.
-
-        Returns: [{name, kind}]
-        """
-        if not file_path:
-            return []
-        conn = self._get_conn()
-        try:
-            # Try matching on normalized path — DB may store absolute with backslashes
-            norm = self._normalize_path(file_path) if not file_path.startswith("/") else file_path
-            # Also try backslash variant for Windows paths stored in DB
-            norm_bs = norm.replace("/", "\\")
-            rows = conn.execute(
-                "SELECT name, kind FROM nodes "
-                "WHERE (file_path LIKE ? OR file_path LIKE ?) "
-                "AND name IS NOT NULL AND kind IN ('Function','Class','Method','Interface','Type') "
-                "AND name != '' "
-                "ORDER BY LENGTH(name) DESC LIMIT ?",,
-                (f"%{norm}%", f"%{norm_bs}%", limit)
-            ).fetchall()
-            result = [{"name": r["name"], "kind": r["kind"] or ""} for r in rows if r["name"]]
-            # Filter out test noise
-            result = [r for r in result if not _is_test_path(r["name"])]
-            return result[:limit]
-        except Exception as e:
-            log.warning("get_symbols_in_file failed for '%s': %s", file_path, e)
-            return []
-
     def get_snippets(self, node_names: list[str], max_chars: int = 500) -> dict:
         """Fetch source code snippets for given node names from CRG DB.
 

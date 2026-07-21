@@ -356,11 +356,6 @@ def _format_crg_search(results: list, query: str) -> str:
         lines.append(f"   confidence: {conf} ({reason})")
         if sig:
             lines.append(f"   signature: `{sig[:150]}`")
-        # Show what symbols are in this file — lets LLM node() specific ones
-        syms = r.get("symbols_in_file", [])
-        if syms:
-            sym_names = ", ".join(s if isinstance(s, str) else s.get("name", "") for s in syms[:5])
-            lines.append(f"   symbols in file: {sym_names}")
         if snippet:
             lines.append(f"   snippet: {snippet}")
         _track_seen(fp, "search", call_id,

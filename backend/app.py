@@ -173,6 +173,8 @@ def _get_db():
     conn.execute("CREATE INDEX IF NOT EXISTS idx_qlog_proj ON query_logs(project_id)")
     conn.execute("CREATE TABLE IF NOT EXISTS feedback (id TEXT PRIMARY KEY, project_id INTEGER, user_key TEXT, trace_id TEXT, rating INTEGER, comment TEXT, created_at TEXT)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_fb_proj ON feedback(project_id)")
+    conn.execute("CREATE TABLE IF NOT EXISTS query_log_params (trace_id TEXT PRIMARY KEY, embedding_weight REAL, budget_chars INTEGER, snippet_chars INTEGER, intent TEXT, created_at TEXT)")
+    conn.execute("CREATE TABLE IF NOT EXISTS tuning_adjustments (project_id INTEGER, user_key TEXT, embedding_weight REAL, updated_at TEXT, PRIMARY KEY (project_id, user_key))")
     _migrate_fetch_tokens(conn)
     return conn
 
@@ -2235,19 +2237,6 @@ def graph_crg():
                             r["snippet"] = s["snippet"][:200]
             except Exception:
                 pass
-            # Enrich results with symbols-per-file so LLM can node() specific
-            # symbols instead of reading the whole file with local_files().
-            try:
-                seen_fps = set()
-                for r in results:
-                    fp = r.get("file_path", "")
-                    if fp and fp not in seen_fps:
-                        seen_fps.add(fp)
-                        syms = provider.get_symbols_in_file(fp, limit=5)
-                        if syms:
-                            r["symbols_in_file"] = [s["name"] for s in syms]
-            except Exception:
-                pass
         elif mode == "architecture":
             results = provider.architecture()
         elif mode == "impact":
@@ -2888,9 +2877,9 @@ def project_completions(pid):
             retrieval_strategy = intent
 
             if intent in ("what_is", "coverage") and target:
-                # Read tuning params
-                embedding_weight = float(data.get("embedding_weight", 0.4))
-                snippet_chars = int(data.get("snippet_chars", 1500))
+                # Read tuning params — auto-tuned weight overrides default
+                embedding_weight = float(data.get("embedding_weight", _get_auto_tuned_weight(pid, 0.4)))
+                snippet_chars = int(data.get("snippet_chars", 800))
                 traversal_depth = int(data.get("traversal_depth", 1))
 
                 # Lightweight path: search CRG + get node from graph
@@ -3167,7 +3156,7 @@ def project_completions(pid):
             "baseline": "full_corpus",
         }
 
-        # Beta telemetry: log query for analytics
+        # Beta telemetry: log query for analytics + log params for auto-tuning
         try:
             uk = _user_key()
             conn = _db_conn()
@@ -3177,6 +3166,11 @@ def project_completions(pid):
                 (log_id, pid, uk, prompt[:500], retrieval_strategy, context_stats.get("mode", "heavy"),
                  context_tokens, len(answer) // 4, "lightweight" if context_stats.get("mode") == "lightweight" else "heavy",
                  trace_id, datetime.now(timezone.utc).isoformat())
+            )
+            # Log the params used for this query — enables feedback auto-tuning
+            conn.execute(
+                "INSERT OR REPLACE INTO query_log_params(trace_id, embedding_weight, budget_chars, snippet_chars, intent, created_at) VALUES(?, ?, ?, ?, ?, ?)",
+                (trace_id, float(data.get("embedding_weight", 0.4)), int(data.get("budget_chars", 12000)), int(data.get("snippet_chars", 800)), retrieval_strategy, datetime.now(timezone.utc).isoformat())
             )
             conn.commit()
         except Exception:
@@ -3281,11 +3275,80 @@ def delete_conversation(pid, conv_id):
         return jsonify({"error": str(e)}), 500
 
 
+def _get_auto_tuned_weight(pid, default=0.4):
+    """Read auto-tuned embedding weight from feedback adjustments.
+    Returns the adjusted weight, or the default if no adjustments exist."""
+    try:
+        uk = _user_key()
+        conn = _db_conn()
+        row = conn.execute(
+            "SELECT embedding_weight FROM tuning_adjustments WHERE project_id = ? AND user_key = ?",
+            (pid, uk)
+        ).fetchone()
+        if row and row["embedding_weight"] is not None:
+            return float(row["embedding_weight"])
+    except Exception:
+        pass
+    return default
+
+
+def _adjust_tuning_from_feedback(pid, trace_id, rating):
+    """Auto-adjust embedding_weight based on thumbs down feedback.
+    Looks up the params used for that trace_id's query, then nudges
+    the weight in the direction the feedback suggests.
+
+    - Thumbs down on a semantic-heavy result → reduce semantic weight (more keyword)
+    - Thumbs down on a keyword-heavy result → increase semantic weight (more semantic)
+    - Thumbs up → reverse prior down-adjustments slightly (move 0.02 toward 0.4 default)
+    """
+    try:
+        uk = _user_key()
+        conn = _db_conn()
+        # Look up the params used for this query
+        params = conn.execute(
+            "SELECT embedding_weight, intent FROM query_log_params WHERE trace_id = ?",
+            (trace_id,)
+        ).fetchone()
+        if not params:
+            return  # No params logged — can't auto-tune
+        current_weight = params["embedding_weight"] or 0.4
+        intent = params["intent"] or "what_is"
+        # Get current adjusted weight (or default)
+        adj_row = conn.execute(
+            "SELECT embedding_weight FROM tuning_adjustments WHERE project_id = ? AND user_key = ?",
+            (pid, uk)
+        ).fetchone()
+        adjusted = adj_row["embedding_weight"] if adj_row and adj_row["embedding_weight"] is not None else current_weight
+
+        if rating < 0:
+            # Thumbs down — nudge toward opposite of what was used
+            if current_weight >= 0.5:
+                # Was semantic-heavy, try more keyword
+                new_weight = max(0.1, adjusted - 0.05)
+            else:
+                # Was keyword-heavy, try more semantic
+                new_weight = min(0.9, adjusted + 0.05)
+        else:
+            # Thumbs up — reinforce, reverse prior down-adjustments slightly
+            new_weight = adjusted + (0.4 - adjusted) * 0.1
+            new_weight = max(0.1, min(0.9, new_weight))
+
+        conn.execute(
+            "INSERT OR REPLACE INTO tuning_adjustments(project_id, user_key, embedding_weight, updated_at) VALUES(?, ?, ?, ?)",
+            (pid, uk, round(new_weight, 3), datetime.now(timezone.utc).isoformat())
+        )
+        conn.commit()
+        _vmsg("AUTO-TUNE: trace=%s rating=%s weight %.3f -> %.3f (intent=%s)", trace_id[:20], rating, current_weight, new_weight, intent)
+    except Exception as e:
+        log.warning("Auto-tune failed for trace=%s: %s", trace_id[:20], e)
+
+
 # ── Beta telemetry: feedback + query logs ────────────────────────
 
 @app.route("/api/v1/projects/<int:pid>/feedback", methods=["POST"])
 def submit_feedback(pid):
-    """Submit feedback (thumbs up/down + optional comment) for a response."""
+    """Submit feedback (thumbs up/down + optional comment) for a response.
+    Thumbs down auto-adjusts the embedding weight for future queries."""
     uk = _user_key()
     data = request.get_json(force=True) or {}
     trace_id = data.get("trace_id", "")
@@ -3301,6 +3364,9 @@ def submit_feedback(pid):
             (fb_id, pid, uk, trace_id, rating, comment, datetime.now(timezone.utc).isoformat())
         )
         conn.commit()
+        # Auto-tune: adjust embedding weight based on feedback
+        if rating != 0:
+            _adjust_tuning_from_feedback(pid, trace_id, rating)
         return jsonify({"status": "ok"})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
