@@ -1066,19 +1066,23 @@ class CRGProvider(IntelligenceProvider):
         _vmsg("CRG ARCHITECTURE: %d communities", len(results))
         return results
 
-    # ── Mode 3: Impact (blast-radius over CALLS edges) ─────────────
+    # ── Mode 3: Impact (exhaustive blast-radius over ALL edges) ────
 
-    def impact(self, target: str, max_depth: int = 2) -> list[dict]:
-        """BFS over CALLS/IMPORTS_FROM edges to find blast-radius files.
+    def impact(self, target: str, max_depth: int = 0) -> list[dict]:
+        """Exhaustive BFS over ALL edge types to find the complete blast radius.
 
-        Returns: [{file_path, score, depth, reason, edge_type, source, mode}]
+        This is a SAFETY operation, not context delivery. No caps, no token
+        budget, no confidence score. Traverses both CRG edges AND graphify
+        links to find every file that depends on the target.
+
+        Returns: [{file_path, depth, symbols, edge_types, source, mode}]
         """
         if not target:
             return []
         conn = self._get_conn()
         target_lower = target.lower()
 
-        # Find target nodes by name match
+        # Find target nodes by name match (same logic as before)
         target_nodes = conn.execute(
             "SELECT id, name, qualified_name, file_path FROM nodes "
             "WHERE LOWER(name) = ? OR LOWER(qualified_name) LIKE ? "
@@ -1087,7 +1091,6 @@ class CRGProvider(IntelligenceProvider):
         ).fetchall()
 
         if not target_nodes:
-            # Try FTS fallback
             target_nodes = conn.execute(
                 "SELECT n.id, n.name, n.qualified_name, n.file_path "
                 "FROM nodes_fts f JOIN nodes n ON f.rowid = n.id "
@@ -1096,7 +1099,6 @@ class CRGProvider(IntelligenceProvider):
             ).fetchall()
 
         if not target_nodes:
-            # Try word-level search: extract significant words from target
             words = [w for w in re.split(r'[\s_\-\.]+', target_lower) if len(w) > 2 and w not in
                      ("the", "and", "for", "that", "this", "with", "from", "what", "break", "change",
                       "modify", "update", "function", "method", "class", "module", "file", "code")]
@@ -1112,7 +1114,6 @@ class CRGProvider(IntelligenceProvider):
                         target_nodes.extend(rows)
                     except Exception:
                         pass
-                # Deduplicate by id
                 seen_ids = set()
                 deduped = []
                 for n in target_nodes:
@@ -1125,18 +1126,40 @@ class CRGProvider(IntelligenceProvider):
             _vmsg("CRG IMPACT: target '%s' not found", target)
             return []
 
-        # Collect qualified names of target nodes
+        # Collect target info
         target_qnames = set()
+        target_names = set()
         target_files = set()
         for n in target_nodes:
             if n["qualified_name"]:
                 target_qnames.add(n["qualified_name"])
+            if n["name"]:
+                target_names.add(n["name"].lower())
             if n["file_path"]:
                 target_files.add(self._normalize_path(n["file_path"]))
 
-        # BFS: for each target, find callers (who calls it) and callees (what it calls)
+        # Dynamic depth: small fan-out → go deeper, mega-hub → stay shallow
+        if max_depth <= 0:
+            try:
+                degree = conn.execute(
+                    "SELECT COUNT(*) as c FROM edges "
+                    "WHERE source_qualified IN (SELECT qualified_name FROM nodes WHERE LOWER(name) = ?) "
+                    "OR target_qualified IN (SELECT qualified_name FROM nodes WHERE LOWER(name) = ?)",
+                    (target_lower, target_lower)
+                ).fetchone()
+                d = degree["c"] if degree else 0
+                if d <= 5:
+                    max_depth = 3
+                elif d <= 30:
+                    max_depth = 2
+                else:
+                    max_depth = 1
+            except Exception:
+                max_depth = 2
+
+        # BFS over CRG edges — ALL edge kinds, no filter, no cap
         visited_qnames = set()
-        file_scores = defaultdict(lambda: {"score": 0.0, "depth": 99, "reasons": set(), "edge_types": set()})
+        file_data = defaultdict(lambda: {"depth": 99, "symbols": set(), "edge_types": set(), "sources": set()})
         frontier = set(target_qnames)
 
         for depth in range(1, max_depth + 1):
@@ -1148,72 +1171,135 @@ class CRGProvider(IntelligenceProvider):
                     continue
                 visited_qnames.add(qname)
 
-                # Find callers (edges where target_qualified = this qname → source is the caller)
+                # Find ALL edges where this qname is the target (callers/dependents)
                 try:
                     callers = conn.execute(
                         "SELECT DISTINCT e.source_qualified, e.kind, n.file_path, n.name "
                         "FROM edges e "
                         "LEFT JOIN nodes n ON n.qualified_name = e.source_qualified "
-                        "WHERE e.target_qualified = ? AND e.kind IN ('CALLS', 'IMPORTS_FROM')",
+                        "WHERE e.target_qualified = ?",
                         (qname,)
                     ).fetchall()
                     for c in callers:
                         fp = self._normalize_path(c["file_path"]) if c["file_path"] else ""
-                        if fp:
-                            entry = file_scores[fp]
-                            entry["score"] = max(entry["score"], 10.0 - (depth - 1) * 3)
+                        if fp and not _is_junk_path(fp) and not _is_test_path(fp):
+                            entry = file_data[fp]
                             entry["depth"] = min(entry["depth"], depth)
-                            entry["reasons"].add("crg_caller" if c["kind"] == "CALLS" else "crg_importer")
-                            entry["edge_types"].add(c["kind"])
+                            if c["name"]:
+                                entry["symbols"].add(c["name"])
+                            entry["edge_types"].add(c["kind"] or "link")
+                            entry["sources"].add("crg")
                         if c["source_qualified"]:
                             next_frontier.add(c["source_qualified"])
                 except Exception as e:
                     log.warning("CRG impact callers query failed: %s", e)
 
-                # Find callees (edges where source_qualified = this qname → target is the callee)
+                # Find ALL edges where this qname is the source (callees/dependencies)
                 try:
                     callees = conn.execute(
                         "SELECT DISTINCT e.target_qualified, e.kind, n.file_path, n.name "
                         "FROM edges e "
                         "LEFT JOIN nodes n ON n.qualified_name = e.target_qualified "
-                        "WHERE e.source_qualified = ? AND e.kind IN ('CALLS', 'IMPORTS_FROM')",
+                        "WHERE e.source_qualified = ?",
                         (qname,)
                     ).fetchall()
                     for c in callees:
                         fp = self._normalize_path(c["file_path"]) if c["file_path"] else ""
-                        if fp:
-                            entry = file_scores[fp]
-                            entry["score"] = max(entry["score"], 8.0 - (depth - 1) * 2)
+                        if fp and not _is_junk_path(fp) and not _is_test_path(fp):
+                            entry = file_data[fp]
                             entry["depth"] = min(entry["depth"], depth)
-                            entry["reasons"].add("crg_callee" if c["kind"] == "CALLS" else "crg_imported")
-                            entry["edge_types"].add(c["kind"])
+                            if c["name"]:
+                                entry["symbols"].add(c["name"])
+                            entry["edge_types"].add(c["kind"] or "link")
+                            entry["sources"].add("crg")
                         if c["target_qualified"]:
                             next_frontier.add(c["target_qualified"])
                 except Exception as e:
                     log.warning("CRG impact callees query failed: %s", e)
 
-            # Limit frontier to avoid explosion
-            frontier = set(list(next_frontier)[:50])
+            # NO CAP — traverse everything
+            frontier = next_frontier
+
+        # Also traverse graphify links (second data source)
+        gf = self.proj.get("graphify_data") or {}
+        gf_nodes = gf.get("nodes", [])
+        gf_links = gf.get("links", [])
+
+        # Build graphify node lookup
+        gf_node_lookup = {}
+        for n in gf_nodes:
+            nid = n.get("id") or n.get("label")
+            if nid:
+                gf_node_lookup[nid] = n
+                gf_node_lookup[nid.lower()] = n
+
+        # Find target in graphify
+        gf_target_ids = set()
+        for n in gf_nodes:
+            for key in (n.get("id"), n.get("label"), n.get("qualified_name")):
+                if key and key.lower() in target_names:
+                    gf_target_ids.add(n.get("id") or n.get("label"))
+                    break
+                if key and target_lower in key.lower():
+                    gf_target_ids.add(n.get("id") or n.get("label"))
+                    break
+
+        # BFS over graphify links — ALL link types
+        if gf_target_ids:
+            gf_visited = set()
+            gf_frontier = set(gf_target_ids)
+            for depth in range(1, max_depth + 1):
+                if not gf_frontier:
+                    break
+                gf_next = set()
+                for nid in gf_frontier:
+                    if nid in gf_visited:
+                        continue
+                    gf_visited.add(nid)
+                    for l in gf_links:
+                        src = l.get("source") or l.get("from")
+                        tgt = l.get("target") or l.get("to")
+                        edge_type = l.get("type") or l.get("kind") or "link"
+                        connected_id = None
+                        if src == nid and tgt:
+                            connected_id = tgt
+                        elif tgt == nid and src:
+                            connected_id = src
+                        if connected_id and connected_id not in gf_visited:
+                            gf_next.add(connected_id)
+                            cn = gf_node_lookup.get(connected_id, {})
+                            fp = cn.get("source_file", "")
+                            if fp:
+                                fp_norm = self._normalize_path(fp)
+                                if fp_norm and not _is_junk_path(fp_norm) and not _is_test_path(fp_norm):
+                                    entry = file_data[fp_norm]
+                                    entry["depth"] = min(entry["depth"], depth)
+                                    if cn.get("label"):
+                                        entry["symbols"].add(cn["label"])
+                                    entry["edge_types"].add(edge_type)
+                                    entry["sources"].add("graphify")
+                gf_frontier = gf_next
 
         # Add target files themselves (depth 0)
         for fp in target_files:
-            entry = file_scores[fp]
-            entry["score"] = max(entry["score"], 15.0)
-            entry["depth"] = 0
-            entry["reasons"].add("crg_target")
+            if not _is_junk_path(fp) and not _is_test_path(fp):
+                entry = file_data[fp]
+                entry["depth"] = 0
+                entry["symbols"].add(target)
+                entry["edge_types"].add("definition")
+                entry["sources"].add("crg")
 
         results = []
-        for fp, data in sorted(file_scores.items(), key=lambda x: -x[1]["score"]):
+        for fp, data in sorted(file_data.items(), key=lambda x: (x[1]["depth"], -len(x[1]["symbols"]))):
             results.append({
                 "file_path": fp,
-                "score": round(data["score"], 1),
                 "depth": data["depth"],
-                "reason": sorted(data["reasons"]),
+                "symbols": sorted(data["symbols"])[:10],
                 "edge_types": sorted(data["edge_types"]),
-                "source": "crg",
+                "sources": sorted(data["sources"]),
                 "mode": "impact",
             })
-        _vmsg("CRG IMPACT: target='%s' -> %d files (depth=%d)", target[:40], len(results), max_depth)
+        _vmsg("CRG IMPACT: target='%s' -> %d files (depth=%d, exhaustive)", target[:40], len(results), max_depth)
         return results
 
     # ── Mode 4: Execution flows ────────────────────────────────────

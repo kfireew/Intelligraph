@@ -433,18 +433,23 @@ def _format_crg_architecture(results: list) -> str:
 def _format_crg_impact(results: list, target: str) -> str:
     if not results:
         return f"No impact data found for '{target}'."
-    lines = [f"## Impact Analysis: '{target}'", ""]
+    _log_call("impact", len(results), len(results) * 30)
+    lines = [f"## Impact: '{target}' ({len(results)} files — complete blast radius)", ""]
+    lines.append("Exhaustive traversal of CRG + graphify links. Files not listed here do not depend on the target in the code graph.")
+    lines.append("")
     for r in results:
         fp = r.get("file_path", "?")
-        score = r.get("score", 0)
-        reason = r.get("reason", [])
-        names = r.get("names", [])
         depth = r.get("depth", 0)
-        lines.append(f"- `{fp}` (score={score}, depth={depth})")
-        if names:
-            lines.append(f"  Symbols: {', '.join(names[:5])}")
-        if reason:
-            lines.append(f"  Reason: {', '.join(reason[:3])}")
+        symbols = r.get("symbols", [])
+        edge_types = r.get("edge_types", [])
+        sources = r.get("sources", [])
+        depth_label = "definition" if depth == 0 else f"depth {depth}"
+        src_label = "/".join(sources) if sources else "crg"
+        lines.append(f"- `{fp}` ({depth_label}, {src_label})")
+        if symbols:
+            lines.append(f"  symbols: {', '.join(symbols[:5])}")
+        if edge_types:
+            lines.append(f"  edges: {', '.join(edge_types[:5])}")
     return "\n".join(lines)
 
 
