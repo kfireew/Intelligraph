@@ -213,13 +213,22 @@ class CRGProvider(IntelligenceProvider):
         return self._conn
 
     def _extract_repo_prefix(self) -> str:
-        """Extract the repo root prefix from CRG node paths.
+        """Extract the repo root prefix for path normalization.
 
-        CRG stores absolute paths like:
-          C:\\Users\\...\\repos\\local-2-xxx\\graphify\\cluster.py
-        We need to strip everything up to and including the repo root
-        to get repo-relative paths: graphify/cluster.py
+        Priority:
+        1. proj["repo_dir"] — known, absolute, correct (when MCP runs with --repo-dir)
+        2. Common prefix from DB paths — fallback for Docker/chat (no repo_dir)
+
+        The returned prefix is forward-slashed and ends with /.
         """
+        # 1. Known repo_dir — always correct, no guessing
+        repo_dir = self.proj.get("repo_dir")
+        if repo_dir:
+            prefix = repo_dir.replace("\\", "/").rstrip("/") + "/"
+            _vmsg("CRG INTELLIGENCE: repo prefix (from repo_dir) = %s", prefix)
+            return prefix
+
+        # 2. Fallback: common prefix from DB paths (for Docker/chat without repo_dir)
         conn = self._conn
         try:
             rows = conn.execute(
@@ -231,38 +240,27 @@ class CRGProvider(IntelligenceProvider):
             if not paths:
                 return ""
             common = os.path.commonprefix(paths)
-            # Truncate to last / (don't include partial directory name)
             idx = common.rfind("/")
             if idx > 0:
                 prefix = common[:idx + 1]
-                # But common prefix might be too short if there are diverse paths.
-                # Find the repo root by looking for the first source code dir.
-                # e.g. prefix = .../repos/local-2-xxx/  → we want this
-                # If prefix is .../repos/  (too short), we need to go deeper.
-                # Check: does any path have the prefix + a single directory component
-                # that appears in MOST paths?
-                # Simpler: the prefix already works because commonprefix finds the
-                # longest shared start. For repos with diverse top-level dirs,
-                # this is the repo root.
-                _vmsg("CRG INTELLIGENCE: repo prefix = %s", prefix)
+                _vmsg("CRG INTELLIGENCE: repo prefix (from DB common) = %s", prefix)
                 return prefix
         except Exception as e:
             log.warning("CRG prefix extraction failed: %s", e)
         return ""
 
     def _normalize_path(self, abs_path: str) -> str:
-        """Convert CRG absolute path to repo-relative path."""
+        """Convert CRG absolute path to repo-relative path.
+
+        Strips the known repo prefix (from repo_dir or DB common prefix).
+        No folder-name guessing, no markers — just strips the prefix we know
+        is correct.
+        """
         if not abs_path:
             return ""
         p = abs_path.replace("\\", "/")
-        if self._repo_prefix and p.startswith(self._repo_prefix):
+        if self._repo_prefix and p.lower().startswith(self._repo_prefix.lower()):
             return p[len(self._repo_prefix):]
-        # Fallback: try to find the last occurrence of a known source dir
-        # This handles cases where the prefix extraction was imperfect
-        for marker in ("graphify/", "src/", "lib/", "tests/", "backend/"):
-            idx = p.find("/" + marker)
-            if idx >= 0:
-                return p[idx + 1:]
         return p
 
     @staticmethod

@@ -271,16 +271,54 @@ def _crg(mode: str, query: str) -> dict:
     return r.json()
 
 
+def _resolve_path(repo_relative_path: str) -> str:
+    """Resolve a path from search/node results against REPO_DIR.
+
+    The backend (Docker) normalizes paths by stripping its guessed repo prefix,
+    which may not match the local REPO_DIR. This function tries:
+    1. Direct join (REPO_DIR + path) — works when prefix matches
+    2. Basename search — find the file by its last 2-3 path components within REPO_DIR
+    Returns the resolved full path, or the direct join if search fails.
+    """
+    clean = repo_relative_path.replace("\\", "/").lstrip("/")
+    direct = os.path.normpath(os.path.join(REPO_DIR, clean))
+    if os.path.isfile(direct):
+        return direct
+    # Basename search — find by last N path components
+    parts = clean.split("/")
+    for depth in range(min(len(parts), 4), 0, -1):
+        suffix = "/".join(parts[-depth:])
+        import subprocess
+        try:
+            result = subprocess.run(
+                ["cmd", "/c", "dir", "/s", "/b", suffix],
+                cwd=REPO_DIR, capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                lines = result.stdout.strip().split("\n")
+                if len(lines) == 1:
+                    return os.path.normpath(lines[0].strip())
+                if len(lines) > 1:
+                    # Multiple matches — return first (prefer shortest)
+                    best = min(lines, key=len).strip()
+                    return os.path.normpath(best)
+        except Exception:
+            pass
+    return direct
+
+
 def _read_local_file(repo_relative_path: str, max_bytes: int = 15000) -> str:
     """Read a file from the local repository."""
     # Normalize path separators
     clean_path = repo_relative_path.replace("\\", "/").lstrip("/")
 
-    # Resolve against repo_dir
+    # Resolve against repo_dir — try direct first, then basename search
     full_path = os.path.normpath(os.path.join(REPO_DIR, clean_path))
+    if not os.path.isfile(full_path):
+        full_path = _resolve_path(clean_path)
 
     # Security: ensure path is within repo_dir
-    if not full_path.startswith(os.path.normpath(REPO_DIR)):
+    if not os.path.normpath(full_path).startswith(os.path.normpath(REPO_DIR)):
         return f"ERROR: path '{repo_relative_path}' is outside the repo directory"
 
     if not os.path.isfile(full_path):

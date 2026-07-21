@@ -107,7 +107,7 @@ export function GuidePanel({ activePid, activeProject }) {
           intelligraph: {
             type: "local",
             command: ["python", ...scriptArgs],
-            timeout: 10000,
+            timeout: 120000,
           },
         },
       }, null, 2)
