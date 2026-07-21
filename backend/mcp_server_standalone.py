@@ -72,11 +72,12 @@ def _build_tools() -> list[types.Tool]:
         types.Tool(
             name="search",
             description=(
-                "Search the codebase for symbols, files, or concepts using hybrid search (keyword + semantic embeddings). "
-                "Finds symbols by meaning, not just exact text match. "
-                "For example, searching 'add entity' will find 'upsertEntity'. "
-                "Returns symbol names, signatures, file paths, and scores. "
-                "Build artifacts are filtered out automatically."
+                "Search the codebase for symbols, files, or concepts using RRF hybrid search "
+                "(keyword FTS5 + semantic embeddings). "
+                "Returns relevant symbols WITH signatures, source snippets, and confidence levels "
+                "(HIGH/MEDIUM/LOW). Use this FIRST. Usually sufficient for 'what/where is X' "
+                "questions — no file read needed when confidence is HIGH. "
+                "Example: 'add entity' finds 'upsertEntity'. Build artifacts are filtered out."
             ),
             inputSchema={
                 "type": "object",
@@ -90,10 +91,10 @@ def _build_tools() -> list[types.Tool]:
         types.Tool(
             name="node",
             description=(
-                "Get a symbol's details, neighbors, source code snippets, and rationale notes. "
-                "Returns: file path, kind, community, degree, signature, 1-hop connections, "
-                "optional multi-hop subgraph (depth 2-3), source code snippets, and #NOTE/#WHY rationale. "
-                "Use this after search to understand what a symbol connects to and how it works."
+                "Get a symbol's details, multi-hop subgraph (2-hop), 500-char source snippets for "
+                "top 5 neighbors, and rationale notes. Use AFTER search. Snippets are usually "
+                "sufficient — only read full files if you need implementation details beyond the "
+                "snippet. Each result includes role annotations (hub/leaf) to gauge importance."
             ),
             inputSchema={
                 "type": "object",
@@ -127,7 +128,7 @@ def _build_tools() -> list[types.Tool]:
                 "Analyze blast-radius of changing a symbol. "
                 "Traverses CALLS and IMPORTS_FROM edges to find all callers, dependents, "
                 "and downstream code that would break if the target is modified. "
-                "Returns a list of affected files with scores and reasons."
+                "Returns a list of affected files with scores and reasons. Use to plan refactors or assess risk."
             ),
             inputSchema={
                 "type": "object",
@@ -156,9 +157,10 @@ def _build_tools() -> list[types.Tool]:
         types.Tool(
             name="local_files",
             description=(
-                "Read full source code from the local repository on disk. "
-                "Pass repo-relative paths (e.g. 'src/parser.py', 'backend/app.py'). "
-                "Use this after search/node to get the actual file contents for the files you found."
+                "Read raw source files from disk. EXPENSIVE (~1000-4000 tokens per file). "
+                "Use ONLY when search/node snippets are insufficient or search confidence is LOW. "
+                "If a file was already covered by a prior search/node result, this tool will note "
+                "what you already have before returning the content. Prefer 'node' for focused context."
             ),
             inputSchema={
                 "type": "object",
@@ -178,34 +180,6 @@ def _build_tools() -> list[types.Tool]:
             },
         ),
     ]
-
-    if REPO_DIR:
-        tools.append(types.Tool(
-            name="local_files",
-            description=(
-                "Read full source code from the local repository on disk. "
-                "This is more reliable than the retrieve tool for getting exact code — "
-                "no sparse fetch or clone needed. Use this after search/impact/flows "
-                "to get the actual file contents for the files you found. "
-                "Pass repo-relative paths (e.g. 'src/parser.py', 'backend/app.py')."
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "paths": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "Repo-relative file paths to read",
-                    },
-                    "max_bytes": {
-                        "type": "integer",
-                        "description": "Max bytes per file (default 15000)",
-                        "default": 15000,
-                    },
-                },
-                "required": ["paths"],
-            },
-        ))
 
     if REPO_DIR:
         tools.append(types.Tool(
@@ -236,6 +210,31 @@ def _build_tools() -> list[types.Tool]:
         ))
 
     return tools
+
+
+# ── Session tracking: which files search/node already described ──
+# Maps file_path -> {tool, call_id, snippet_chars, had_signature, had_relationships}
+_SESSION_SEEN = {}
+_SESSION_STATS = {"search": 0, "node": 0, "path": 0, "impact": 0, "retrieve": 0, "local_files": 0, "est_tokens": 0}
+_SESSION_CALL_COUNTER = [0]
+
+
+def _track_seen(file_path, tool, call_id, snippet_chars=0, had_signature=False, had_relationships=False):
+    if not file_path:
+        return
+    _SESSION_SEEN[file_path] = {
+        "tool": tool, "call_id": call_id, "snippet_chars": snippet_chars,
+        "had_signature": had_signature, "had_relationships": had_relationships,
+    }
+
+
+def _log_call(tool, result_count, est_tokens):
+    _SESSION_STATS[tool] = _SESSION_STATS.get(tool, 0) + 1
+    _SESSION_STATS["est_tokens"] += est_tokens
+    _SESSION_CALL_COUNTER[0] += 1
+    cid = _SESSION_CALL_COUNTER[0]
+    stats_summary = ", ".join(f"{k}={v}" for k, v in _SESSION_STATS.items() if k != "est_tokens")
+    print(f"[intelligraph-mcp] {tool}#{cid} -> {result_count} results, ~{est_tokens} tokens | session: {stats_summary}, total_tokens~{_SESSION_STATS['est_tokens']}", file=sys.stderr)
 
 
 def _retrieve(query: str) -> dict:
@@ -310,22 +309,32 @@ def _detect_language(path: str) -> str:
 
 def _format_crg_search(results: list, query: str) -> str:
     if not results:
+        _log_call("search", 0, 0)
         return f"No symbols found matching '{query}'."
-    lines = [f"## Symbol Search: '{query}'", ""]
-    for r in results:
+    call_id = _SESSION_CALL_COUNTER[0] + 1
+    lines = [f"## Symbol Search: '{query}' ({len(results)} results)", ""]
+    for i, r in enumerate(results[:10], 1):
         name = r.get("name", "?")
         kind = r.get("kind", "?")
         fp = r.get("file_path", "?")
         sig = r.get("signature", "")
         score = r.get("score", 0)
         terms = r.get("matched_terms", [])
-        lines.append(f"### {name} ({kind}) — `{fp}`")
+        conf = r.get("confidence", "MEDIUM")
+        reason = r.get("confidence_reason", "")
+        snippet = (r.get("snippet", "") or "").strip()[:200]
+        lines.append(f"{i}. {name} ({kind}) — `{fp}`")
+        lines.append(f"   confidence: {conf} ({reason})")
         if sig:
-            lines.append(f"  Signature: `{sig}`")
-        lines.append(f"  Score: {score}")
-        if terms:
-            lines.append(f"  Matched: {', '.join(terms)}")
-        lines.append("")
+            lines.append(f"   signature: `{sig[:150]}`")
+        if snippet:
+            lines.append(f"   snippet: {snippet}")
+        _track_seen(fp, "search", call_id,
+                    snippet_chars=len(snippet),
+                    had_signature=bool(sig),
+                    had_relationships=False)
+    est_tokens = len(lines) * 25
+    _log_call("search", len(results), est_tokens)
     return "\n".join(lines)
 
 
@@ -417,17 +426,37 @@ def _format_retrieve_result(result: dict) -> str:
 
 def _format_local_files(paths: list[str], max_bytes: int) -> str:
     lines = []
+    total_bytes = 0
     for path in paths:
+        # Source-aware: inform LLM what it already has from prior search/node calls
+        seen = _SESSION_SEEN.get(path)
+        info_prefix = ""
+        if seen:
+            already = []
+            if seen.get("had_signature"):
+                already.append("function signature")
+            if seen.get("snippet_chars", 0) > 0:
+                already.append(f"{seen['snippet_chars']}-char snippet")
+            if seen.get("had_relationships"):
+                already.append("caller/callee relationships")
+            if already:
+                info_prefix = (
+                    f"[INFO] `{path}` was previously returned by {seen['tool']} result #{seen['call_id']}.\n"
+                    f"Already provided: {', '.join(already)}.\n"
+                    f"Reading the raw file will retrieve the complete implementation.\n\n"
+                )
         content = _read_local_file(path, max_bytes)
+        total_bytes += len(content)
         if content.startswith("ERROR"):
-            lines.append(f"## {path}\n{content}")
+            lines.append(f"{info_prefix}## {path}\n{content}")
         else:
             lang = _detect_language(path)
-            lines.append(f"## {path}")
+            lines.append(f"{info_prefix}## {path}")
             lines.append(f"```{lang}")
             lines.append(content)
             lines.append("```")
             lines.append("")
+    _log_call("local_files", len(paths), total_bytes // 4)
     return "\n".join(lines)
 
 
@@ -468,13 +497,17 @@ def _graph_get(endpoint: str, params: dict) -> dict:
 def _format_node_result(data: dict, name: str) -> str:
     node = data.get("node")
     if not node:
+        _log_call("node", 0, 0)
         return f"No node found matching '{name}'."
+    call_id = _SESSION_CALL_COUNTER[0] + 1
     lines = [f"## {node.get('name', name)} ({node.get('kind', 'unknown')})", ""]
     lines.append(f"File: `{node.get('file', 'unknown')}`")
     if node.get("signature"):
         lines.append(f"Signature: `{node['signature']}`")
+    degree = node.get("degree", 0)
+    role = "hub" if degree >= 8 else ("connector" if degree >= 3 else "leaf")
+    lines.append(f"Role: {role} (degree {degree})")
     lines.append(f"Community: {node.get('community', 'unknown')}")
-    lines.append(f"Degree: {node.get('degree', 0)}")
     if node.get("is_test"):
         lines.append("Type: Test")
     neighbors = data.get("neighbors", [])
@@ -503,14 +536,20 @@ def _format_node_result(data: dict, name: str) -> str:
         for sn in sg_nodes[:15]:
             depth = sn.get("depth", 0)
             indent = "  " * depth
-            lines.append(f"{indent}{'→ ' if depth > 0 else ''}{sn.get('name', '?')} ({sn.get('kind', '')}) — `{sn.get('file', '')}`")
+            sn_degree = sn.get("degree", 0)
+            sn_role = "hub" if sn_degree >= 8 else ("connector" if sn_degree >= 3 else "leaf")
+            lines.append(f"{indent}{'→ ' if depth > 0 else ''}{sn.get('name', '?')} ({sn.get('kind', '')}) — `{sn.get('file', '')}` [{sn_role}: degree {sn_degree}]")
+            _track_seen(sn.get("file", ""), "node", call_id,
+                        snippet_chars=500,
+                        had_signature=False,
+                        had_relationships=True)
 
-    # Source code snippets
+    # Source code snippets — top 5 (was 3)
     snippets = data.get("snippets")
     if snippets:
         lines.append("")
         lines.append("### Source Code")
-        for sname, sdata in list(snippets.items())[:3]:
+        for sname, sdata in list(snippets.items())[:5]:
             snip = sdata.get("snippet", "")
             if snip:
                 fp = sdata.get("file_path", "")
@@ -532,6 +571,8 @@ def _format_node_result(data: dict, name: str) -> str:
             conf_tag = f" [{conf}]" if conf else ""
             lines.append(f"- {text}{conf_tag}")
 
+    est_tokens = len(lines) * 25
+    _log_call("node", len(subgraph.get("nodes", [])) if subgraph else 0, est_tokens)
     return "\n".join(lines)
 
 

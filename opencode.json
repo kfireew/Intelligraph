@@ -1,11 +1,11 @@
 {
   "$schema": "https://opencode.ai/config.json",
   "mcp": {
-    "intelligraph": {
+    "intelligraph-mini": {
       "type": "local",
-      "command": ["docker", "exec", "-i", "intelligraph", "python", "/app/backend/mcp_server_standalone.py", "--intelligraph-url", "http://localhost:5050", "--project-id", "1", "--mcp-token", "YOUR-MCP-TOKEN"],
+      "command": ["C:\\Users\\kfirm\\AppData\\Local\\Python\\pythoncore-3.14-64\\Scripts\\intelligraph-mini.exe"],
       "enabled": true,
-      "timeout": 10000
+      "timeout": 120000
     }
   }
 }

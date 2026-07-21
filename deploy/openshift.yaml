@@ -1,0 +1,146 @@
+---
+apiVersion: v1
+kind: DeploymentConfig
+metadata:
+  name: intelligraph
+  labels:
+    app: intelligraph
+spec:
+  replicas: 1
+  selector:
+    app: intelligraph
+  template:
+    metadata:
+      labels:
+        app: intelligraph
+    spec:
+      containers:
+        - name: intelligraph
+          image: intelligraph:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5050
+              protocol: TCP
+          env:
+            # ── Core ──
+            - name: SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: intelligraph-secrets
+                  key: secret-key
+            - name: INTELLIGRAPH_REQUIRE_SSO
+              value: "true"
+            # ── Network (closed) ──
+            - name: INTELLIGRAPH_NETWORK_MODE
+              value: "closed"
+            - name: LLM_SSL_VERIFY
+              value: "false"
+            - name: INTELLIGRAPH_GIT_SSL_VERIFY
+              value: "false"
+            - name: LLM_ALLOWED_HOSTS
+              value: "models.ai-services.idf.cts"
+            # ── LLM ──
+            - name: INTELLIGRAPH_LLM_URL
+              value: "https://models.ai-services.idf.cts/v1/chat/completions"
+            - name: INTELLIGRAPH_LLM_MODEL
+              value: "Qwen/Qwen3.6-27B-FP8"
+            - name: INTELLIGRAPH_LLM_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: intelligraph-secrets
+                  key: llm-token
+            - name: INTELLIGRAPH_LLM_TIMEOUT
+              value: "120"
+            # ── Site URL (external route) ──
+            - name: INTELLIGRAPH_SITE_URL
+              value: "https://intelligraph.apps.your-cluster.domain"
+            # ── SSO / OIDC (PKCE — no client secret needed) ──
+            - name: SSO_ISSUER
+              value: "https://sso.your-domain.com/auth/realms/your-realm"
+            - name: SSO_CLIENT_ID
+              value: "intelligraph"
+            # ── Performance ──
+            - name: OMP_NUM_THREADS
+              value: "2"
+            - name: GRAPHIFY_MAX_WORKERS
+              value: "4"
+            - name: CRG_PARSE_WORKERS
+              value: "4"
+            - name: INTELLIGRAPH_VIZ_NODE_LIMIT
+              value: "5000"
+          volumeMounts:
+            - name: data
+              mountPath: /app/backend/data
+          readinessProbe:
+            httpGet:
+              path: /status
+              port: 5050
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /status
+              port: 5050
+            initialDelaySeconds: 30
+            periodSeconds: 30
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: intelligraph-data
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: intelligraph
+  labels:
+    app: intelligraph
+spec:
+  selector:
+    app: intelligraph
+  ports:
+    - name: http
+      port: 5050
+      targetPort: 5050
+      protocol: TCP
+
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: intelligraph
+  labels:
+    app: intelligraph
+spec:
+  to:
+    kind: Service
+    name: intelligraph
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: intelligraph-data
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 10Gi
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: intelligraph-secrets
+type: Opaque
+stringData:
+  # MUST be at least 32 characters
+  secret-key: "CHANGE_ME_to_a_random_32_plus_char_string_here"
+  # OpenRouter / LLM API token (if using token-based auth)
+  llm-token: ""

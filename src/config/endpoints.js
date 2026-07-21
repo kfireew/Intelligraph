@@ -20,6 +20,5 @@ export const endpoints = {
   // Downloads
   downloadMCPServer: "/download/mcp-server",
   downloadGraphBuilder: "/download/graph-builder",
-  downloadAgent: "/download/agent",
-  downloadIntelligraphMini: "/download/intelligraph-mini"
+  downloadAgent: "/download/agent"
 };

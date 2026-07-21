@@ -408,29 +408,6 @@ export function GuidePanel({ activePid, activeProject }) {
       <Section title="How it works" icon={FileCode}>
         <p className="text-xs text-text-secondary m-0 leading-relaxed">Uses the same <code className="px-1 py-0.5 rounded bg-accent/10 text-accent-light text-[11px] font-mono">retrieval.py</code> runtime as the web UI. Pipeline: ExecutionPlanner → NodeResolver → TraversalPlanner → NeighborhoodRanker → ChunkRetriever → ContextMerger.</p>
       </Section>
-
-      {/* ── Intelligraph-mini ── */}
-      <Section title="Intelligraph-mini" icon={Download}>
-        <p className="text-xs text-text-secondary m-0 mb-3 leading-relaxed">
-          Prefer a lightweight, local-first MCP server? <strong>Intelligraph-mini</strong> has the same graph intelligence (RRF hybrid search, multi-hop traversal, source snippets, rationale nodes) but without Docker, web UI, or SSO. Just tools for your agent — works on any network.
-        </p>
-        <a href={endpoints.downloadIntelligraphMini} download
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-accent/10 hover:bg-accent/20 text-accent-light text-xs font-medium transition-colors no-underline">
-          <Download size={14} /> Download setup script
-        </a>
-        <details className="mt-3">
-          <summary className="text-[11px] font-bold text-muted cursor-pointer hover:text-text transition-colors">Or install manually</summary>
-          <div className="mt-2">
-            <CodeBlock id="miniInstall" code={`pip install git+https://github.com/kfireew/intelligraph-mini.git\n\n# Then add to your MCP config:\nintelligraph-mini --repo-dir .`} />
-          </div>
-        </details>
-        <div className="mt-2">
-          <a href="https://github.com/kfireew/intelligraph-mini" target="_blank" rel="noopener noreferrer"
-            className="text-[11px] text-accent-light hover:text-accent transition-colors no-underline">
-            → GitHub: kfireew/intelligraph-mini
-          </a>
-        </div>
-      </Section>
     </div>
   );
 }

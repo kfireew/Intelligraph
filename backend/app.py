@@ -627,7 +627,7 @@ def auth_login():
         "client_id": SSO_CLIENT_ID,
         "response_type": "code",
         "scope": "openid profile email",
-        "redirect_uri": url_for("auth_callback", _external=True),
+        "redirect_uri": f"{SITE_URL.rstrip('/')}/auth/callback" if SITE_URL else url_for("auth_callback", _external=True),
         "state": state,
     }
     # PKCE: when no client secret, use code challenge/verifier (RFC 7636)
@@ -650,7 +650,7 @@ def auth_callback():
         token_data = {
             "grant_type": "authorization_code",
             "code": request.args.get("code"),
-            "redirect_uri": url_for("auth_callback", _external=True),
+            "redirect_uri": f"{SITE_URL.rstrip('/')}/auth/callback" if SITE_URL else url_for("auth_callback", _external=True),
             "client_id": SSO_CLIENT_ID,
         }
         # PKCE: send code_verifier when no client secret; otherwise send secret
@@ -862,20 +862,6 @@ def download_graph_builder():
     py = os.path.join(os.path.dirname(os.path.abspath(__file__)), "graph_builder.py")
     return send_file(py, as_attachment=True,
                      download_name="graph_builder.py",
-                     mimetype="text/x-python")
-
-
-@app.route("/download/intelligraph-mini")
-def download_intelligraph_mini():
-    """Download the Intelligraph-mini setup script.
-
-    Intelligraph-mini is a local-first MCP server with the same graph
-    intelligence (RRF hybrid search, multi-hop traversal, snippets, rationale)
-    but without Docker, web UI, SSO, or chat. Just tools for your agent.
-    """
-    setup_path = os.path.join(DOWNLOADS, "setup_intelligraph_mini.py")
-    return send_file(setup_path, as_attachment=True,
-                     download_name="setup_intelligraph_mini.py",
                      mimetype="text/x-python")
 
 
@@ -1903,6 +1889,62 @@ def project_crg_db(pid):
                      mimetype="application/octet-stream")
 
 
+@app.route("/projects/<int:pid>/upload-data", methods=["POST"])
+def project_upload_data(pid):
+    """Accept graphify JSON or CRG SQLite DB upload for upload-type projects."""
+    proj = _projects().get(pid)
+    if not proj:
+        return jsonify({"error": "project not found"}), 404
+    if "graph_file" not in request.files:
+        return jsonify({"error": "graph_file required"}), 400
+    upload_type = request.form.get("type", "graphify")
+    f = request.files["graph_file"]
+
+    if upload_type == "graphify":
+        try:
+            raw = f.read()
+            data = json.loads(raw)
+        except Exception as e:
+            return jsonify({"error": f"invalid JSON: {e}"}), 400
+        if "nodes" not in data:
+            return jsonify({"error": "graph JSON must contain 'nodes' key"}), 400
+        proj["graphify_data"] = data
+        proj["nodes"] = len(data.get("nodes", []))
+        proj["edges"] = len(data.get("links", []))
+        _vmsg("UPLOAD graphify pid=%d - nodes=%d edges=%d", pid, proj["nodes"], proj["edges"])
+
+    elif upload_type == "crg":
+        import sqlite3, tempfile
+        tmp_dir = os.path.join(REPO_DIR, f"upload-{pid}")
+        os.makedirs(tmp_dir, exist_ok=True)
+        db_path = os.path.join(tmp_dir, "graph.db")
+        f.save(db_path)
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            cn = conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
+            ce = conn.execute("SELECT COUNT(*) FROM edges").fetchone()[0]
+            conn.close()
+        except Exception as e:
+            os.unlink(db_path)
+            return jsonify({"error": f"invalid SQLite DB: {e}"}), 400
+        proj["crg_db_path"] = db_path
+        proj["crg_nodes"] = cn
+        proj["nodes"] = max(proj.get("nodes", 0), cn)
+        proj["edges"] = max(proj.get("edges", 0), ce)
+        _vmsg("UPLOAD crg pid=%d - crg_nodes=%d crg_edges=%d", pid, cn, ce)
+
+    else:
+        return jsonify({"error": f"unknown type '{upload_type}'; expected 'graphify' or 'crg'"}), 400
+
+    has_gf = bool(proj.get("graphify_data"))
+    has_crg = bool(proj.get("crg_db_path"))
+    if has_gf or has_crg:
+        proj["status"] = "ready"
+    _save_project(pid, proj)
+    return jsonify({"id": pid, "status": proj["status"], "nodes": proj.get("nodes", 0),
+                    "edges": proj.get("edges", 0), "has_graphify": has_gf, "has_crg": has_crg})
+
+
 @app.route("/projects/<int:pid>/graph-html")
 def project_graph_html(pid):
     """Serve graphify's graph.html with Intelligraph dark theme injected.
@@ -2181,6 +2223,18 @@ def graph_crg():
         elif mode == "hybrid":
             ew = float(data.get("embedding_weight", 0.4))
             results = provider.hybrid_search(query, max_results=20, embedding_weight=ew)
+            # Enrich results with source snippets so MCP clients get enough
+            # context without needing to call local_files separately.
+            try:
+                top_names = [r.get("name") for r in results[:5] if r.get("name")]
+                if top_names:
+                    snips = provider.get_snippets(top_names, max_chars=250)
+                    for r in results:
+                        s = snips.get(r.get("name", ""))
+                        if s and s.get("snippet"):
+                            r["snippet"] = s["snippet"][:200]
+            except Exception:
+                pass
         elif mode == "architecture":
             results = provider.architecture()
         elif mode == "impact":
@@ -3150,8 +3204,7 @@ def status():
         "downloads": {"mcp_server": "/download/mcp-server",
                      "graph_builder": "/download/graph-builder",
                      "agent": "/download/agent",
-                     "test_mcp": "/download/test-mcp",
-                     "intelligraph_mini": "/download/intelligraph-mini"},
+                     "test_mcp": "/download/test-mcp"},
         "project": proj,
         "projects": list(_projects().keys()),
         "build_queue_depth": build_queue.depth,

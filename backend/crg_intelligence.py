@@ -20,6 +20,7 @@ import logging
 import os
 import re
 import sqlite3
+import sys
 from collections import defaultdict, deque
 
 log = logging.getLogger(__name__)
@@ -58,7 +59,7 @@ def _vmsg(msg, *args):
             msg = msg % args
         except Exception:
             pass
-    print(f"[{ts}] {msg}", flush=True)
+    print(f"[{ts}] {msg}", file=sys.stderr, flush=True)
 
 
 # ── Embedding infrastructure (reuses bundled all-MiniLM-L6-v2) ────
@@ -391,7 +392,7 @@ class CRGProvider(IntelligenceProvider):
         if not terms:
             return []
 
-        file_scores = defaultdict(lambda: {"score": 0.0, "names": [], "kinds": set(), "matched_terms": set()})
+        file_scores = defaultdict(lambda: {"score": 0.0, "names": [], "kinds": set(), "matched_terms": set(), "signatures": [], "exact_match": False})
         for i, term in enumerate(terms):
             weight = 5.0 if i < 3 else 3.0  # earlier terms weighted higher
             try:
@@ -412,6 +413,10 @@ class CRGProvider(IntelligenceProvider):
                     entry["names"].append(r["name"])
                     entry["kinds"].add(r["kind"])
                     entry["matched_terms"].add(term)
+                    if r["signature"]:
+                        entry["signatures"].append(r["signature"])
+                    if is_exact:
+                        entry["exact_match"] = True
             except Exception as e:
                 log.warning("CRG FTS search for '%s' failed: %s", term, e)
 
@@ -427,6 +432,8 @@ class CRGProvider(IntelligenceProvider):
                 "score": round(data["score"], 1),
                 "name": data["names"][0] if data["names"] else "",
                 "kind": list(data["kinds"])[0] if data["kinds"] else "",
+                "signature": data["signatures"][0] if data["signatures"] else "",
+                "exact_match": data["exact_match"],
                 "matched_terms": sorted(data["matched_terms"]),
                 "reason": ["crg_fts_match"],
                 "source": "crg",
@@ -485,6 +492,7 @@ class CRGProvider(IntelligenceProvider):
                 "id": r["id"], "name": name, "kind": r["kind"] or "",
                 "file_path": self._normalize_path(r["file_path"]) if r["file_path"] else "",
                 "qualified_name": r["qualified_name"] or name,
+                "signature": r["signature"] or "",
             })
 
         if not texts:
@@ -546,6 +554,7 @@ class CRGProvider(IntelligenceProvider):
                 "file_path": fp,
                 "name": m["name"],
                 "kind": m["kind"],
+                "signature": m.get("signature", ""),
                 "score": round(score, 3),
                 "reason": ["semantic_match"],
                 "source": "crg",
@@ -564,9 +573,13 @@ class CRGProvider(IntelligenceProvider):
         in both FTS and semantic results get two additive terms -> higher
         RRF score. Files in only one system get a single term -> lower score.
 
-        After RRF ranking, an adaptive cutoff drops results below 30% of the
+        After RRF ranking, an adaptive cutoff drops results below 50% of the
         top score — so specific queries return 2-3 files and broad queries
         return 5-8, instead of always returning max_results.
+
+        Each result also carries a `confidence` (HIGH/MEDIUM/LOW) and
+        `confidence_reason` string so callers can decide whether to fetch
+        more context (snippets, full files) or trust the result.
         """
         fts_weight = 1.0 - embedding_weight
         fts_results = self.search(query, max_results=max_results * 2)
@@ -576,6 +589,10 @@ class CRGProvider(IntelligenceProvider):
             if ranked:
                 top = ranked[0].get("score", 0)
                 ranked = [r for r in ranked if r.get("score", 0) >= top * 0.3]
+            for r in ranked[:max_results]:
+                r["confidence"] = "MEDIUM" if r.get("exact_match") else "LOW"
+                r["confidence_reason"] = ("exact match + FTS" if r.get("exact_match") else "FTS only")
+                r["semantic_score"] = 0.0
             return ranked[:max_results]
 
         sem_results = self.semantic_search(query, max_results=max_results * 2)
@@ -584,6 +601,10 @@ class CRGProvider(IntelligenceProvider):
             if ranked:
                 top = ranked[0].get("score", 0)
                 ranked = [r for r in ranked if r.get("score", 0) >= top * 0.3]
+            for r in ranked[:max_results]:
+                r["confidence"] = "HIGH" if r.get("score", 0) >= 0.5 else "LOW"
+                r["confidence_reason"] = f"semantic only ({r.get('score', 0):.2f})"
+                r["semantic_score"] = r.get("score", 0)
             return ranked[:max_results]
 
         k = 30  # RRF constant — lower k = steeper drop-off (k=60 is too flat for 10-20 results)
@@ -599,15 +620,37 @@ class CRGProvider(IntelligenceProvider):
             if fp and fp not in sem_rank:
                 sem_rank[fp] = i + 1
 
+        # Build lookup MERGING both result lists (not overwriting) so that
+        # semantic_score, exact_match, signature, matched_terms all survive.
         lookup = {}
         for r in sem_results:
             fp = r.get("file_path", "")
             if fp:
-                lookup[fp] = r
+                lookup[fp] = {
+                    "semantic_score": r.get("score", 0),
+                    "name": r.get("name", ""),
+                    "kind": r.get("kind", ""),
+                    "signature": r.get("signature", ""),
+                    "exact_match": False,
+                    "matched_terms": [],
+                }
         for r in fts_results:
             fp = r.get("file_path", "")
             if fp:
-                lookup[fp] = r
+                if fp not in lookup:
+                    lookup[fp] = {
+                        "semantic_score": 0.0,
+                        "name": r.get("name", ""),
+                        "kind": r.get("kind", ""),
+                        "signature": r.get("signature", ""),
+                        "exact_match": False,
+                        "matched_terms": [],
+                    }
+                lookup[fp]["exact_match"] = r.get("exact_match", False)
+                lookup[fp]["matched_terms"] = r.get("matched_terms", [])
+                lookup[fp]["fts_score"] = r.get("score", 0)
+                if not lookup[fp].get("signature") and r.get("signature"):
+                    lookup[fp]["signature"] = r.get("signature", "")
 
         all_fps = set(fts_rank.keys()) | set(sem_rank.keys())
         scored = []
@@ -628,6 +671,16 @@ class CRGProvider(IntelligenceProvider):
             if fp in sem_rank:
                 reasons.add("rrf_semantic")
             entry["reason"] = sorted(reasons)
+            # Confidence signals
+            in_both = fp in fts_rank and fp in sem_rank
+            sem_score = base.get("semantic_score", 0.0)
+            exact = base.get("exact_match", False)
+            matched = base.get("matched_terms", [])
+            entry["semantic_score"] = sem_score
+            entry["exact_match"] = exact
+            entry["matched_terms"] = matched
+            entry["confidence"] = self._compute_confidence(in_both, exact, sem_score, len(matched))
+            entry["confidence_reason"] = self._confidence_reason(in_both, exact, sem_score, matched)
             scored.append(entry)
 
         ranked = sorted(scored, key=lambda x: -x["score"])
@@ -642,6 +695,36 @@ class CRGProvider(IntelligenceProvider):
               query[:50], embedding_weight, len(results), len(fts_results), len(sem_results),
               ranked[0]["score"] * 0.3 if ranked else 0)
         return results
+
+    @staticmethod
+    def _compute_confidence(in_both: bool, exact_match: bool, semantic_score: float, num_matched_terms: int) -> str:
+        """HIGH: hybrid + exact match + strong semantic (>=0.5).
+        MEDIUM: hybrid without exact (but decent semantic), OR FTS-only exact, OR semantic-only strong.
+        LOW: semantic-only weak, or FTS-only fuzzy."""
+        if in_both and exact_match and semantic_score >= 0.5:
+            return "HIGH"
+        if in_both and (exact_match or semantic_score >= 0.4):
+            return "MEDIUM"
+        if not in_both and exact_match:
+            return "MEDIUM"
+        if not in_both and semantic_score >= 0.5:
+            return "MEDIUM"
+        return "LOW"
+
+    @staticmethod
+    def _confidence_reason(in_both: bool, exact_match: bool, semantic_score: float, matched_terms) -> str:
+        parts = []
+        if exact_match:
+            parts.append("exact match")
+        if in_both:
+            parts.append(f"hybrid (FTS + semantic {semantic_score:.2f})")
+        elif semantic_score > 0:
+            parts.append(f"semantic only ({semantic_score:.2f})")
+        else:
+            parts.append("FTS only")
+        if matched_terms:
+            parts.append(f"matched: {', '.join(matched_terms[:3])}")
+        return " + ".join(parts)
 
     # ── Mode 1c: Multi-hop graph traversal ────────────────────────
 
