@@ -132,12 +132,11 @@ export function StarTrail({ matchedNodes, links, hovered, active, loading }) {
       st.constStars = loadingConstellations.stars;
       st.constEdges = loadingConstellations.edges;
       st.phase = 0;
-    } else if (matchedConstData.stars.length > 0) {
-      st.constStars = matchedConstData.stars;
-      st.constEdges = matchedConstData.edges;
-      st.phase = 0;
     }
-  }, [loadingConstellations, matchedConstData, loading]);
+    // When loading ends, keep the loading constellations visible —
+    // they fade out naturally via the fade logic below.
+    // Don't switch to matched-node scatter (was a visual mess).
+  }, [loadingConstellations, loading]);
 
   useEffect(() => {
     if (!canvasRef.current) return;

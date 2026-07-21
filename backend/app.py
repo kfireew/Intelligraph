@@ -2618,6 +2618,125 @@ def graph_communities():
     return jsonify(result[:20])
 
 
+def _build_system_prompt(intent: str) -> str:
+    """Build LLM system prompt tailored to the question intent.
+
+    The intent is detected by planner.detect_intent() and flows through
+    retrieval_strategy. Different question types need different answer
+    structures — an architecture question shouldn't dump code, and an
+    implementation question shouldn't skip it.
+    """
+    base = (
+        "You are an expert software architect helping a developer understand a codebase.\n"
+        "Do not invent files, functions, imports, or APIs.\n"
+        "Answer based on what you have -- do not declare context insufficient.\n\n"
+    )
+
+    if intent == "architecture":
+        return base + (
+            "Answer in this structure:\n"
+            "## Summary\n"
+            "2-3 sentences on what the project is and its overall shape.\n\n"
+            "## Architecture\n"
+            "The major layers/components and how they connect. Include:\n"
+            "- Layers: what are the major subsystems and what is each responsible for\n"
+            "- Hubs: high-degree nodes that everything touches (name them)\n"
+            "- Communities: tightly-coupled groups of symbols that work together\n"
+            "- Dependencies: how the layers depend on each other\n"
+            "Use the community data and neighbor data from the context. "
+            "Describe structure, not implementation.\n\n"
+            "## Key Files\n"
+            "One file per major component, with its role (hub / connector / leaf) "
+            "and what it does in 1-2 sentences.\n\n"
+            "## References\n"
+            "- `path/to/file.py` -- what it does\n\n"
+            "Avoid code snippets unless absolutely necessary to illustrate a "
+            "structural point. Architecture is higher-level than implementation. "
+            "If you find yourself wanting to show code, describe what the code "
+            "does in prose instead.\n"
+            "Do not give one-line answers. Be thorough on the structure.\n"
+        )
+
+    if intent == "impact":
+        return base + (
+            "Answer in this structure:\n"
+            "## Summary\n"
+            "2-3 sentences on what would be affected by changing the target.\n\n"
+            "## Affected Files\n"
+            "List the affected files with their depth (direct = depth 1, indirect "
+            "= depth 2+) and risk level (high / medium / low based on the score). "
+            "Group by depth. Explain WHY each file is affected (caller? callee? "
+            "importer?).\n\n"
+            "## Recommendations\n"
+            "What to check, what tests to run, what to be careful about.\n\n"
+            "## References\n"
+            "- `path/to/file.py` -- why it's affected\n\n"
+            "Avoid code snippets unless absolutely necessary. Focus on the "
+            "blast radius: which files, why, and how deep.\n"
+        )
+
+    if intent == "coverage":
+        return base + (
+            "Answer in this structure:\n"
+            "## Summary\n"
+            "2-3 sentences on what was found.\n\n"
+            "## Files Found\n"
+            "List every relevant file with a one-line description of what it does "
+            "and why it matches the query. Group by category if useful (e.g. "
+            "tests / implementation / config).\n\n"
+            "## References\n"
+            "- `path/to/file.py` -- what it does\n\n"
+            "Avoid code snippets. This is a find-all question — the user wants "
+            "the complete list of relevant files, not implementations.\n"
+        )
+
+    if intent == "nx_architecture":
+        return base + (
+            "Answer in this structure:\n"
+            "## Summary\n"
+            "2-3 sentences on the workspace shape.\n\n"
+            "## Workspace Structure\n"
+            "The projects, their dependencies, and how they're organized. "
+            "Include: project names, what each does, dependency graph between "
+            "them, and which are affected by changes.\n\n"
+            "## References\n"
+            "- `path/to/project.json` -- what it does\n\n"
+            "Avoid code snippets. Describe the workspace structure.\n"
+        )
+
+    if intent == "how_works":
+        return base + (
+            "Answer in this structure:\n"
+            "## Summary\n"
+            "2-3 sentences answering the question directly.\n\n"
+            "## Explanation\n"
+            "Detailed walk-through of the logic. Why, not just what. Trace the "
+            "flow step by step, naming the functions/files involved.\n\n"
+            "## Code\n"
+            "Include a focused code snippet showing the flow — not a full dump. "
+            "Trim to the relevant lines only.\n\n"
+            "## References\n"
+            "- `path/to/file.py` -- what it does\n\n"
+            "Do not give one-line answers. Be thorough.\n"
+        )
+
+    # what_is and default — balanced prompt
+    return base + (
+        "Answer in this structure:\n"
+        "## Summary\n"
+        "2-3 sentences answering the question directly.\n\n"
+        "## Explanation\n"
+        "Detailed walk-through of the logic. Why, not just what.\n\n"
+        "## Code\n"
+        "Include code snippets when the question is about implementation. "
+        "For coverage, find-all, or architecture questions, list the relevant "
+        "files and explain what they do -- code is not always needed.\n\n"
+        "## References\n"
+        "- `path/to/file.py` -- what it does\n\n"
+        "Do not give one-line answers. Be thorough.\n"
+    )
+
+
 @app.route("/api/v1/projects/<int:pid>/completions", methods=["POST"])
 def project_completions(pid):
     """Stateless completion endpoint for n8n/external automation + web chat.
@@ -2913,23 +3032,7 @@ def project_completions(pid):
             app.logger.warning("Completions context retrieval failed: %s", e)
 
     # ── Build LLM messages ──
-    system_msg = (
-        "You are an expert software architect helping a developer understand a codebase.\n\n"
-        "Answer in this structure:\n"
-        "## Summary\n"
-        "2-3 sentences answering the question directly.\n\n"
-        "## Explanation\n"
-        "Detailed walk-through of the logic. Why, not just what.\n\n"
-        "## Code\n"
-        "Include code snippets when the question is about implementation. "
-        "For coverage, find-all, or architecture questions, list the relevant files "
-        "and explain what they do -- code is not always needed.\n\n"
-        "## References\n"
-        "- `path/to/file.py` -- what it does\n\n"
-        "Do not give one-line answers. Be thorough.\n"
-        "Do not invent files, functions, imports, or APIs.\n"
-        "Answer based on what you have -- do not declare context insufficient."
-    )
+    system_msg = _build_system_prompt(retrieval_strategy)
     messages = [{"role": "system", "content": system_msg}]
 
     # Inject retrieved context as a separate user message (ground truth)
