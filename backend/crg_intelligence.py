@@ -41,12 +41,30 @@ _JUNK_PATH_PATTERNS = [
     ".ngfactory.ts", "redux-dev-tools", "build-resources",
 ]
 
+_TEST_PATH_PATTERNS = [
+    "/test/", "/tests/", "/__tests__/", "/e2e/", "/e2e-tests/",
+    ".test.", ".spec.", ".e2e.", ".stories.",
+    "/fixtures/", "/mocks/", "/mock/", "/testdata/",
+    "test-helper", "test-utils", "test-setup",
+    "/cypress/", "/playwright/", "/jest/",
+]
+
 
 def _is_junk_path(fp):
     if not fp:
         return True
     lower = fp.lower() if isinstance(fp, str) else ""
     return any(p in lower for p in _JUNK_PATH_PATTERNS)
+
+
+def _is_test_path(fp):
+    """Check if a file path looks like a test/spec/mock file.
+    Used to filter test noise from graph traversal — node() should find
+    real implementation, not E2E test classes."""
+    if not fp:
+        return True
+    lower = fp.lower() if isinstance(fp, str) else ""
+    return any(p in lower for p in _TEST_PATH_PATTERNS)
 
 
 def _vmsg(msg, *args):
@@ -795,13 +813,31 @@ class CRGProvider(IntelligenceProvider):
 
         target_lower = target.lower()
         start_qnames = []
+        # Pass 1: exact name match — prefer non-test, non-File, real implementation nodes
         for nid, ninfo in node_lookup.items():
             if ninfo["name"].lower() == target_lower or (ninfo["qualified_name"] and target_lower in ninfo["qualified_name"].lower()):
-                start_qnames.append(ninfo["qualified_name"])
-                break
+                fp = ninfo.get("file_path", "")
+                if _is_junk_path(fp) or _is_test_path(fp):
+                    continue
+                if ninfo.get("kind") in ("Function", "Class", "Method"):
+                    start_qnames.append(ninfo["qualified_name"])
+                    break
+        # Pass 2: exact name match — accept any non-test node
+        if not start_qnames:
+            for nid, ninfo in node_lookup.items():
+                if ninfo["name"].lower() == target_lower or (ninfo["qualified_name"] and target_lower in ninfo["qualified_name"].lower()):
+                    fp = ninfo.get("file_path", "")
+                    if _is_junk_path(fp) or _is_test_path(fp):
+                        continue
+                    start_qnames.append(ninfo["qualified_name"])
+                    break
+        # Pass 3: substring match — non-test only
         if not start_qnames:
             for nid, ninfo in node_lookup.items():
                 if target_lower in ninfo["name"].lower():
+                    fp = ninfo.get("file_path", "")
+                    if _is_junk_path(fp) or _is_test_path(fp):
+                        continue
                     start_qnames.append(ninfo["qualified_name"])
                     break
 
@@ -817,9 +853,10 @@ class CRGProvider(IntelligenceProvider):
             if sq not in visited:
                 visited.add(sq)
                 ni = qname_lookup.get(sq, {})
-                if ni and not _is_junk_path(ni.get("file_path", "")):
+                fp = ni.get("file_path", "")
+                if ni and not _is_junk_path(fp) and not _is_test_path(fp):
                     nodes_result.append({
-                        "name": ni.get("name", sq), "file": ni.get("file_path", ""),
+                        "name": ni.get("name", sq), "file": fp,
                         "kind": ni.get("kind", ""), "depth": 0,
                         "degree": len(adj.get(sq, [])),
                     })
@@ -843,7 +880,7 @@ class CRGProvider(IntelligenceProvider):
                 visited.add(neighbor_qname)
                 ni = qname_lookup.get(neighbor_qname, {})
                 fp = ni.get("file_path", "")
-                if _is_junk_path(fp):
+                if _is_junk_path(fp) or _is_test_path(fp):
                     continue
                 nodes_result.append({
                     "name": ni.get("name", neighbor_qname), "file": fp,
@@ -865,6 +902,38 @@ class CRGProvider(IntelligenceProvider):
         return {"nodes": nodes_result, "edges": edges_result, "stats": stats}
 
     # ── Mode 1d: Source code snippets ─────────────────────────────
+
+    def get_symbols_in_file(self, file_path: str, limit: int = 5) -> list[dict]:
+        """Get the top symbols defined in a file from the CRG DB.
+
+        Used by search() to show the LLM what's in each file — so it can
+        call node() on a specific symbol instead of reading the whole file.
+
+        Returns: [{name, kind}]
+        """
+        if not file_path:
+            return []
+        conn = self._get_conn()
+        try:
+            # Try matching on normalized path — DB may store absolute with backslashes
+            norm = self._normalize_path(file_path) if not file_path.startswith("/") else file_path
+            # Also try backslash variant for Windows paths stored in DB
+            norm_bs = norm.replace("/", "\\")
+            rows = conn.execute(
+                "SELECT name, kind FROM nodes "
+                "WHERE (file_path LIKE ? OR file_path LIKE ?) "
+                "AND name IS NOT NULL AND kind IN ('Function','Class','Method','Interface','Type') "
+                "AND name != '' "
+                "ORDER BY LENGTH(name) DESC LIMIT ?",,
+                (f"%{norm}%", f"%{norm_bs}%", limit)
+            ).fetchall()
+            result = [{"name": r["name"], "kind": r["kind"] or ""} for r in rows if r["name"]]
+            # Filter out test noise
+            result = [r for r in result if not _is_test_path(r["name"])]
+            return result[:limit]
+        except Exception as e:
+            log.warning("get_symbols_in_file failed for '%s': %s", file_path, e)
+            return []
 
     def get_snippets(self, node_names: list[str], max_chars: int = 500) -> dict:
         """Fetch source code snippets for given node names from CRG DB.

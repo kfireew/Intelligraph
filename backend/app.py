@@ -2235,6 +2235,19 @@ def graph_crg():
                             r["snippet"] = s["snippet"][:200]
             except Exception:
                 pass
+            # Enrich results with symbols-per-file so LLM can node() specific
+            # symbols instead of reading the whole file with local_files().
+            try:
+                seen_fps = set()
+                for r in results:
+                    fp = r.get("file_path", "")
+                    if fp and fp not in seen_fps:
+                        seen_fps.add(fp)
+                        syms = provider.get_symbols_in_file(fp, limit=5)
+                        if syms:
+                            r["symbols_in_file"] = [s["name"] for s in syms]
+            except Exception:
+                pass
         elif mode == "architecture":
             results = provider.architecture()
         elif mode == "impact":
@@ -2450,6 +2463,7 @@ def graph_node():
             pass
 
     # Source code snippets (from CRG node_snippets table)
+    # Get snippets for ALL subgraph nodes (up to 15), not just target + top 5
     if include_snippets and crg_path and os.path.exists(crg_path):
         try:
             from crg_intelligence import get_providers
@@ -2457,12 +2471,58 @@ def graph_node():
             providers = get_providers(proj)
             if providers:
                 provider = providers[0]
-                snippet_names = [node_label] + [n["name"] for n in neighbors[:5]]
-                snippets = provider.get_snippets(snippet_names, max_chars=500)
+                # Collect all node names from subgraph + neighbors + target
+                snippet_names = [node_label]
+                if result.get("subgraph"):
+                    for sn in result["subgraph"].get("nodes", []):
+                        if sn.get("name") and sn["name"] not in snippet_names:
+                            snippet_names.append(sn["name"])
+                for n in neighbors:
+                    if n.get("name") and n["name"] not in snippet_names:
+                        snippet_names.append(n["name"])
+                snippets = provider.get_snippets(snippet_names[:15], max_chars=500)
                 if snippets:
                     result["snippets"] = snippets
         except Exception:
             pass
+
+    # Build reading plan: group subgraph + neighbors by file, list symbols to look for
+    # This tells the LLM WHAT to read (which files, which symbols) instead of
+    # reading 15 files blindly with local_files.
+    try:
+        file_symbols = {}
+        # Add target
+        if source_file:
+            file_symbols.setdefault(source_file, {"symbols": set(), "edges": set()})
+            file_symbols[source_file]["symbols"].add(node_label)
+        # Add subgraph nodes
+        if result.get("subgraph"):
+            for sn in result["subgraph"].get("nodes", []):
+                fp = sn.get("file", "")
+                nm = sn.get("name", "")
+                if fp and nm:
+                    if not _is_junk_path(fp) and not _is_test_path(fp):
+                        file_symbols.setdefault(fp, {"symbols": set(), "edges": set()})
+                        file_symbols[fp]["symbols"].add(nm)
+        # Add neighbors
+        for n in neighbors:
+            fp = n.get("file", "")
+            nm = n.get("name", "")
+            if fp and nm:
+                if not _is_junk_path(fp) and not _is_test_path(fp):
+                    file_symbols.setdefault(fp, {"symbols": set(), "edges": set()})
+                    file_symbols[fp]["symbols"].add(nm)
+        # Convert to list
+        reading_plan = []
+        for fp, info in sorted(file_symbols.items(), key=lambda x: -len(x[1]["symbols"])):
+            reading_plan.append({
+                "file": fp,
+                "symbols": sorted(info["symbols"])[:8],
+            })
+        if reading_plan:
+            result["reading_plan"] = reading_plan
+    except Exception:
+        pass
 
     return jsonify(result)
 

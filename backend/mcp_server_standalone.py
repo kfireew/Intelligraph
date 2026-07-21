@@ -349,8 +349,6 @@ def _format_crg_search(results: list, query: str) -> str:
         kind = r.get("kind", "?")
         fp = r.get("file_path", "?")
         sig = r.get("signature", "")
-        score = r.get("score", 0)
-        terms = r.get("matched_terms", [])
         conf = r.get("confidence", "MEDIUM")
         reason = r.get("confidence_reason", "")
         snippet = (r.get("snippet", "") or "").strip()[:200]
@@ -358,6 +356,11 @@ def _format_crg_search(results: list, query: str) -> str:
         lines.append(f"   confidence: {conf} ({reason})")
         if sig:
             lines.append(f"   signature: `{sig[:150]}`")
+        # Show what symbols are in this file — lets LLM node() specific ones
+        syms = r.get("symbols_in_file", [])
+        if syms:
+            sym_names = ", ".join(s if isinstance(s, str) else s.get("name", "") for s in syms[:5])
+            lines.append(f"   symbols in file: {sym_names}")
         if snippet:
             lines.append(f"   snippet: {snippet}")
         _track_seen(fp, "search", call_id,
@@ -601,6 +604,20 @@ def _format_node_result(data: dict, name: str) -> str:
             conf = rn.get("confidence", "")
             conf_tag = f" [{conf}]" if conf else ""
             lines.append(f"- {text}{conf_tag}")
+
+    # Reading plan — tells LLM what to read with local_files and which symbols to look for
+    reading_plan = data.get("reading_plan")
+    if reading_plan:
+        lines.append("")
+        lines.append("### Reading Plan")
+        lines.append("Based on the subgraph, here are the files to read and what to look for:")
+        lines.append("Use `local_files` on these files — look for the specific symbols listed:")
+        lines.append("")
+        for rp in reading_plan[:10]:
+            fp = rp.get("file", "")
+            syms = rp.get("symbols", [])
+            if fp and syms:
+                lines.append(f"- `{fp}` — {', '.join(syms[:5])}")
 
     est_tokens = len(lines) * 25
     _log_call("node", len(subgraph.get("nodes", [])) if subgraph else 0, est_tokens)
