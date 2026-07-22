@@ -302,10 +302,11 @@ class CRGProvider(IntelligenceProvider):
         raw_tokens = re.split(r"[\s\-./]+", lower)
 
         # Individual meaningful words
+        # Allow underscores in identifiers (hybrid_search, _vmsg, etc.)
         words = []
         for token in raw_tokens:
             token = token.strip()
-            if len(token) > 2 and token.isalpha() and token not in stopwords:
+            if len(token) > 2 and token.replace("_", "").isalpha() and token not in stopwords:
                 words.append(token)
 
         # Also try multi-word compound: "build_graph" from "build graph"
@@ -314,7 +315,7 @@ class CRGProvider(IntelligenceProvider):
         current_compound = []
         for token in raw_tokens:
             token = token.strip()
-            if token and len(token) > 2 and token not in stopwords and token.isalpha():
+            if token and len(token) > 2 and token not in stopwords and token.replace("_", "").isalpha():
                 current_compound.append(token)
             else:
                 if len(current_compound) > 1:
@@ -323,8 +324,9 @@ class CRGProvider(IntelligenceProvider):
         if len(current_compound) > 1:
             compounds.append("_".join(current_compound))
 
-        # Return compounds first (more specific), then individual words
-        return compounds + words
+        # Return compounds first (more specific), then individual words.
+        # If nothing extracted (e.g. all stopwords), fall back to the raw query.
+        terms = compounds + words
         return terms or [query.lower().strip()]
 
     # ── Mode 0: Target extraction ──────────────────────────────────
@@ -401,19 +403,71 @@ class CRGProvider(IntelligenceProvider):
     def search(self, query: str, max_results: int = 20) -> list[dict]:
         """FTS5 search for symbols/files matching the query.
 
-        Returns: [{file_path, name, kind, signature, community_id, score, reason, source, mode}]
+        A LIKE pre-pass catches camelCase / concatenated matches that FTS
+        tokenization misses (e.g. "zik plane" → "ZikPlane"). FTS then adds
+        tokenized matches. Results carry line_start/line_end so callers
+        (MCP) can give the agent surgical read ranges instead of whole files.
+
+        Returns: [{file_path, name, kind, signature, line_start, line_end,
+                   community_id, score, exact_match, matched_terms, reason, source, mode}]
         """
         conn = self._get_conn()
         terms = self._extract_terms(query)
         if not terms:
             return []
 
-        file_scores = defaultdict(lambda: {"score": 0.0, "names": [], "kinds": set(), "matched_terms": set(), "signatures": [], "exact_match": False})
+        file_scores = defaultdict(lambda: {"score": 0.0, "names": [], "kinds": set(),
+                                           "matched_terms": set(), "signatures": [],
+                                           "exact_match": False,
+                                           "line_start": 0, "line_end": 0})
+
+        # Pass 0: LIKE pre-pass — catches camelCase / concatenated / underscore names.
+        # "zik plane" → "zikplane" → matches "ZikPlane"
+        # "hybrid_search" → tries both "hybrid_search" AND "hybridsearch"
+        # FTS5 tokenizes on underscore so "hybrid_search" needs LIKE to match it.
+        for term in terms:
+            like_term = term.replace(" ", "").replace("_", "")
+            # Try both the original term and the underscore-stripped version
+            for try_term in [term, like_term]:
+                if len(try_term) < 3:
+                    continue
+                try:
+                    rows = conn.execute(
+                        "SELECT name, kind, file_path, signature, community_id, "
+                        "line_start, line_end FROM nodes "
+                        "WHERE kind IN ('Function','Class','Method') "
+                        "AND LOWER(name) LIKE ? "
+                        "ORDER BY LENGTH(name) ASC LIMIT 10",
+                        (f"%{try_term}%",)
+                    ).fetchall()
+                    for r in rows:
+                        fp = self._normalize_path(r["file_path"])
+                        if not fp or _is_junk_path(fp) or _is_test_path(fp):
+                            continue
+                        is_exact = r["name"].lower() == try_term
+                        entry = file_scores[fp]
+                        entry["score"] += (15.0 if is_exact else 8.0)
+                        entry["names"].append(r["name"])
+                        entry["kinds"].add(r["kind"])
+                        entry["matched_terms"].add(term)
+                        if r["signature"]:
+                            entry["signatures"].append(r["signature"])
+                        if is_exact:
+                            entry["exact_match"] = True
+                        if r["line_start"]:
+                            entry["line_start"] = r["line_start"]
+                        if r["line_end"]:
+                            entry["line_end"] = r["line_end"]
+                except Exception:
+                    pass
+
+        # Pass 1: FTS5 search
         for i, term in enumerate(terms):
             weight = 5.0 if i < 3 else 3.0  # earlier terms weighted higher
             try:
                 rows = conn.execute(
-                    "SELECT n.file_path, n.name, n.kind, n.signature, n.community_id "
+                    "SELECT n.file_path, n.name, n.kind, n.signature, n.community_id, "
+                    "n.line_start, n.line_end "
                     "FROM nodes_fts f JOIN nodes n ON f.rowid = n.id "
                     "WHERE nodes_fts MATCH ? ORDER BY rank LIMIT ?",
                     (f'"{term}"', 15)
@@ -422,7 +476,6 @@ class CRGProvider(IntelligenceProvider):
                     fp = self._normalize_path(r["file_path"])
                     if not fp or _is_junk_path(fp):
                         continue
-                    # Exact match boost: if the symbol name exactly matches the term
                     is_exact = r["name"].lower() == term.lower()
                     entry = file_scores[fp]
                     entry["score"] += (15.0 if is_exact else weight)
@@ -433,6 +486,10 @@ class CRGProvider(IntelligenceProvider):
                         entry["signatures"].append(r["signature"])
                     if is_exact:
                         entry["exact_match"] = True
+                    if r["line_start"]:
+                        entry["line_start"] = r["line_start"]
+                    if r["line_end"]:
+                        entry["line_end"] = r["line_end"]
             except Exception as e:
                 log.warning("CRG FTS search for '%s' failed: %s", term, e)
 
@@ -449,6 +506,8 @@ class CRGProvider(IntelligenceProvider):
                 "name": data["names"][0] if data["names"] else "",
                 "kind": list(data["kinds"])[0] if data["kinds"] else "",
                 "signature": data["signatures"][0] if data["signatures"] else "",
+                "line_start": data["line_start"],
+                "line_end": data["line_end"],
                 "exact_match": data["exact_match"],
                 "matched_terms": sorted(data["matched_terms"]),
                 "reason": ["crg_fts_match"],
@@ -479,13 +538,15 @@ class CRGProvider(IntelligenceProvider):
         conn = self._get_conn()
         try:
             rows = conn.execute(
-                "SELECT id, name, kind, signature, file_path, qualified_name "
+                "SELECT id, name, kind, signature, file_path, qualified_name, "
+                "line_start, line_end "
                 "FROM nodes WHERE name IS NOT NULL AND kind IN ('Function','Class','Method','File') "
                 "ORDER BY id"
             ).fetchall()
         except Exception:
             rows = conn.execute(
-                "SELECT id, name, '' as kind, '' as signature, file_path, '' as qualified_name "
+                "SELECT id, name, '' as kind, '' as signature, file_path, '' as qualified_name, "
+                "line_start, line_end "
                 "FROM nodes WHERE name IS NOT NULL ORDER BY id"
             ).fetchall()
 
@@ -509,6 +570,8 @@ class CRGProvider(IntelligenceProvider):
                 "file_path": self._normalize_path(r["file_path"]) if r["file_path"] else "",
                 "qualified_name": r["qualified_name"] or name,
                 "signature": r["signature"] or "",
+                "line_start": r["line_start"] or 0,
+                "line_end": r["line_end"] or 0,
             })
 
         if not texts:
@@ -571,6 +634,8 @@ class CRGProvider(IntelligenceProvider):
                 "name": m["name"],
                 "kind": m["kind"],
                 "signature": m.get("signature", ""),
+                "line_start": m.get("line_start", 0),
+                "line_end": m.get("line_end", 0),
                 "score": round(score, 3),
                 "reason": ["semantic_match"],
                 "source": "crg",
@@ -637,7 +702,7 @@ class CRGProvider(IntelligenceProvider):
                 sem_rank[fp] = i + 1
 
         # Build lookup MERGING both result lists (not overwriting) so that
-        # semantic_score, exact_match, signature, matched_terms all survive.
+        # semantic_score, exact_match, signature, matched_terms, line_start/end all survive.
         lookup = {}
         for r in sem_results:
             fp = r.get("file_path", "")
@@ -649,6 +714,8 @@ class CRGProvider(IntelligenceProvider):
                     "signature": r.get("signature", ""),
                     "exact_match": False,
                     "matched_terms": [],
+                    "line_start": r.get("line_start", 0),
+                    "line_end": r.get("line_end", 0),
                 }
         for r in fts_results:
             fp = r.get("file_path", "")
@@ -661,12 +728,19 @@ class CRGProvider(IntelligenceProvider):
                         "signature": r.get("signature", ""),
                         "exact_match": False,
                         "matched_terms": [],
+                        "line_start": r.get("line_start", 0),
+                        "line_end": r.get("line_end", 0),
                     }
                 lookup[fp]["exact_match"] = r.get("exact_match", False)
                 lookup[fp]["matched_terms"] = r.get("matched_terms", [])
                 lookup[fp]["fts_score"] = r.get("score", 0)
                 if not lookup[fp].get("signature") and r.get("signature"):
                     lookup[fp]["signature"] = r.get("signature", "")
+                # Prefer FTS line numbers if semantic had 0
+                if r.get("line_start") and not lookup[fp].get("line_start"):
+                    lookup[fp]["line_start"] = r["line_start"]
+                if r.get("line_end") and not lookup[fp].get("line_end"):
+                    lookup[fp]["line_end"] = r["line_end"]
 
         all_fps = set(fts_rank.keys()) | set(sem_rank.keys())
         scored = []

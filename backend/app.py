@@ -2225,18 +2225,10 @@ def graph_crg():
         elif mode == "hybrid":
             ew = float(data.get("embedding_weight", 0.4))
             results = provider.hybrid_search(query, max_results=20, embedding_weight=ew)
-            # Enrich results with source snippets so MCP clients get enough
-            # context without needing to call local_files separately.
-            try:
-                top_names = [r.get("name") for r in results[:5] if r.get("name")]
-                if top_names:
-                    snips = provider.get_snippets(top_names, max_chars=250)
-                    for r in results:
-                        s = snips.get(r.get("name", ""))
-                        if s and s.get("snippet"):
-                            r["snippet"] = s["snippet"][:200]
-            except Exception:
-                pass
+            # NOTE: DB snippet enrichment removed — MCP is a navigator, not a
+            # content provider. Results now carry line_start/line_end so the
+            # MCP server can tell the agent WHERE to read (file:start-end).
+            # The agent uses its built-in Read tool with offset/limit.
         elif mode == "architecture":
             results = provider.architecture()
         elif mode == "impact":
@@ -2334,7 +2326,7 @@ def graph_node():
     node_label = matched.get("label") or node_id
     source_file = matched.get("source_file") or ""
 
-    # CRG enrichment (signature, is_test)
+    # CRG enrichment (signature, is_test, line_start, line_end)
     crg_meta = {}
     crg_path = proj.get("crg_db_path")
     if crg_path and os.path.exists(crg_path):
@@ -2343,7 +2335,8 @@ def graph_node():
             conn = _sqlite3.connect(f"file:{crg_path}?mode=ro", uri=True)
             conn.row_factory = _sqlite3.Row
             rows = conn.execute(
-                "SELECT name, kind, signature, is_test, community_id FROM nodes WHERE name = ? OR qualified_name = ? LIMIT 5",
+                "SELECT name, kind, signature, is_test, community_id, "
+                "line_start, line_end FROM nodes WHERE name = ? OR qualified_name = ? LIMIT 5",
                 (node_label, node_label)
             ).fetchall()
             if rows:
@@ -2351,6 +2344,8 @@ def graph_node():
                 crg_meta = {
                     "kind": r["kind"], "signature": r["signature"] or "",
                     "is_test": bool(r["is_test"]), "community_id": r["community_id"],
+                    "line_start": r["line_start"] or 0,
+                    "line_end": r["line_end"] or 0,
                 }
             conn.close()
         except Exception:
@@ -2393,6 +2388,32 @@ def graph_node():
     # Degree = total neighbors
     degree = len(neighbors)
 
+    # Batch CRG line range lookup for all neighbors — gives the MCP server
+    # file:start-end ranges so the agent can Read with offset/limit instead
+    # of reading whole files.
+    if crg_path and os.path.exists(crg_path) and neighbors:
+        try:
+            import sqlite3 as _sqlite3
+            _nconn = _sqlite3.connect(f"file:{crg_path}?mode=ro", uri=True)
+            _nconn.row_factory = _sqlite3.Row
+            neighbor_names = [n["name"] for n in neighbors if n.get("name")]
+            if neighbor_names:
+                placeholders = ",".join("?" * len(neighbor_names))
+                _nrows = _nconn.execute(
+                    f"SELECT name, line_start, line_end FROM nodes "
+                    f"WHERE name IN ({placeholders})",
+                    neighbor_names
+                ).fetchall()
+                _line_map = {r["name"]: (r["line_start"] or 0, r["line_end"] or 0) for r in _nrows}
+                for n in neighbors:
+                    ls_le = _line_map.get(n["name"])
+                    if ls_le:
+                        n["line_start"] = ls_le[0]
+                        n["line_end"] = ls_le[1]
+            _nconn.close()
+        except Exception:
+            pass
+
     # Community from graphify
     community = matched.get("community") or matched.get("community_id")
 
@@ -2406,6 +2427,8 @@ def graph_node():
             "degree": degree,
             "signature": crg_meta.get("signature", ""),
             "is_test": crg_meta.get("is_test", False),
+            "line_start": crg_meta.get("line_start", 0),
+            "line_end": crg_meta.get("line_end", 0),
         },
         "neighbors": neighbors[:30],
     }

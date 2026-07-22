@@ -72,12 +72,10 @@ def _build_tools() -> list[types.Tool]:
         types.Tool(
             name="search",
             description=(
-                "Search the codebase for symbols, files, or concepts using RRF hybrid search "
-                "(keyword FTS5 + semantic embeddings). "
-                "Returns relevant symbols WITH signatures, source snippets, and confidence levels "
-                "(HIGH/MEDIUM/LOW). Use this FIRST. Usually sufficient for 'what/where is X' "
-                "questions — no file read needed when confidence is HIGH. "
-                "Example: 'add entity' finds 'upsertEntity'. Build artifacts are filtered out."
+                "Search the codebase for symbols, files, or concepts. "
+                "Returns name, kind, file path with line ranges (file:start-end), and confidence [H/M/L]. "
+                "Use built-in Read with offset=line_start, limit=line_end-line_start to get source. "
+                "Use this FIRST — replaces grep and glob."
             ),
             inputSchema={
                 "type": "object",
@@ -91,17 +89,15 @@ def _build_tools() -> list[types.Tool]:
         types.Tool(
             name="node",
             description=(
-                "Get a symbol's details, multi-hop subgraph (2-hop), 500-char source snippets for "
-                "top 5 neighbors, and rationale notes. Use AFTER search. Snippets are usually "
-                "sufficient — only read full files if you need implementation details beyond the "
-                "snippet. Each result includes role annotations (hub/leaf) to gauge importance."
+                "Get a symbol= symbol's connections (callers, callees, imports) with file:line ranges. "
+                "Use AFTER search. Then use built-in Read with those line ranges to get implementation details. "
+                "Replaces reading whole files — read only the specific line ranges shown."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "name": {"type": "string", "description": "Symbol name (exact or partial match)"},
-                    "depth": {"type": "integer", "description": "Traversal depth (1-3, default 2 for multi-hop context)", "default": 2},
-                    "include_snippets": {"type": "boolean", "description": "Include source code snippets (default true)", "default": True},
+                    "depth": {"type": "integer", "description": "Traversal depth (1-3, default 2)", "default": 2},
                 },
                 "required": ["name"],
             },
@@ -125,10 +121,9 @@ def _build_tools() -> list[types.Tool]:
         types.Tool(
             name="impact",
             description=(
-                "Analyze blast-radius of changing a symbol. "
-                "Traverses CALLS and IMPORTS_FROM edges to find all callers, dependents, "
-                "and downstream code that would break if the target is modified. "
-                "Returns a list of affected files with scores and reasons. Use to plan refactors or assess risk."
+                "Complete blast radius of changing a symbol. Exhaustive traversal of ALL edge types. "
+                "Returns every affected file with symbols to check. Use before refactoring. "
+                "Files not listed do not depend on the target."
             ),
             inputSchema={
                 "type": "object",
@@ -157,10 +152,9 @@ def _build_tools() -> list[types.Tool]:
         types.Tool(
             name="local_files",
             description=(
-                "Read raw source files from disk. EXPENSIVE (~1000-4000 tokens per file). "
-                "Use ONLY when search/node snippets are insufficient or search confidence is LOW. "
-                "If a file was already covered by a prior search/node result, this tool will note "
-                "what you already have before returning the content. Prefer 'node' for focused context."
+                "Read full source files from disk. EXPENSIVE. "
+                "Prefer built-in Read with line ranges from search/node results instead. "
+                "Use this only when you need a whole file that search/node didn't cover."
             ),
             inputSchema={
                 "type": "object",
@@ -345,62 +339,57 @@ def _detect_language(path: str) -> str:
     return ext_map.get(ext, "text")
 
 
-_SUFFICIENCY_TEXT = {
-    "HIGH": (
-        "Search confidence: HIGH\n"
-        "These results include signatures, representative source snippets, and graph relationships. "
-        "They are typically sufficient for architectural, navigation, and high-level code understanding. "
-        "Open source files only if you need implementation details that are not present here."
-    ),
-    "MEDIUM": (
-        "Search confidence: MEDIUM\n"
-        "These results include partial signatures, snippets, and some graph relationships. "
-        "They are typically sufficient for navigation and identifying relevant symbols, "
-        "but implementation details may be incomplete. Open source files if you need fuller "
-        "context around a specific function or its callers."
-    ),
-    "LOW": (
-        "Search confidence: LOW\n"
-        "These results are best-effort matches based on weak semantic similarity or fuzzy keyword hits. "
-        "They identify candidate symbols but may not directly answer the question. "
-        "Open source files to confirm relevance, or call node() on a specific symbol to explore its neighborhood."
-    ),
-    "NONE": (
-        "Search confidence: NONE\n"
-        "No symbols matched the query. Try rephrasing with a more specific symbol name, "
-        "or open source files directly if you know the file path."
-    ),
-}
+# ── Session search dedup cache ───────────────────────────────────
+_SESSION_SEARCHES = {}
 
 
 def _format_crg_search(results: list, query: str) -> str:
+    """Compact search output — one line per result with file:line_start-end.
+
+    The MCP is a NAVIGATOR, not a content provider. It tells the agent WHERE
+    to look. The agent uses its built-in Read tool with offset/limit to get
+    the actual source code. No DB snippets, no confidence paragraphs, no
+    sufficiency text — just name, kind, file:lines, confidence letter.
+    """
     if not results:
         _log_call("search", 0, 0)
-        return _SUFFICIENCY_TEXT["NONE"] + f"\n\nNo symbols found matching '{query}'."
+        return f"No symbols found matching '{query}'."
+
+    # Dedup: same query in same session → cached one-liner
+    cache_key = query.lower().strip()
+    if cache_key in _SESSION_SEARCHES:
+        prev = _SESSION_SEARCHES[cache_key]
+        return f"[CACHED] Same as search#{prev['call_id']}. Files: {', '.join(prev['files'])}"
+
     call_id = _SESSION_CALL_COUNTER[0] + 1
-    # Sufficiency recommendation derived from top result's confidence
     top_conf = results[0].get("confidence", "MEDIUM")
-    lines = [_SUFFICIENCY_TEXT.get(top_conf, _SUFFICIENCY_TEXT["MEDIUM"]), "",
-             f"## Symbol Search: '{query}' ({len(results)} results)", ""]
+    conf_tag = {"HIGH": "H", "MEDIUM": "M", "LOW": "L"}.get(top_conf, "M")
+
+    lines = [f'## "{query}" — {len(results)} results [{conf_tag}]']
+    files_list = []
+
     for i, r in enumerate(results[:10], 1):
         name = r.get("name", "?")
         kind = r.get("kind", "?")
         fp = r.get("file_path", "?")
-        sig = r.get("signature", "")
-        conf = r.get("confidence", "MEDIUM")
-        reason = r.get("confidence_reason", "")
-        snippet = (r.get("snippet", "") or "").strip()[:200]
-        lines.append(f"{i}. {name} ({kind}) — `{fp}`")
-        lines.append(f"   confidence: {conf} ({reason})")
-        if sig:
-            lines.append(f"   signature: `{sig[:150]}`")
-        if snippet:
-            lines.append(f"   snippet: {snippet}")
-        _track_seen(fp, "search", call_id,
-                    snippet_chars=len(snippet),
-                    had_signature=bool(sig),
-                    had_relationships=False)
-    est_tokens = len(lines) * 25
+        ls = r.get("line_start", 0)
+        le = r.get("line_end", 0)
+        r_conf = r.get("confidence", "MEDIUM")
+        r_tag = {"HIGH": "H", "MEDIUM": "M", "LOW": "L"}.get(r_conf, "M")
+
+        # Format location: file:start-end (or just file if no line info)
+        if ls and le and le > ls:
+            loc = f"{fp}:{ls}-{le}"
+        elif ls:
+            loc = f"{fp}:{ls}"
+        else:
+            loc = fp
+        files_list.append(loc)
+        lines.append(f"{i}. {name} ({kind}) {loc} [{r_tag}]")
+        _track_seen(fp, "search", call_id, had_signature=bool(r.get("signature")))
+
+    _SESSION_SEARCHES[cache_key] = {"call_id": call_id, "files": files_list}
+    est_tokens = sum(len(l) for l in lines) // 4
     _log_call("search", len(results), est_tokens)
     return "\n".join(lines)
 
@@ -567,98 +556,60 @@ def _graph_get(endpoint: str, params: dict) -> dict:
 
 
 def _format_node_result(data: dict, name: str) -> str:
+    """Compact node output — connections with file:line_start-end ranges.
+
+    The MCP is a NAVIGATOR. It shows what connects to what and WHERE each
+    symbol lives (file:start-end). The agent uses its built-in Read tool
+    with offset/limit to get the actual source code. No DB snippets, no
+    subgraph tree, no rationale, no reading plan prose — the file:line ranges
+    in the connections list ARE the reading plan.
+    """
     node = data.get("node")
     if not node:
         _log_call("node", 0, 0)
         return f"No node found matching '{name}'."
+
     call_id = _SESSION_CALL_COUNTER[0] + 1
-    lines = [f"## {node.get('name', name)} ({node.get('kind', 'unknown')})", ""]
-    lines.append(f"File: `{node.get('file', 'unknown')}`")
-    if node.get("signature"):
-        lines.append(f"Signature: `{node['signature']}`")
+    node_file = node.get("file", "unknown")
+    node_kind = node.get("kind", "unknown")
     degree = node.get("degree", 0)
-    role = "hub" if degree >= 8 else ("connector" if degree >= 3 else "leaf")
-    lines.append(f"Role: {role} (degree {degree})")
-    lines.append(f"Community: {node.get('community', 'unknown')}")
-    if node.get("is_test"):
-        lines.append("Type: Test")
+    node_ls = node.get("line_start", 0)
+    node_le = node.get("line_end", 0)
+
+    # Header: one line with location
+    loc = f"{node_file}:{node_ls}-{node_le}" if node_ls and node_le else node_file
+    lines = [f"## {node.get('name', name)} ({node_kind}) {loc}", f"degree={degree}"]
+
+    # Connections — ALL neighbors, one line each with file:line range
     neighbors = data.get("neighbors", [])
     if neighbors:
-        lines.append("")
-        lines.append(f"### Connections ({len(neighbors)})")
         incoming = [n for n in neighbors if n.get("direction") == "incoming"]
         outgoing = [n for n in neighbors if n.get("direction") == "outgoing"]
+        lines.append("")
+        lines.append(f"### Connections ({len(neighbors)})")
         if incoming:
-            lines.append("**Called by / imported by:**")
-            for n in incoming[:10]:
-                lines.append(f"  ← `{n['name']}` ({n.get('edge', 'link')}) — `{n.get('file', '')}`")
+            for n in incoming:
+                nname = n.get("name", "?")
+                nfile = n.get("file", "")
+                nls = n.get("line_start", 0)
+                nle = n.get("line_end", 0)
+                nloc = f"{nfile}:{nls}-{nle}" if nls and nle else (f"{nfile}:{nls}" if nls else nfile)
+                edge = n.get("edge", "link")
+                lines.append(f"  <- {nname} ({edge}) {nloc}")
+                _track_seen(nfile, "node", call_id, had_relationships=True)
         if outgoing:
-            lines.append("**Calls / imports:**")
-            for n in outgoing[:10]:
-                lines.append(f"  → `{n['name']}` ({n.get('edge', 'link')}) — `{n.get('file', '')}`")
+            for n in outgoing:
+                nname = n.get("name", "?")
+                nfile = n.get("file", "")
+                nls = n.get("line_start", 0)
+                nle = n.get("line_end", 0)
+                nloc = f"{nfile}:{nls}-{nle}" if nls and nle else (f"{nfile}:{nls}" if nls else nfile)
+                edge = n.get("edge", "link")
+                lines.append(f"  -> {nname} ({edge}) {nloc}")
+                _track_seen(nfile, "node", call_id, had_relationships=True)
 
-    # Multi-hop subgraph
-    subgraph = data.get("subgraph")
-    if subgraph and subgraph.get("nodes"):
-        sg_nodes = subgraph["nodes"]
-        sg_edges = subgraph.get("edges", [])
-        sg_stats = subgraph.get("stats", {})
-        lines.append("")
-        lines.append(f"### Subgraph ({sg_stats.get('hops', 0)} hops, {len(sg_nodes)} nodes)")
-        for sn in sg_nodes[:15]:
-            depth = sn.get("depth", 0)
-            indent = "  " * depth
-            sn_degree = sn.get("degree", 0)
-            sn_role = "hub" if sn_degree >= 8 else ("connector" if sn_degree >= 3 else "leaf")
-            lines.append(f"{indent}{'→ ' if depth > 0 else ''}{sn.get('name', '?')} ({sn.get('kind', '')}) — `{sn.get('file', '')}` [{sn_role}: degree {sn_degree}]")
-            _track_seen(sn.get("file", ""), "node", call_id,
-                        snippet_chars=500,
-                        had_signature=False,
-                        had_relationships=True)
-
-    # Source code snippets — top 5 (was 3)
-    snippets = data.get("snippets")
-    if snippets:
-        lines.append("")
-        lines.append("### Source Code")
-        for sname, sdata in list(snippets.items())[:5]:
-            snip = sdata.get("snippet", "")
-            if snip:
-                fp = sdata.get("file_path", "")
-                ls = sdata.get("line_start", 0)
-                lang = _detect_language(fp)
-                lines.append(f"```{lang}")
-                lines.append(f"// {fp}:{ls}")
-                lines.append(snip[:500])
-                lines.append("```")
-                lines.append("")
-
-    # Rationale notes
-    rationale = data.get("rationale")
-    if rationale:
-        lines.append("### Notes")
-        for rn in rationale[:5]:
-            text = rn.get("text", "")
-            conf = rn.get("confidence", "")
-            conf_tag = f" [{conf}]" if conf else ""
-            lines.append(f"- {text}{conf_tag}")
-
-    # Reading plan — tells LLM what to read with local_files and which symbols to look for
-    reading_plan = data.get("reading_plan")
-    if reading_plan:
-        lines.append("")
-        lines.append("### Reading Plan")
-        lines.append("Based on the subgraph, here are the files to read and what to look for:")
-        lines.append("Use `local_files` on these files — look for the specific symbols listed:")
-        lines.append("")
-        for rp in reading_plan[:10]:
-            fp = rp.get("file", "")
-            syms = rp.get("symbols", [])
-            if fp and syms:
-                lines.append(f"- `{fp}` — {', '.join(syms[:5])}")
-
-    est_tokens = len(lines) * 25
-    _log_call("node", len(subgraph.get("nodes", [])) if subgraph else 0, est_tokens)
+    est_tokens = sum(len(l) for l in lines) // 4
+    _log_call("node", len(neighbors), est_tokens)
     return "\n".join(lines)
 
 
@@ -702,12 +653,11 @@ def _dispatch_tool(name: str, arguments: dict) -> str:
     if name == "node":
         sym = arguments.get("name", "")
         depth = arguments.get("depth", 2)
-        include_snippets = arguments.get("include_snippets", True)
         data = _graph_get("node", {
             "project_id": PROJECT_ID, "name": sym,
             "depth": depth,
-            "include_rationale": "true",
-            "include_snippets": "true" if include_snippets else "false",
+            "include_rationale": "false",
+            "include_snippets": "false",
         })
         return _format_node_result(data, sym)
 
