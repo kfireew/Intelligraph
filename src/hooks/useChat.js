@@ -286,8 +286,7 @@ export function useChat({ activePid, llmUrl, llmToken, model, onMatchedNodes, on
       });
 
       if (!resp.ok) {
-        const errBody = await resp.json().catch(() => ({}));
-        fullText = `(LLM error ${resp.status}: ${errBody.error?.message || errBody.detail || errBody.error || "unknown"})`;
+        fullText = `(Server error ${resp.status})`;
       } else {
         // Stream NDJSON: read progress events + final answer
         const reader = resp.body.getReader();

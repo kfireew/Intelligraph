@@ -33,3 +33,4 @@ Skipping impact() means you WILL miss dependent files and break things.
 - **DO NOT read a whole file when you have a line range.** Use Read with offset/limit.
 - **DO NOT edit without running impact() first.** impact() finds files grep misses.
 - **DO NOT search for the same thing twice.** search() caches results in-session.
+- **ONLY 1 SEARCH AT A TIME.** Do not fire multiple searches in parallel — each search hits the CRG DB + embedding model. Concurrent searches overload the pod and cause 504s.

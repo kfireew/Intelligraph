@@ -20,5 +20,7 @@ export const endpoints = {
   // Downloads
   downloadMCPServer: "/download/mcp-server",
   downloadGraphBuilder: "/download/graph-builder",
-  downloadAgent: "/download/agent"
+  downloadAgent: "/download/agent",
+  downloadEnforcePlugin: "/download/enforce-plugin",
+  downloadClaudeHooks: "/download/claude-hooks"
 };

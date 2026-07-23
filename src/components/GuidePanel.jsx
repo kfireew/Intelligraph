@@ -1,5 +1,6 @@
-import { Download, Server, Copy, Check, FileCode, KeyRound, Loader2, AlertCircle } from "lucide-react";
+import { Download, Server, Copy, Check, FileCode, KeyRound, Loader2, AlertCircle, ChevronRight, ChevronLeft, X, Shield, Plug, BookOpen, Rocket } from "lucide-react";
 import { useState, useEffect, useCallback } from "react";
+import { motion, AnimatePresence } from "framer-motion";
 import { endpoints } from "../config/endpoints";
 import { requestJson } from "../services/apiClient";
 
@@ -15,11 +16,11 @@ export function GuidePanel({ activePid, activeProject }) {
   const [tokenError, setTokenError] = useState("");
   const [siteUrl, setSiteUrl] = useState("");
   const [scriptSaved, setScriptSaved] = useState(false);
+  const [wizardOpen, setWizardOpen] = useState(false);
+  const [wizardStep, setWizardStep] = useState(0);
   const isReady = activeProject && ["ready", "cloned", "indexed"].includes(activeProject.status);
   const pid = activeProject?.id;
 
-  // Auto-fill site URL: prefer INTELLIGRAPH_SITE_URL from /status,
-  // fall back to window.location.origin, then to localhost:5050.
   useEffect(() => {
     (async () => {
       try {
@@ -31,9 +32,6 @@ export function GuidePanel({ activePid, activeProject }) {
     })();
   }, []);
 
-  // Load saved MCP token for this project on mount / project switch.
-  // Try localStorage first (fast), then the backend GET endpoint (source of
-  // truth, survives browser data clears / different machines).
   const loadToken = useCallback(async (pid) => {
     if (!pid) return;
     const cacheKey = `mcp-token-${pid}`;
@@ -45,12 +43,11 @@ export function GuidePanel({ activePid, activeProject }) {
         setMcpToken(res.mcp_token);
         if (typeof localStorage !== "undefined") localStorage.setItem(cacheKey, res.mcp_token);
       }
-    } catch { /* 401 / not found — user will click Generate */ }
+    } catch {}
   }, []);
 
   useEffect(() => { loadToken(pid); }, [pid, loadToken]);
 
-  // Load saved script path from localStorage (fast) then backend (source of truth).
   const loadScriptPath = useCallback(async (pid) => {
     if (!pid) return;
     const cacheKey = `script-path-${pid}`;
@@ -62,12 +59,11 @@ export function GuidePanel({ activePid, activeProject }) {
         setScriptPath(res.script_path);
         if (typeof localStorage !== "undefined") localStorage.setItem(cacheKey, res.script_path);
       }
-    } catch { /* 401 / not found — user will type it */ }
+    } catch {}
   }, []);
 
   useEffect(() => { loadScriptPath(pid); }, [pid, loadScriptPath]);
 
-  // Debounced save of script path to backend
   const saveScriptPath = useCallback((pid, path) => {
     if (!pid) return;
     const clean = path.trim().replace(/^["']|["']$/g, "");
@@ -82,7 +78,7 @@ export function GuidePanel({ activePid, activeProject }) {
         });
         setScriptSaved(true);
         setTimeout(() => setScriptSaved(false), 2000);
-      } catch { /* ignore — will retry on next change */ }
+      } catch {}
     }, 600);
   }, []);
 
@@ -100,7 +96,6 @@ export function GuidePanel({ activePid, activeProject }) {
     }
   }, []);
 
-  // Auto-fill from what the user already has
   const containerUrl = typeof window !== "undefined" ? window.location.origin : "http://localhost:5050";
   const llmUrl = ((typeof localStorage !== "undefined" && localStorage.getItem("llm-url")) || "https://models.ai-services.idf.cts/v1/chat/completions").trim().replace(/\/+$/, "");
   const completionsUrl = pid ? `/api/v1/projects/${pid}/completions` : null;
@@ -117,13 +112,9 @@ export function GuidePanel({ activePid, activeProject }) {
   }'`
     : null;
 
-  // MCP config — standard python launch (works on host workstation, os4, localhost).
-  // mcpUrl auto-fills from INTELLIGRAPH_SITE_URL env var or window.location.origin.
   const mcpContainerUrl = siteUrl || "http://localhost:5050";
   const cleanScriptPath = scriptPath.trim().replace(/^["']|["']$/g, "");
   const tokenArg = mcpToken.trim() || "YOUR-MCP-TOKEN";
-  // Extract the directory from the script path — that's the local repo root.
-  // e.g. C:\dev\myproject\mcp_server_standalone.py → C:\dev\myproject
   const repoDir = cleanScriptPath ? cleanScriptPath.replace(/[/\\][^/\\]+$/, "") : "";
   const scriptArgs = cleanScriptPath
     ? [cleanScriptPath, "--intelligraph-url", mcpContainerUrl, "--project-id", String(pid), "--mcp-token", tokenArg, "--repo-dir", repoDir]
@@ -152,6 +143,7 @@ export function GuidePanel({ activePid, activeProject }) {
             timeout: 120000,
           },
         },
+        plugin: [".opencode/plugins/intelligraph-enforce.js"],
       }, null, 2)
     : null;
 
@@ -203,187 +195,45 @@ export function GuidePanel({ activePid, activeProject }) {
     </div>
   );
 
+  // Wizard steps
+  const steps = [
+    { icon: Rocket, title: "Overview", desc: "You need 3 components that work together: the MCP Server (connects your AI assistant to the graph), the Agent Guide (tells the model how to use the tools), and the Enforcement Plugin (blocks grep/glob so the model is forced to use the graph). All three are required." },
+    { icon: Server, title: "Install dependencies", desc: "Run this once on your machine:" },
+    { icon: KeyRound, title: "Generate MCP token", desc: "The MCP server authenticates with this token (not your SSO session). Click generate, then copy it." },
+    { icon: Download, title: "Download MCP server script", desc: "Save this file into your project folder (the folder where you run your AI assistant). Then paste the full path below." },
+    { icon: BookOpen, title: "Download agent guide", desc: "Tells the model when and how to use each Intelligraph tool, and enforces impact() before edits." },
+    { icon: Shield, title: "Download enforcement plugin", desc: "Blocks grep/glob/find so the model is forced to use intelligraph search() instead. Without this, the model falls back to old habits." },
+    { icon: Plug, title: "Copy config file", desc: "Add this config to your AI assistant. It wires up the MCP server + enforcement plugin together." },
+    { icon: Check, title: "Done", desc: "Open your AI assistant in the project folder and ask questions like 'search for authentication' or 'who calls processPayment'. The assistant will use Intelligraph's code graph to answer." },
+  ];
+
+  const openWizard = () => { setWizardStep(0); setWizardOpen(true); };
+
   return (
     <div className="flex flex-col flex-1 min-h-0 p-6 overflow-y-auto space-y-6">
       <div className="flex items-center gap-2"><Server size={18} className="text-accent-light" /><h2 className="text-lg font-bold gradient-text">Guide</h2></div>
 
-      {/* ── No project selected banner ── */}
       {!activeProject && (
         <div className="glass rounded-xl p-4 border border-yellow-500/20 bg-yellow-500/5">
           <p className="text-xs text-text-secondary m-0">Select a project on the left to see its API endpoints and MCP setup. Everything below auto-fills based on the active project.</p>
         </div>
       )}
 
-      {/* ── MCP Server ── */}
-      <Section title="MCP Server" icon={Download}>
+      {/* ── How to Setup ── */}
+      <Section title="How to Setup" icon={Rocket}>
         <p className="text-xs text-text-secondary m-0 mb-3 leading-relaxed">
-          Connect your AI coding assistant (Claude Code or opencode) to Intelligraph. It can then search your codebase graph, find callers/callees, analyze impact, and more — right from your editor.
+          Connect your AI coding assistant (Claude Code or opencode) to Intelligraph. The setup takes 3 components — the MCP server, the agent guide, and the enforcement plugin. All three are required and work together.
         </p>
-
-        {!pid ? (
-          <div className="p-3 rounded-lg bg-yellow-500/5 border border-yellow-500/20">
-            <p className="text-xs text-text-secondary m-0">Select a project first. The config below auto-fills with your project ID ({pid || "none yet"}) and container URL.</p>
-          </div>
-        ) : (
-          <>
-            {/* Step 1 */}
-            <div className="mb-4">
-              <p className="text-xs font-bold text-text mb-1">Step 1 — Install dependencies</p>
-              <p className="text-xs text-muted-subtle m-0 mb-2">Run this once on your machine:</p>
-              <CodeBlock id="pip" code="pip install mcp requests" />
-            </div>
-
-            {/* Step 2 — Generate MCP Token */}
-            <div className="mb-4">
-              <p className="text-xs font-bold text-text mb-1">Step 2 — Generate MCP token</p>
-              <p className="text-xs text-muted-subtle m-0 mb-2">
-                The MCP server authenticates with this token (not your SSO session). Click generate, then copy it into the config below.
-              </p>
-              <div className="flex gap-2 items-center">
-                {mcpToken ? (
-                  <>
-                    <input
-                      type="text" readOnly value={mcpToken}
-                      onClick={(e) => e.target.select()}
-                      className="flex-1 px-2.5 py-1.5 rounded-lg bg-white/5 border border-glass-border text-[11px] text-text font-mono outline-none"
-                    />
-                    <button onClick={() => copy(mcpToken)} className="px-2.5 py-1.5 rounded-lg bg-accent/10 hover:bg-accent/20 text-accent-light text-[11px] font-medium transition-colors">
-                      {copied === "mcpToken" ? <Check size={12} /> : <Copy size={12} />}
-                    </button>
-                    <button onClick={handleRevokeToken} disabled={tokenLoading}
-                      className="px-2.5 py-1.5 rounded-lg bg-red/10 hover:bg-red/20 text-red text-[11px] font-medium transition-colors disabled:opacity-40">
-                      Revoke
-                    </button>
-                  </>
-                ) : (
-                  <button onClick={handleGenerateToken} disabled={tokenLoading}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold text-white disabled:opacity-40"
-                    style={{ background: "linear-gradient(135deg, #8b5cf6, #d946ef)" }}>
-                    {tokenLoading ? <Loader2 size={14} className="animate-spin" /> : <KeyRound size={14} />}
-                    <span>Generate Token</span>
-                  </button>
-                )}
-              </div>
-              {tokenError && (
-                <div className="flex items-center gap-1.5 mt-2 text-[10px] text-red">
-                  <AlertCircle size={11} /> {tokenError}
-                </div>
-              )}
-            </div>
-
-            {/* Step 3 */}
-            <div className="mb-4">
-              <p className="text-xs font-bold text-text mb-1">Step 3 — Download the MCP server script</p>
-              <p className="text-xs text-muted-subtle m-0 mb-2">Save this file into your project folder (the folder where you run your AI assistant):</p>
-              <a href={endpoints.downloadMCPServer} download
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-accent/10 hover:bg-accent/20 text-accent-light text-xs font-medium transition-colors no-underline">
-                <Download size={14} /> Download mcp_server_standalone.py
-              </a>
-              <div className="mt-3">
-                <div className="flex items-center gap-1.5 mb-1">
-                  <p className="text-[11px] font-bold text-muted uppercase tracking-wider m-0">Full path to the script</p>
-                  {!cleanScriptPath && <span className="text-[10px] text-red font-bold">REQUIRED</span>}
-                  {scriptSaved && <span className="text-[10px] text-green flex items-center gap-0.5"><Check size={10} /> Saved</span>}
-                </div>
-                <p className="text-[10px] text-muted-subtle m-0 mb-1.5">
-                  Paste the full path where you saved the file (with or without quotes). <span className="text-red">This is required — MCP will not work without it.</span> The directory of this path becomes your local <code className="px-1 py-0.5 rounded bg-accent/10 text-accent-light text-[10px] font-mono">--repo-dir</code>, used to rewrite graph paths to your local file system.
-                </p>
-                <input
-                  type="text"
-                  value={scriptPath}
-                  onChange={(e) => { setScriptPath(e.target.value); saveScriptPath(pid, e.target.value); }}
-                  placeholder="C:\Users\me\projects\myapp\mcp_server_standalone.py"
-                  className={`w-full px-2.5 py-1.5 rounded-lg bg-white/5 border text-[11px] text-text font-mono outline-none transition-colors ${
-                    cleanScriptPath ? "border-glass-border focus:border-accent/40" : "border-red/40 focus:border-red/60"
-                  }`}
-                />
-              </div>
-            </div>
-
-            {/* Step 4 */}
-            <div className="mb-4">
-              <p className="text-xs font-bold text-text mb-1">Step 4 — Add config file</p>
-              {!cleanScriptPath ? (
-                <div className="p-2.5 rounded-lg bg-red/5 border border-red/20 flex items-center gap-1.5">
-                  <AlertCircle size={14} className="text-red flex-shrink-0" />
-                  <p className="text-[11px] text-red m-0">
-                    Fill in the full path to the script in Step 3 above to generate your config. Without it, the MCP server can't find your local files.
-                  </p>
-                </div>
-              ) : (
-                <>
-                  <p className="text-xs text-muted-subtle m-0 mb-2">
-                    Your project ID is <span className="text-accent-light font-mono font-bold">{pid}</span>. The MCP server authenticates with your token at <span className="text-accent-light font-mono">{mcpContainerUrl}</span>. Just copy and paste.
-                  </p>
-
-                  <details open className="mt-2">
-                    <summary className="text-[11px] font-bold text-muted cursor-pointer hover:text-text transition-colors">Claude Code</summary>
-                    <div className="mt-2 space-y-2">
-                      <p className="text-xs text-text-secondary m-0">
-                        Create a file called <code className="px-1 py-0.5 rounded bg-accent/10 text-accent-light text-[11px] font-mono">.mcp.json</code> in your project folder. For global access, put it in <code className="px-1 py-0.5 rounded bg-accent/10 text-accent-light text-[11px] font-mono">~/.claude.json</code> instead.
-                      </p>
-                      <CodeBlock id="claudeMcp" code={claudeMcp} />
-                    </div>
-                  </details>
-
-                  <details className="mt-2">
-                    <summary className="text-[11px] font-bold text-muted cursor-pointer hover:text-text transition-colors">opencode</summary>
-                    <div className="mt-2 space-y-2">
-                      <p className="text-xs text-text-secondary m-0">
-                        Create a file called <code className="px-1 py-0.5 rounded bg-accent/10 text-accent-light text-[11px] font-mono">opencode.json</code> in your project folder. For global access, put it in <code className="px-1 py-0.5 rounded bg-accent/10 text-accent-light text-[11px] font-mono">~/.config/opencode/opencode.json</code>.
-                      </p>
-                      <CodeBlock id="opencodeMcp" code={opencodeMcp} />
-                    </div>
-                  </details>
-                </>
-              )}
-            </div>
-
-            {/* Step 5 */}
-            <div className="mb-2">
-              <p className="text-xs font-bold text-text mb-1">Step 5 — Use it</p>
-              <p className="text-xs text-text-secondary m-0 leading-relaxed">
-                Open your AI assistant in the project folder and ask questions like "search for authentication" or "who calls processPayment". The assistant will use Intelligraph's code graph to answer.
-              </p>
-            </div>
-
-            <details className="mt-3">
-              <summary className="text-[11px] font-bold text-muted cursor-pointer hover:text-text transition-colors">Or run manually (for testing)</summary>
-              <div className="mt-2"><CodeBlock id="mcpCmd" code={mcpCommand} /></div>
-            </details>
-          </>
-        )}
-      </Section>
-
-      {/* ── Agent Guide ── */}
-      <Section title="Agent Guide" icon={FileCode}>
-        <p className="text-xs text-text-secondary m-0 mb-3 leading-relaxed">
-          Some models (like Qwen3.6) tend to ignore MCP tools and answer from memory. Download this agent guide and add it to your AI assistant's instructions. It tells the model when and how to use each Intelligraph tool — without being so aggressive that it wastes tokens on unnecessary calls.
-        </p>
-        <a href={endpoints.downloadAgent} download
-          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-accent/10 hover:bg-accent/20 text-accent-light text-xs font-medium transition-colors no-underline">
-          <Download size={14} /> Download intelligraph-agent.md
-        </a>
-
-        <details className="mt-3">
-          <summary className="text-[11px] font-bold text-muted cursor-pointer hover:text-text transition-colors">Claude Code</summary>
-          <div className="mt-2 space-y-2">
-            <p className="text-xs text-text-secondary m-0">
-              Save the file as <code className="px-1 py-0.5 rounded bg-accent/10 text-accent-light text-[11px] font-mono">CLAUDE.md</code> in your project root. Claude Code reads this automatically as project instructions.
-            </p>
-            <CodeBlock id="claudeAgent" code={`# Save as CLAUDE.md in your project root\n# Claude Code reads this automatically\n\n@intelligraph-agent.md`} />
-          </div>
-        </details>
-
-        <details className="mt-2">
-          <summary className="text-[11px] font-bold text-muted cursor-pointer hover:text-text transition-colors">opencode</summary>
-          <div className="mt-2 space-y-2">
-            <p className="text-xs text-text-secondary m-0">
-              Save the file in your project as <code className="px-1 py-0.5 rounded bg-accent/10 text-accent-light text-[11px] font-mono">AGENTS.md</code>. opencode reads this automatically as project instructions.
-            </p>
-            <CodeBlock id="opencodeAgent" code={`# Save as AGENTS.md in your project root\n# opencode reads this automatically\n\n@intelligraph-agent.md`} />
-          </div>
-        </details>
+        <button
+          onClick={openWizard}
+          disabled={!pid}
+          className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-xs font-bold text-white disabled:opacity-40 transition-opacity"
+          style={{ background: "linear-gradient(135deg, #8b5cf6, #d946ef)" }}
+        >
+          <Rocket size={14} />
+          How to Setup
+        </button>
+        {!pid && <p className="text-[10px] text-muted-subtle m-0 mt-2">Select a project first.</p>}
       </Section>
 
       {/* ── API Endpoints ── */}
@@ -469,9 +319,232 @@ export function GuidePanel({ activePid, activeProject }) {
       <Section title="How it works" icon={FileCode}>
         <p className="text-xs text-text-secondary m-0 leading-relaxed">Uses the same <code className="px-1 py-0.5 rounded bg-accent/10 text-accent-light text-[11px] font-mono">retrieval.py</code> runtime as the web UI. Pipeline: ExecutionPlanner → NodeResolver → TraversalPlanner → NeighborhoodRanker → ChunkRetriever → ContextMerger.</p>
       </Section>
+
+      {/* ── Wizard Modal ── */}
+      <AnimatePresence>
+        {wizardOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-6"
+            style={{ background: "rgba(0,0,0,0.6)", backdropFilter: "blur(6px)" }}
+            onClick={() => setWizardOpen(false)}>
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 10 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 10 }}
+              transition={{ duration: 0.15 }}
+              className="rounded-2xl p-6 max-w-lg w-full max-h-[80vh] overflow-y-auto"
+              style={{ background: "rgba(13,17,23,0.98)", border: "1px solid #21262d" }}
+              onClick={(e) => e.stopPropagation()}>
+              {/* Header */}
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-2">
+                  {(() => {
+                    const StepIcon = steps[wizardStep].icon;
+                    return <StepIcon size={18} className="text-accent-light" />;
+                  })()}
+                  <h3 className="text-sm font-bold gradient-text m-0">
+                    Step {wizardStep + 1} of {steps.length} — {steps[wizardStep].title}
+                  </h3>
+                </div>
+                <button onClick={() => setWizardOpen(false)} className="text-muted hover:text-red transition-colors">
+                  <X size={16} />
+                </button>
+              </div>
+
+              {/* Progress bar */}
+              <div className="flex gap-1 mb-4">
+                {steps.map((_, i) => (
+                  <div key={i} className="flex-1 h-1 rounded-full transition-colors"
+                    style={{ background: i <= wizardStep ? "linear-gradient(90deg, #8b5cf6, #d946ef)" : "rgba(255,255,255,0.08)" }} />
+                ))}
+              </div>
+
+              {/* Step content */}
+              <div className="mb-4">
+                <p className="text-xs text-text-secondary m-0 leading-relaxed">{steps[wizardStep].desc}</p>
+              </div>
+
+              {/* Step-specific content */}
+              {wizardStep === 0 && (
+                <div className="space-y-2 mb-4">
+                  <div className="flex items-start gap-2 p-2 rounded-lg bg-white/3">
+                    <Plug size={14} className="text-accent-light mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="text-[11px] font-bold text-text m-0">MCP Server</p>
+                      <p className="text-[10px] text-muted-subtle m-0">Connects your AI assistant to the code graph</p>
+                    </div>
+                  </div>
+                  <div className="flex items-start gap-2 p-2 rounded-lg bg-white/3">
+                    <BookOpen size={14} className="text-accent-light mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="text-[11px] font-bold text-text m-0">Agent Guide</p>
+                      <p className="text-[10px] text-muted-subtle m-0">Tells the model when and how to use the tools</p>
+                    </div>
+                  </div>
+                  <div className="flex items-start gap-2 p-2 rounded-lg bg-white/3">
+                    <Shield size={14} className="text-accent-light mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="text-[11px] font-bold text-text m-0">Enforcement Plugin</p>
+                      <p className="text-[10px] text-muted-subtle m-0">Blocks grep/glob — forces the model to use the graph</p>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {wizardStep === 1 && (
+                <div className="mb-4"><CodeBlock id="wizardPip" code="pip install mcp requests" /></div>
+              )}
+
+              {wizardStep === 2 && (
+                <div className="mb-4">
+                  <div className="flex gap-2 items-center">
+                    {mcpToken ? (
+                      <>
+                        <input type="text" readOnly value={mcpToken}
+                          onClick={(e) => e.target.select()}
+                          className="flex-1 px-2.5 py-1.5 rounded-lg bg-white/5 border border-glass-border text-[11px] text-text font-mono outline-none" />
+                        <button onClick={() => copy(mcpToken)} className="px-2.5 py-1.5 rounded-lg bg-accent/10 hover:bg-accent/20 text-accent-light text-[11px] font-medium transition-colors">
+                          {copied === "wizardToken" ? <Check size={12} /> : <Copy size={12} />}
+                        </button>
+                        <button onClick={handleRevokeToken} disabled={tokenLoading}
+                          className="px-2.5 py-1.5 rounded-lg bg-red/10 hover:bg-red/20 text-red text-[11px] font-medium transition-colors disabled:opacity-40">Revoke</button>
+                      </>
+                    ) : (
+                      <button onClick={handleGenerateToken} disabled={tokenLoading}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold text-white disabled:opacity-40"
+                        style={{ background: "linear-gradient(135deg, #8b5cf6, #d946ef)" }}>
+                        {tokenLoading ? <Loader2 size={14} className="animate-spin" /> : <KeyRound size={14} />}
+                        Generate Token
+                      </button>
+                    )}
+                  </div>
+                  {tokenError && <div className="flex items-center gap-1.5 mt-2 text-[10px] text-red"><AlertCircle size={11} /> {tokenError}</div>}
+                </div>
+              )}
+
+              {wizardStep === 3 && (
+                <div className="mb-4 space-y-3">
+                  <a href={endpoints.downloadMCPServer} download
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-accent/10 hover:bg-accent/20 text-accent-light text-xs font-medium transition-colors no-underline">
+                    <Download size={14} /> Download mcp_server_standalone.py
+                  </a>
+                  <div>
+                    <div className="flex items-center gap-1.5 mb-1">
+                      <p className="text-[11px] font-bold text-muted uppercase tracking-wider m-0">Full path to the script</p>
+                      {!cleanScriptPath && <span className="text-[10px] text-red font-bold">REQUIRED</span>}
+                      {scriptSaved && <span className="text-[10px] text-green flex items-center gap-0.5"><Check size={10} /> Saved</span>}
+                    </div>
+                    <p className="text-[10px] text-muted-subtle m-0 mb-1.5">
+                      Paste the full path where you saved the file (with or without quotes). <span className="text-red">This is required — MCP will not work without it.</span>
+                    </p>
+                    <input type="text" value={scriptPath}
+                      onChange={(e) => { setScriptPath(e.target.value); saveScriptPath(pid, e.target.value); }}
+                      placeholder="C:\Users\me\projects\myapp\mcp_server_standalone.py"
+                      className={`w-full px-2.5 py-1.5 rounded-lg bg-white/5 border text-[11px] text-text font-mono outline-none transition-colors ${
+                        cleanScriptPath ? "border-glass-border focus:border-accent/40" : "border-red/40 focus:border-red/60"}`} />
+                  </div>
+                </div>
+              )}
+
+              {wizardStep === 4 && (
+                <div className="mb-4 space-y-3">
+                  <a href={endpoints.downloadAgent} download
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-accent/10 hover:bg-accent/20 text-accent-light text-xs font-medium transition-colors no-underline">
+                    <Download size={14} /> Download intelligraph-agent.md
+                  </a>
+                  <details className="mt-2">
+                    <summary className="text-[11px] font-bold text-muted cursor-pointer hover:text-text transition-colors">Claude Code instructions</summary>
+                    <div className="mt-2"><CodeBlock id="wizardClaudeAgent" code={`# Save as CLAUDE.md in your project root\n# Claude Code reads this automatically\n\n@intelligraph-agent.md`} /></div>
+                  </details>
+                  <details>
+                    <summary className="text-[11px] font-bold text-muted cursor-pointer hover:text-text transition-colors">opencode instructions</summary>
+                    <div className="mt-2"><CodeBlock id="wizardOpencodeAgent" code={`# Save as AGENTS.md in your project root\n# opencode reads this automatically\n\n@intelligraph-agent.md`} /></div>
+                  </details>
+                </div>
+              )}
+
+              {wizardStep === 5 && (
+                <div className="mb-4 space-y-3">
+                  <a href={endpoints.downloadEnforcePlugin} download
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-accent/10 hover:bg-accent/20 text-accent-light text-xs font-medium transition-colors no-underline">
+                    <Download size={14} /> Download intelligraph-enforce.js (opencode)
+                  </a>
+                  <a href={endpoints.downloadClaudeHooks} download
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-accent/10 hover:bg-accent/20 text-accent-light text-xs font-medium transition-colors no-underline">
+                    <Download size={14} /> Download settings.json (Claude Code)
+                  </a>
+                  <details className="mt-2">
+                    <summary className="text-[11px] font-bold text-muted cursor-pointer hover:text-text transition-colors">opencode install</summary>
+                    <div className="mt-2 space-y-1">
+                      <p className="text-[10px] text-muted-subtle m-0">Place the file at <code className="px-1 py-0.5 rounded bg-accent/10 text-accent-light text-[10px] font-mono">.opencode/plugins/intelligraph-enforce.js</code> in your project root.</p>
+                    </div>
+                  </details>
+                  <details>
+                    <summary className="text-[11px] font-bold text-muted cursor-pointer hover:text-text transition-colors">Claude Code install</summary>
+                    <div className="mt-2 space-y-1">
+                      <p className="text-[10px] text-muted-subtle m-0">Place the file at <code className="px-1 py-0.5 rounded bg-accent/10 text-accent-light text-[10px] font-mono">.claude/settings.json</code> in your project root.</p>
+                    </div>
+                  </details>
+                </div>
+              )}
+
+              {wizardStep === 6 && (
+                <div className="mb-4 space-y-3">
+                  {!cleanScriptPath ? (
+                    <div className="p-2.5 rounded-lg bg-red/5 border border-red/20 flex items-center gap-1.5">
+                      <AlertCircle size={14} className="text-red flex-shrink-0" />
+                      <p className="text-[11px] text-red m-0">Go back to Step 4 and fill in the full path to the script first.</p>
+                    </div>
+                  ) : (
+                    <>
+                      <details open className="mt-2">
+                        <summary className="text-[11px] font-bold text-muted cursor-pointer hover:text-text transition-colors">Claude Code (.mcp.json)</summary>
+                        <div className="mt-2"><CodeBlock id="wizardClaudeMcp" code={claudeMcp} /></div>
+                      </details>
+                      <details open>
+                        <summary className="text-[11px] font-bold text-muted cursor-pointer hover:text-text transition-colors">opencode (opencode.json)</summary>
+                        <div className="mt-2"><CodeBlock id="wizardOpencodeMcp" code={opencodeMcp} /></div>
+                      </details>
+                    </>
+                  )}
+                </div>
+              )}
+
+              {wizardStep === 7 && (
+                <div className="mb-4 p-3 rounded-lg bg-green/5 border border-green/20">
+                  <p className="text-xs text-green m-0">You're all set! Open your AI assistant in the project folder and ask a question like "search for authentication" or "who calls processPayment".</p>
+                </div>
+              )}
+
+              {/* Nav buttons */}
+              <div className="flex items-center justify-between gap-2 pt-2 border-t border-white/5">
+                <button onClick={() => setWizardStep(Math.max(0, wizardStep - 1))}
+                  disabled={wizardStep === 0}
+                  className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-[11px] font-medium text-muted hover:text-text disabled:opacity-30 transition-opacity">
+                  <ChevronLeft size={14} /> Back
+                </button>
+                <span className="text-[10px] text-muted-subtle">{wizardStep + 1} / {steps.length}</span>
+                {wizardStep < steps.length - 1 ? (
+                  <button onClick={() => setWizardStep(wizardStep + 1)}
+                    className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-[11px] font-bold text-white"
+                    style={{ background: "linear-gradient(135deg, #8b5cf6, #d946ef)" }}>
+                    Next <ChevronRight size={14} />
+                  </button>
+                ) : (
+                  <button onClick={() => setWizardOpen(false)}
+                    className="flex items-center gap-1 px-3 py-1.5 rounded-lg text-[11px] font-bold text-white"
+                    style={{ background: "linear-gradient(135deg, #22c55e, #16a34a)" }}>
+                    <Check size={14} /> Done
+                  </button>
+                )}
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
+
 function Section({ title, icon: Icon, children }) {
   return <div className="glass rounded-xl p-4"><div className="flex items-center gap-2 mb-3">{Icon && <Icon size={16} className="text-accent-light shrink-0" />}<h3 className="text-sm font-bold text-text m-0">{title}</h3></div>{children}</div>;
 }

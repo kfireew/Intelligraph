@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Grep|Glob",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'BLOCKED: Use the intelligraph MCP search() tool instead — it returns file paths with line ranges and confidence levels.' >&2; exit 2"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -845,6 +845,24 @@ def download_agent():
                      mimetype="text/markdown")
 
 
+@app.route("/download/enforce-plugin")
+def download_enforce_plugin():
+    """Download the opencode enforcement plugin (JS)."""
+    plugin_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "intelligraph-enforce.js")
+    return send_file(plugin_path, as_attachment=True,
+                     download_name="intelligraph-enforce.js",
+                     mimetype="application/javascript")
+
+
+@app.route("/download/claude-hooks")
+def download_claude_hooks():
+    """Download the Claude Code PreToolUse hooks config (JSON)."""
+    hooks_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "claude-hooks.json")
+    return send_file(hooks_path, as_attachment=True,
+                     download_name="settings.json",
+                     mimetype="application/json")
+
+
 @app.route("/download/test-mcp")
 def download_test_mcp():
     """Download the MCP connectivity test script."""
@@ -2958,7 +2976,7 @@ def _stream_completions(pid, proj, data, prompt):
     retrieval_strategy = "planner"
 
     # LLM provider
-    llm_url = (data.get("llm_url") or os.environ.get("INTELLIGRAPH_URL") or "").strip().rstrip("/")
+    llm_url = (data.get("llm_url") or os.environ.get("INTELLIGRAPH_LLM_URL") or "").strip().rstrip("/")
     llm_token = data.get("llm_token") or os.environ.get("INTELLIGRAPH_LLM_TOKEN") or ""
     model = data.get("model") or os.environ.get("INTELLIGRAPH_LLM_MODEL") or "Qwen/Qwen3.6-27B-FP8"
     max_tokens = int(data.get("max_tokens") or 4096)

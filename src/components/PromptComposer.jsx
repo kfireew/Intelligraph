@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback } from "react";
 import { motion } from "framer-motion";
-import { Send, Boxes, ArrowUp, Zap, FlaskConical } from "lucide-react";
+import { Send, Boxes, ArrowUp, Zap, FlaskConical, Loader2 } from "lucide-react";
 import { RouteBadge } from "./RouteBadge";
 
 const quickActions = [
@@ -14,6 +14,7 @@ export function PromptComposer({ disabled, status, onSend }) {
   const [prompt, setPrompt] = useState("");
   const taRef = useRef(null);
 
+  const isAnswering = status === "answering" || status === "classifying";
   const canSend = prompt.trim() && !disabled;
 
   const handleSend = useCallback(() => {
@@ -69,18 +70,18 @@ export function PromptComposer({ disabled, status, onSend }) {
       />
 
       {/* Footer */}
-      <div className="flex items-center justify-between gap-2 mt-2">
+      <div className="flex items-center justify-between gap-2 mt-2 pr-3">
         <RouteBadge route={route} />
         <motion.button
-          whileTap={{ rotate: 45, scale: 0.95 }}
-          transition={{ type: "spring", stiffness: 400 }}
+          whileTap={{ scale: 0.92 }}
+          transition={{ duration: 0.1 }}
           disabled={!canSend}
           onClick={handleSend}
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold text-white disabled:opacity-40 transition-opacity"
           style={{ background: canSend ? "linear-gradient(135deg, #8b5cf6, #d946ef)" : "rgba(255,255,255,0.06)" }}
         >
-          <Send size={14} />
-          Send
+          {isAnswering ? <Loader2 size={14} className="animate-spin" /> : <Send size={14} />}
+          {isAnswering ? "Working" : "Send"}
         </motion.button>
       </div>
     </div>
