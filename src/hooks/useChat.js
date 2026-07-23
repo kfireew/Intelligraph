@@ -59,6 +59,7 @@ export function useChat({ activePid, llmUrl, llmToken, model, onMatchedNodes, on
   const [activeConvId, setActiveConvId] = useState(null);
   const [status, setStatus] = useState("idle");
   const [streamingContent, setStreamingContent] = useState("");
+  const [progressSteps, setProgressSteps] = useState([]);
   const [pathWarnings, setPathWarnings] = useState(null);
   const abortRef = useRef(null);
   const prevPidRef = useRef(activePid);
@@ -232,11 +233,13 @@ export function useChat({ activePid, llmUrl, llmToken, model, onMatchedNodes, on
 
     // Single request to completions endpoint — backend does retrieval + LLM internally
     setStatus("answering");
+    setProgressSteps([]);
     let fullText = "";
     let sources = null;
     let matchedNodes = [];
     let pw = null;
     let savings = null;
+    let lastStep = "";
     try {
       // Chat compaction: most recent 2 messages full, older messages compressed into a summary
       const priorMessages = (activeConv?.messages || [])
@@ -286,20 +289,47 @@ export function useChat({ activePid, llmUrl, llmToken, model, onMatchedNodes, on
         const errBody = await resp.json().catch(() => ({}));
         fullText = `(LLM error ${resp.status}: ${errBody.error?.message || errBody.detail || errBody.error || "unknown"})`;
       } else {
-        const data = await resp.json();
-        fullText = data.answer || "";
-        if (!fullText) {
-          fullText = "(No response -- the LLM returned empty output. Try rephrasing your question.)";
+        // Stream NDJSON: read progress events + final answer
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop();
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            let msg;
+            try { msg = JSON.parse(line); } catch { continue; }
+            if (msg.type === "progress") {
+              lastStep = msg.message;
+              setProgressSteps(prev => [...prev, { step: msg.step, message: msg.message, time: Date.now() }]);
+            } else if (msg.type === "answer") {
+              fullText = msg.answer || "";
+              if (!fullText) {
+                fullText = "(No response -- the LLM returned empty output. Try rephrasing your question.)";
+              }
+              intent = msg.intent || "planner";
+              sources = msg.sources || null;
+              matchedNodes = msg.matched_nodes || [];
+              pw = msg.path_warnings || [];
+              savings = msg.context_savings || null;
+              _lastTraceId.current = msg.trace_id || "";
+            } else if (msg.type === "error") {
+              const stepLabel = lastStep || msg.step || "unknown";
+              fullText = `(Error at: ${stepLabel})\n${msg.error || "unknown error"}`;
+            }
+          }
         }
-        intent = data.intent || "planner";
-        sources = data.sources || null;
-        matchedNodes = data.matched_nodes || [];
-        pw = data.path_warnings || [];
-        savings = data.context_savings || null;
-        _lastTraceId.current = data.trace_id || "";
       }
     } catch (e) {
-      fullText = `(LLM request failed: ${e.message || "unknown error"})`;
+      if (lastStep) {
+        fullText = `(Connection lost while: ${lastStep})`;
+      } else {
+        fullText = `(LLM request failed: ${e.message || "unknown error"})`;
+      }
     }
 
     if (onMatchedNodes && matchedNodes?.length) onMatchedNodes(matchedNodes);
@@ -310,6 +340,7 @@ export function useChat({ activePid, llmUrl, llmToken, model, onMatchedNodes, on
       metadata: { intent, route: { category: intent, label: intent }, pathWarnings: pw, sources, savings },
     }, targetConvId);
     setStreamingContent("");
+    setProgressSteps([]);
     setStatus("idle");
     onAnswerComplete?.();
   }, [addMessage, activeConvId, activePid, llmUrl, llmToken, model, onMatchedNodes, onAnswerComplete]);
@@ -340,6 +371,7 @@ export function useChat({ activePid, llmUrl, llmToken, model, onMatchedNodes, on
     activeConvId,
     status,
     streamingContent,
+    progressSteps,
     pathWarnings,
     sendMessage,
     newConversation,

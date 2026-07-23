@@ -96,6 +96,7 @@ export default function App() {
                 deleteConversation={chat.deleteConversation}
                 switchConversation={chat.switchConversation}
                 status={chat.status} streamingContent={chat.streamingContent}
+                progressSteps={chat.progressSteps}
                 onSend={chat.sendMessage} activeProject={projects.activeProject}
                 graphData={graph.graphData}
                 sendFeedback={chat.sendFeedback}

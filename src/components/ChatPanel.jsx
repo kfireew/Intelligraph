@@ -30,6 +30,7 @@ export function ChatPanel({
   activeConvId,
   status,
   streamingContent,
+  progressSteps,
   onSend,
   activeProject,
   graphData,
@@ -45,7 +46,7 @@ export function ChatPanel({
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, streamingContent]);
+  }, [messages, streamingContent, progressSteps]);
 
   const pill = STATUS_PILL[status];
 
@@ -190,16 +191,41 @@ export function ChatPanel({
                   <ChatMessage key={msg.id} message={msg} sendFeedback={sendFeedback} />
                 ))}
 
-              {/* Streaming indicator */}
-              {streamingContent && status === "answering" && (
+              {/* Progress / streaming indicator */}
+              {status === "answering" && (progressSteps?.length > 0 || streamingContent) && (
                 <div className="chat-message self-start max-w-[88%] glass-bubble rounded-[14px] rounded-bl-[4px] px-3.5 py-2.5">
                   <div className="flex items-center gap-2 mb-1.5">
                     <span className="text-[11px] font-bold text-text-secondary opacity-80">Intelligraph</span>
-                    <StatusPill tone="success">Streaming</StatusPill>
+                    <StatusPill tone="success">Processing</StatusPill>
                   </div>
-                  <div className="message-body text-[13px] leading-relaxed opacity-70">
-                    {streamingContent.slice(-300)}
-                  </div>
+                  {/* Progress steps — dimmer, smaller, one after the other */}
+                  {progressSteps?.length > 0 && (
+                    <div className="flex flex-col gap-0.5 mb-1.5">
+                      {progressSteps.map((ps, i) => {
+                        const isLast = i === progressSteps.length - 1 && !streamingContent;
+                        return (
+                          <div key={i} className="flex items-center gap-1.5"
+                            style={{ opacity: isLast ? 0.7 : 0.35 }}>
+                            {!isLast && (
+                              <svg width="10" height="10" viewBox="0 0 12 12" className="text-green flex-shrink-0">
+                                <path d="M2 6l3 3 5-6" stroke="currentColor" strokeWidth="1.8" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+                              </svg>
+                            )}
+                            {isLast && (
+                              <span className="inline-block w-[10px] h-[10px] border border-text-secondary/40 border-t-transparent rounded-full animate-spin flex-shrink-0" />
+                            )}
+                            <span className="text-[10px] text-text-secondary font-mono">{ps.message}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                  {/* Streaming content (if any) */}
+                  {streamingContent && (
+                    <div className="message-body text-[13px] leading-relaxed opacity-70">
+                      {streamingContent.slice(-300)}
+                    </div>
+                  )}
                 </div>
               )}
 

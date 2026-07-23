@@ -2922,26 +2922,32 @@ def project_completions(pid):
     if not proj:
         return jsonify({"error": "project not found", "intent": "planner", "context_used": False}), 404
 
-    # LLM provider: request body > env vars > default
-    llm_url = (data.get("llm_url") or os.environ.get("INTELLIGRAPH_LLM_URL") or "").strip().rstrip("/")
-    llm_token = data.get("llm_token") or os.environ.get("INTELLIGRAPH_LLM_TOKEN") or ""
-    model = data.get("model") or os.environ.get("INTELLIGRAPH_LLM_MODEL") or "Qwen/Qwen3.6-27B-FP8"
-    max_tokens = int(data.get("max_tokens") or 4096)
+    return Response(
+        _stream_completions(pid, proj, data, prompt),
+        mimetype="application/x-ndjson",
+        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+    )
 
-    if not llm_url:
-        return jsonify({"error": "llm_url required (set INTELLIGRAPH_LLM_URL env var or pass in body)", "intent": "planner", "context_used": False}), 400
 
-    host = urlparse(llm_url).hostname
-    if host not in ALLOWED_LLM_HOSTS:
-        return jsonify({"error": "provider not allowed", "intent": "planner", "context_used": False}), 403
+def _stream_completions(pid, proj, data, prompt):
+    """Generator that yields NDJSON progress events + final answer.
 
-    # Retrieval always uses the current prompt as-is.
-    # The LLM resolves follow-up references (e.g. "show me code") from
-    # conversation history — no heuristic query composition needed.
+    Each yield is a JSON object on its own line:
+      {"type":"progress","step":"search","message":"Searching code graph..."}
+      {"type":"answer","answer":"...","intent":"...",...}
+      {"type":"error","step":"...","error":"..."}
+    """
+    def yield_progress(step, message):
+        return json.dumps({"type": "progress", "step": step, "message": message}) + "\n"
+
+    def yield_error(step, error, **extra):
+        payload = {"type": "error", "step": step, "error": str(error)[:500]}
+        payload.update(extra)
+        return json.dumps(payload) + "\n"
+
     conversation_history = data.get("conversation_history") or []
     retrieval_query = prompt
 
-    # Retrieve fresh context per request (default: yes)
     include_context = data.get("include_context")
     if include_context is None:
         include_context = True
@@ -2951,11 +2957,25 @@ def project_completions(pid):
     matched_nodes = []
     retrieval_strategy = "planner"
 
+    # LLM provider
+    llm_url = (data.get("llm_url") or os.environ.get("INTELLIGRAPH_URL") or "").strip().rstrip("/")
+    llm_token = data.get("llm_token") or os.environ.get("INTELLIGRAPH_LLM_TOKEN") or ""
+    model = data.get("model") or os.environ.get("INTELLIGRAPH_LLM_MODEL") or "Qwen/Qwen3.6-27B-FP8"
+    max_tokens = int(data.get("max_tokens") or 4096)
+
+    if not llm_url:
+        yield yield_error("init", "llm_url required")
+        return
+
+    host = urlparse(llm_url).hostname
+    if host not in ALLOWED_LLM_HOSTS:
+        yield yield_error("init", "LLM provider not allowed")
+        return
+
     # ── Lightweight intent routing ──
-    # For simple intents (what_is, coverage), use graph traversal instead of
-    # the heavy 7-step pipeline. Saves ~80% tokens for simple questions.
     if include_context and proj.get("graphify_data"):
         try:
+            yield yield_progress("intent", "Analyzing your question...")
             from planner import detect_intent
             intent_info = detect_intent(prompt)
             intent = intent_info.get("intent", "what_is")
@@ -2963,18 +2983,16 @@ def project_completions(pid):
             retrieval_strategy = intent
 
             if intent in ("what_is", "coverage") and target:
-                # Read tuning params — auto-tuned weight overrides default
                 embedding_weight = float(data.get("embedding_weight", _get_auto_tuned_weight(pid, 0.4)))
                 snippet_chars = int(data.get("snippet_chars", 800))
                 traversal_depth = int(data.get("traversal_depth", 1))
 
-                # Lightweight path: search CRG + get node from graph
+                yield yield_progress("search", "Searching code graph...")
                 gf = proj["graphify_data"]
                 nodes = gf.get("nodes", [])
                 links = gf.get("links", [])
                 target_lower = target.lower().strip()
 
-                # Find node (exact → substring)
                 matched_node = None
                 for n in nodes:
                     for key in (n.get("id"), n.get("label"), n.get("qualified_name")):
@@ -2990,8 +3008,6 @@ def project_completions(pid):
                             matched_node = n
                             break
 
-                # Semantic search fallback: if no graphify match, try CRG hybrid search
-                # to find the closest symbol by meaning (e.g. "add entity" → "upsertEntity")
                 if not matched_node and proj.get("crg_db_path"):
                     try:
                         from crg_intelligence import get_providers
@@ -3017,7 +3033,6 @@ def project_completions(pid):
 
                 if matched_node:
                     node_id = matched_node.get("id") or matched_node.get("label")
-                    # Build 1-hop neighbors
                     neighbors_list = []
                     for l in links:
                         src = l.get("source") or l.get("from")
@@ -3042,8 +3057,6 @@ def project_completions(pid):
                     ))
                     retrieved_files = [f for f in retrieved_files if f and not _is_junk_path(f)]
 
-                    # Build compact context
-                    # Try to enrich community name from CRG
                     comm_name = f"Community {matched_node.get('community', '?')}"
                     crg_db = proj.get("crg_db_path")
                     if crg_db and os.path.exists(crg_db) and matched_node.get("community") is not None:
@@ -3066,7 +3079,6 @@ def project_completions(pid):
                         "\n".join(neighbors_list[:20]),
                     ]
 
-                    # Source code snippets (from CRG node_snippets table)
                     snippet_count = 0
                     if snippet_chars > 0 and crg_db and os.path.exists(crg_db):
                         try:
@@ -3091,7 +3103,6 @@ def project_completions(pid):
                         except Exception:
                             pass
 
-                    # Rationale notes (from graphify rationale_for edges)
                     rationale_count = 0
                     try:
                         rationale_nodes = {n.get("id") or n.get("label"): n for n in nodes if n.get("file_type") == "rationale"}
@@ -3126,37 +3137,36 @@ def project_completions(pid):
                     }
                     matched_nodes = [{"id": node_id, "label": matched_node.get("label", node_id)}]
                 else:
-                    # Node not found — fall through to heavy pipeline
-                    retrieval_strategy = "planner"  # reset, will be set by retrieve_context
+                    retrieval_strategy = "planner"
                     raise RuntimeError("node not found, falling back to heavy pipeline")
 
             if retrieval_strategy in ("what_is", "coverage") and retrieved:
-                pass  # Already have lightweight context
+                pass
             else:
                 raise RuntimeError("use heavy pipeline")
 
         except RuntimeError:
-            # Fall through to heavy pipeline
             pass
         except Exception as e:
             app.logger.warning("Lightweight intent routing failed: %s", e)
 
-    # Heavy pipeline (for complex intents or lightweight fallback)
+    # Heavy pipeline
     if include_context and proj.get("graphify_data") and not retrieved:
         try:
+            yield yield_progress("planning", "Planning retrieval strategy...")
             from retrieval import retrieve_context
             overrides = {}
-            # Budget chars — explicit context budget (from TuningPanel slider)
             budget_chars = data.get("budget_chars")
             if budget_chars is not None:
                 try:
                     overrides["budget_chars"] = max(3000, min(48000, int(budget_chars)))
                 except (ValueError, TypeError):
                     pass
-            # Chunk caps — per-task-type chunk count overrides (from TuningPanel table)
             chunk_caps = data.get("chunk_caps")
             if chunk_caps and isinstance(chunk_caps, dict):
                 overrides["chunk_caps"] = chunk_caps
+
+            yield yield_progress("retrieval", "Retrieving code context...")
             result = retrieve_context(proj, retrieval_query, overrides=overrides if overrides else None)
             retrieved = result.get("context", "")
             retrieved_files = result.get("files", [])
@@ -3170,11 +3180,9 @@ def project_completions(pid):
     system_msg = _build_system_prompt(retrieval_strategy)
     messages = [{"role": "system", "content": system_msg}]
 
-    # Inject retrieved context as a separate user message (ground truth)
     if retrieved:
         messages.append({"role": "user", "content": f"Project context:\n{retrieved}"})
 
-    # Add conversation history (last 4 messages, each capped at 2000 chars)
     history = conversation_history[-4:] if conversation_history else []
     for m in history:
         role = m.get("role", "user")
@@ -3182,7 +3190,6 @@ def project_completions(pid):
         if content:
             messages.append({"role": role, "content": content})
 
-    # Current prompt (after context + history so LLM sees it last)
     messages.append({"role": "user", "content": prompt})
 
     payload = {
@@ -3201,37 +3208,33 @@ def project_completions(pid):
 
     trace_id = f"req_{uuid.uuid4().hex[:12]}"
 
+    yield yield_progress("llm", "Generating answer...")
+
     try:
-        resp = requests.post(llm_url, json=payload, headers=headers, timeout=int(os.environ.get("INTELLIGRAPH_LLM_TIMEOUT", "120")), verify=LLM_SSL_VERIFY)
+        resp = requests.post(llm_url, json=payload, headers=headers,
+                             timeout=int(os.environ.get("INTELLIGRAPH_LLM_TIMEOUT", "120")),
+                             verify=LLM_SSL_VERIFY)
         resp.encoding = "utf-8"
         if resp.status_code != 200:
-            return jsonify({
-                "error": f"LLM returned {resp.status_code}",
-                "detail": resp.text[:1000],
-                "intent": retrieval_strategy,
-                "context_used": bool(retrieved),
-                "context_preview": retrieved[:500] if retrieved else "",
-                "context_stats": context_stats,
-                "files": retrieved_files[:10],
-                "trace_id": trace_id,
-            }), 502
+            yield yield_error("llm", f"LLM returned {resp.status_code}",
+                              intent=retrieval_strategy, context_used=bool(retrieved),
+                              context_preview=retrieved[:500] if retrieved else "",
+                              context_stats=context_stats, files=retrieved_files[:10], trace_id=trace_id,
+                              detail=resp.text[:1000])
+            return
         body = resp.json()
         choices = body.get("choices", [])
         if not choices:
-            return jsonify({
-                "error": "empty LLM response",
-                "intent": retrieval_strategy,
-                "context_used": bool(retrieved),
-                "context_preview": retrieved[:500] if retrieved else "",
-                "context_stats": context_stats,
-                "trace_id": trace_id,
-            }), 502
+            yield yield_error("llm", "empty LLM response",
+                              intent=retrieval_strategy, context_used=bool(retrieved),
+                              context_preview=retrieved[:500] if retrieved else "",
+                              context_stats=context_stats, trace_id=trace_id)
+            return
         answer = choices[0].get("message", {}).get("content", "")
         if not answer.strip():
             answer = "(No response content. Try rephrasing your question.)"
         path_warnings = _verify_paths(pid, answer) or []
 
-        # Compute context savings metadata
         context_tokens = len(retrieved) // 4 if retrieved else 0
         full_corpus_tokens = (proj.get("nodes", 0) * 200) // 4
         reduction_factor = round(full_corpus_tokens / context_tokens, 1) if context_tokens > 0 else 0
@@ -3242,7 +3245,6 @@ def project_completions(pid):
             "baseline": "full_corpus",
         }
 
-        # Beta telemetry: log query for analytics + log params for auto-tuning
         try:
             uk = _user_key()
             conn = _db_conn()
@@ -3253,7 +3255,6 @@ def project_completions(pid):
                  context_tokens, len(answer) // 4, "lightweight" if context_stats.get("mode") == "lightweight" else "heavy",
                  trace_id, datetime.now(timezone.utc).isoformat())
             )
-            # Log the params used for this query — enables feedback auto-tuning
             conn.execute(
                 "INSERT OR REPLACE INTO query_log_params(trace_id, embedding_weight, budget_chars, snippet_chars, intent, created_at) VALUES(?, ?, ?, ?, ?, ?)",
                 (trace_id, float(data.get("embedding_weight", 0.4)), int(data.get("budget_chars", 12000)), int(data.get("snippet_chars", 800)), retrieval_strategy, datetime.now(timezone.utc).isoformat())
@@ -3262,7 +3263,8 @@ def project_completions(pid):
         except Exception:
             pass
 
-        return jsonify({
+        yield json.dumps({
+            "type": "answer",
             "answer": answer,
             "intent": retrieval_strategy,
             "sources": {
@@ -3278,27 +3280,18 @@ def project_completions(pid):
             "context_savings": context_savings,
             "path_warnings": path_warnings,
             "usage": body.get("usage", {}),
-        })
+        }) + "\n"
+
     except requests.exceptions.Timeout:
-        return jsonify({
-            "error": "LLM request timed out",
-            "intent": retrieval_strategy,
-            "context_used": bool(retrieved),
-            "context_preview": retrieved[:500] if retrieved else "",
-            "context_stats": context_stats,
-            "files": retrieved_files[:10],
-            "trace_id": trace_id,
-        }), 504
+        yield yield_error("llm", "LLM request timed out",
+                          intent=retrieval_strategy, context_used=bool(retrieved),
+                          context_preview=retrieved[:500] if retrieved else "",
+                          context_stats=context_stats, files=retrieved_files[:10], trace_id=trace_id)
     except Exception as e:
-        return jsonify({
-            "error": str(e),
-            "intent": retrieval_strategy,
-            "context_used": bool(retrieved),
-            "context_preview": retrieved[:500] if retrieved else "",
-            "context_stats": context_stats,
-            "files": retrieved_files[:10],
-            "trace_id": trace_id,
-        }), 502
+        yield yield_error("llm", str(e),
+                          intent=retrieval_strategy, context_used=bool(retrieved),
+                          context_preview=retrieved[:500] if retrieved else "",
+                          context_stats=context_stats, files=retrieved_files[:10], trace_id=trace_id)
 
 
 # ── Conversation persistence (SQLite-backed) ────────────────────
