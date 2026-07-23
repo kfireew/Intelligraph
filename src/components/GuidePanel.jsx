@@ -14,6 +14,7 @@ export function GuidePanel({ activePid, activeProject }) {
   const [tokenLoading, setTokenLoading] = useState(false);
   const [tokenError, setTokenError] = useState("");
   const [siteUrl, setSiteUrl] = useState("");
+  const [scriptSaved, setScriptSaved] = useState(false);
   const isReady = activeProject && ["ready", "cloned", "indexed"].includes(activeProject.status);
   const pid = activeProject?.id;
 
@@ -49,6 +50,42 @@ export function GuidePanel({ activePid, activeProject }) {
 
   useEffect(() => { loadToken(pid); }, [pid, loadToken]);
 
+  // Load saved script path from localStorage (fast) then backend (source of truth).
+  const loadScriptPath = useCallback(async (pid) => {
+    if (!pid) return;
+    const cacheKey = `script-path-${pid}`;
+    const cached = (typeof localStorage !== "undefined" && localStorage.getItem(cacheKey)) || "";
+    if (cached) { setScriptPath(cached); }
+    try {
+      const res = await requestJson(`/projects/${pid}/script-path`, { method: "GET" });
+      if (res.script_path) {
+        setScriptPath(res.script_path);
+        if (typeof localStorage !== "undefined") localStorage.setItem(cacheKey, res.script_path);
+      }
+    } catch { /* 401 / not found — user will type it */ }
+  }, []);
+
+  useEffect(() => { loadScriptPath(pid); }, [pid, loadScriptPath]);
+
+  // Debounced save of script path to backend
+  const saveScriptPath = useCallback((pid, path) => {
+    if (!pid) return;
+    const clean = path.trim().replace(/^["']|["']$/g, "");
+    if (typeof localStorage !== "undefined") localStorage.setItem(`script-path-${pid}`, clean);
+    setScriptSaved(false);
+    clearTimeout(saveScriptPath._t);
+    saveScriptPath._t = setTimeout(async () => {
+      try {
+        await requestJson(`/projects/${pid}/script-path`, {
+          method: "POST",
+          body: JSON.stringify({ script_path: clean }),
+        });
+        setScriptSaved(true);
+        setTimeout(() => setScriptSaved(false), 2000);
+      } catch { /* ignore — will retry on next change */ }
+    }, 600);
+  }, []);
+
   const persistToken = useCallback((pid, token) => {
     setMcpToken(token);
     if (pid && typeof localStorage !== "undefined") {
@@ -83,13 +120,18 @@ export function GuidePanel({ activePid, activeProject }) {
   // MCP config — standard python launch (works on host workstation, os4, localhost).
   // mcpUrl auto-fills from INTELLIGRAPH_SITE_URL env var or window.location.origin.
   const mcpContainerUrl = siteUrl || "http://localhost:5050";
-  const scriptArg = (scriptPath.trim().replace(/^["']|["']$/g, "") || "mcp_server_standalone.py");
+  const cleanScriptPath = scriptPath.trim().replace(/^["']|["']$/g, "");
   const tokenArg = mcpToken.trim() || "YOUR-MCP-TOKEN";
-  const scriptArgs = [scriptArg, "--intelligraph-url", mcpContainerUrl, "--project-id", String(pid), "--mcp-token", tokenArg, "--repo-dir", "."];
+  // Extract the directory from the script path — that's the local repo root.
+  // e.g. C:\dev\myproject\mcp_server_standalone.py → C:\dev\myproject
+  const repoDir = cleanScriptPath ? cleanScriptPath.replace(/[/\\][^/\\]+$/, "") : "";
+  const scriptArgs = cleanScriptPath
+    ? [cleanScriptPath, "--intelligraph-url", mcpContainerUrl, "--project-id", String(pid), "--mcp-token", tokenArg, "--repo-dir", repoDir]
+    : null;
 
-  const mcpCommand = pid ? `python ${scriptArgs.join(" ")}` : null;
+  const mcpCommand = (pid && scriptArgs) ? `python ${scriptArgs.join(" ")}` : null;
 
-  const claudeMcp = pid
+  const claudeMcp = (pid && scriptArgs)
     ? JSON.stringify({
         mcpServers: {
           intelligraph: {
@@ -100,7 +142,7 @@ export function GuidePanel({ activePid, activeProject }) {
       }, null, 2)
     : null;
 
-  const opencodeMcp = pid
+  const opencodeMcp = (pid && scriptArgs)
     ? JSON.stringify({
         $schema: "https://opencode.ai/config.json",
         mcp: {
@@ -238,14 +280,22 @@ export function GuidePanel({ activePid, activeProject }) {
                 <Download size={14} /> Download mcp_server_standalone.py
               </a>
               <div className="mt-3">
-                <p className="text-[11px] font-bold text-muted uppercase tracking-wider mb-1.5">Full path to the script</p>
-                <p className="text-[10px] text-muted-subtle m-0 mb-1.5">Paste the full path where you saved the file (with or without quotes). Without it, your AI assistant can't find the script.</p>
+                <div className="flex items-center gap-1.5 mb-1">
+                  <p className="text-[11px] font-bold text-muted uppercase tracking-wider m-0">Full path to the script</p>
+                  {!cleanScriptPath && <span className="text-[10px] text-red font-bold">REQUIRED</span>}
+                  {scriptSaved && <span className="text-[10px] text-green flex items-center gap-0.5"><Check size={10} /> Saved</span>}
+                </div>
+                <p className="text-[10px] text-muted-subtle m-0 mb-1.5">
+                  Paste the full path where you saved the file (with or without quotes). <span className="text-red">This is required — MCP will not work without it.</span> The directory of this path becomes your local <code className="px-1 py-0.5 rounded bg-accent/10 text-accent-light text-[10px] font-mono">--repo-dir</code>, used to rewrite graph paths to your local file system.
+                </p>
                 <input
                   type="text"
                   value={scriptPath}
-                  onChange={(e) => setScriptPath(e.target.value)}
+                  onChange={(e) => { setScriptPath(e.target.value); saveScriptPath(pid, e.target.value); }}
                   placeholder="C:\Users\me\projects\myapp\mcp_server_standalone.py"
-                  className="w-full px-2.5 py-1.5 rounded-lg bg-white/5 border border-glass-border text-[11px] text-text font-mono outline-none focus:border-accent/40 transition-colors"
+                  className={`w-full px-2.5 py-1.5 rounded-lg bg-white/5 border text-[11px] text-text font-mono outline-none transition-colors ${
+                    cleanScriptPath ? "border-glass-border focus:border-accent/40" : "border-red/40 focus:border-red/60"
+                  }`}
                 />
               </div>
             </div>
@@ -253,29 +303,40 @@ export function GuidePanel({ activePid, activeProject }) {
             {/* Step 4 */}
             <div className="mb-4">
               <p className="text-xs font-bold text-text mb-1">Step 4 — Add config file</p>
-              <p className="text-xs text-muted-subtle m-0 mb-2">
-                Your project ID is <span className="text-accent-light font-mono font-bold">{pid}</span>. The MCP server authenticates with your token at <span className="text-accent-light font-mono">{mcpContainerUrl}</span>. Just copy and paste.
-              </p>
-
-              <details open className="mt-2">
-                <summary className="text-[11px] font-bold text-muted cursor-pointer hover:text-text transition-colors">Claude Code</summary>
-                <div className="mt-2 space-y-2">
-                  <p className="text-xs text-text-secondary m-0">
-                    Create a file called <code className="px-1 py-0.5 rounded bg-accent/10 text-accent-light text-[11px] font-mono">.mcp.json</code> in your project folder. For global access, put it in <code className="px-1 py-0.5 rounded bg-accent/10 text-accent-light text-[11px] font-mono">~/.claude.json</code> instead.
+              {!cleanScriptPath ? (
+                <div className="p-2.5 rounded-lg bg-red/5 border border-red/20 flex items-center gap-1.5">
+                  <AlertCircle size={14} className="text-red flex-shrink-0" />
+                  <p className="text-[11px] text-red m-0">
+                    Fill in the full path to the script in Step 3 above to generate your config. Without it, the MCP server can't find your local files.
                   </p>
-                  <CodeBlock id="claudeMcp" code={claudeMcp} />
                 </div>
-              </details>
-
-              <details className="mt-2">
-                <summary className="text-[11px] font-bold text-muted cursor-pointer hover:text-text transition-colors">opencode</summary>
-                <div className="mt-2 space-y-2">
-                  <p className="text-xs text-text-secondary m-0">
-                    Create a file called <code className="px-1 py-0.5 rounded bg-accent/10 text-accent-light text-[11px] font-mono">opencode.json</code> in your project folder. For global access, put it in <code className="px-1 py-0.5 rounded bg-accent/10 text-accent-light text-[11px] font-mono">~/.config/opencode/opencode.json</code>.
+              ) : (
+                <>
+                  <p className="text-xs text-muted-subtle m-0 mb-2">
+                    Your project ID is <span className="text-accent-light font-mono font-bold">{pid}</span>. The MCP server authenticates with your token at <span className="text-accent-light font-mono">{mcpContainerUrl}</span>. Just copy and paste.
                   </p>
-                  <CodeBlock id="opencodeMcp" code={opencodeMcp} />
-                </div>
-              </details>
+
+                  <details open className="mt-2">
+                    <summary className="text-[11px] font-bold text-muted cursor-pointer hover:text-text transition-colors">Claude Code</summary>
+                    <div className="mt-2 space-y-2">
+                      <p className="text-xs text-text-secondary m-0">
+                        Create a file called <code className="px-1 py-0.5 rounded bg-accent/10 text-accent-light text-[11px] font-mono">.mcp.json</code> in your project folder. For global access, put it in <code className="px-1 py-0.5 rounded bg-accent/10 text-accent-light text-[11px] font-mono">~/.claude.json</code> instead.
+                      </p>
+                      <CodeBlock id="claudeMcp" code={claudeMcp} />
+                    </div>
+                  </details>
+
+                  <details className="mt-2">
+                    <summary className="text-[11px] font-bold text-muted cursor-pointer hover:text-text transition-colors">opencode</summary>
+                    <div className="mt-2 space-y-2">
+                      <p className="text-xs text-text-secondary m-0">
+                        Create a file called <code className="px-1 py-0.5 rounded bg-accent/10 text-accent-light text-[11px] font-mono">opencode.json</code> in your project folder. For global access, put it in <code className="px-1 py-0.5 rounded bg-accent/10 text-accent-light text-[11px] font-mono">~/.config/opencode/opencode.json</code>.
+                      </p>
+                      <CodeBlock id="opencodeMcp" code={opencodeMcp} />
+                    </div>
+                  </details>
+                </>
+              )}
             </div>
 
             {/* Step 5 */}

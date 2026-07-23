@@ -175,6 +175,7 @@ def _get_db():
     conn.execute("CREATE INDEX IF NOT EXISTS idx_fb_proj ON feedback(project_id)")
     conn.execute("CREATE TABLE IF NOT EXISTS query_log_params (trace_id TEXT PRIMARY KEY, embedding_weight REAL, budget_chars INTEGER, snippet_chars INTEGER, intent TEXT, created_at TEXT)")
     conn.execute("CREATE TABLE IF NOT EXISTS tuning_adjustments (project_id INTEGER, user_key TEXT, embedding_weight REAL, updated_at TEXT, PRIMARY KEY (project_id, user_key))")
+    conn.execute("CREATE TABLE IF NOT EXISTS script_paths (project_id INTEGER, user_key TEXT, script_path TEXT, updated_at TEXT, PRIMARY KEY (project_id, user_key))")
     _migrate_fetch_tokens(conn)
     return conn
 
@@ -888,7 +889,8 @@ def list_projects():
                     "nodes": p.get("nodes", 0), "edges": p.get("edges", 0),
                     "has_graphify": bool(p.get("graphify_data")),
                     "has_crg": bool(p.get("crg_db_path") and os.path.exists(p.get("crg_db_path", ""))),
-                    "git_url": p.get("git_url", "")}
+                    "git_url": p.get("git_url", ""),
+                    "original_repo_dir": p.get("original_repo_dir", "")}
                    for pid, p in _projects().items()])
 
 
@@ -1343,6 +1345,7 @@ def _relocate_artifacts(pid, proj, repo_dir):
         app.logger.info("Keeping repo_dir (INTELLIGRAPH_ENABLE_NX_MCP=true): %s", repo_dir)
     else:
         _vmsg("RELOCATE DELETE pid=%d - removing repo_dir %s", pid, repo_dir)
+        proj["original_repo_dir"] = repo_dir  # save for path rewriting (MCP)
         _rmtree_hard(repo_dir)
         proj["repo_dir"] = None
         _vmsg("RELOCATE DONE pid=%d - artifacts at %s, repo_dir deleted", pid, artifacts_proj_dir)
@@ -1739,6 +1742,66 @@ def revoke_mcp_token(pid):
     conn.commit()
     _vmsg("MCP TOKEN REVOKED pid=%d user=%s", pid, uk)
     return jsonify({"status": "ok", "message": "MCP token revoked"})
+
+
+# ── Script path + Docker prefix endpoints ───────────────────────
+
+@app.route("/projects/<int:pid>/script-path", methods=["POST"])
+def save_script_path(pid):
+    """Save the user's local script path for MCP config generation.
+
+    The script path is where the user saved mcp_server_standalone.py
+    on their local machine. Its directory is the local repo root.
+    Stored per-project, per-user so it persists across sessions.
+    """
+    proj = _projects().get(pid) or _get_shared_project(pid)
+    if not proj:
+        return jsonify({"error": "project not found"}), 404
+    data = request.get_json(force=True) or {}
+    raw_path = (data.get("script_path") or "").strip()
+    # Strip surrounding quotes (both " and ')
+    raw_path = raw_path.strip('"').strip("'").strip()
+    uk = _user_key()
+    conn = _db_conn()
+    conn.execute(
+        "INSERT OR REPLACE INTO script_paths(project_id, user_key, script_path, updated_at) VALUES(?, ?, ?, ?)",
+        (pid, uk, raw_path, datetime.now(timezone.utc).isoformat())
+    )
+    conn.commit()
+    _vmsg("SCRIPT PATH SAVED pid=%d user=%s path=%s", pid, uk, raw_path)
+    return jsonify({"script_path": raw_path, "project_id": pid})
+
+
+@app.route("/projects/<int:pid>/script-path", methods=["GET"])
+def get_script_path(pid):
+    """Return the saved script path for this project + user."""
+    proj = _projects().get(pid) or _get_shared_project(pid)
+    if not proj:
+        return jsonify({"error": "project not found"}), 404
+    uk = _user_key()
+    try:
+        conn = _db_conn()
+        row = conn.execute(
+            "SELECT script_path FROM script_paths WHERE project_id=? AND user_key=?",
+            (pid, uk),
+        ).fetchone()
+    except Exception:
+        row = None
+    return jsonify({"script_path": (row["script_path"] if row else ""), "project_id": pid})
+
+
+@app.route("/projects/<int:pid>/docker-prefix", methods=["GET"])
+def get_docker_prefix(pid):
+    """Return the Docker repo_dir prefix for this project.
+
+    The MCP server uses this to strip Docker-absolute paths from
+    search/node/impact results and rewrite them as local paths.
+    """
+    proj = _projects().get(pid) or _get_shared_project(pid)
+    if not proj:
+        return jsonify({"error": "project not found"}), 404
+    docker_prefix = proj.get("original_repo_dir") or proj.get("repo_dir") or ""
+    return jsonify({"docker_prefix": docker_prefix, "project_id": pid})
 
 
 # ── Share key endpoints ──────────────────────────────────────────

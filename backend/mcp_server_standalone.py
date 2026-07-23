@@ -52,6 +52,7 @@ from mcp.server.stdio import stdio_server
 INTELLIGRAPH_URL = "http://localhost:5050"
 PROJECT_ID = None
 REPO_DIR = None
+DOCKER_REPO_PREFIX = ""
 MCP_TOKEN = os.environ.get("INTELLIGRAPH_MCP_TOKEN", "")
 SSL_VERIFY = os.environ.get("LLM_SSL_VERIFY", "false").lower() == "true"
 
@@ -64,6 +65,65 @@ SSL_VERIFY = os.environ.get("LLM_SSL_VERIFY", "false").lower() == "true"
 # Docker daemon named pipe and never touches host TCP.)
 _session = requests.Session()
 _session.trust_env = False
+
+
+def _fetch_docker_prefix():
+    """Fetch the Docker repo_dir prefix from the backend at startup.
+
+    The CRG DB stores Docker-absolute paths (e.g.
+    /app/backend/data/repos/suser-1-xxx/...). The MCP server rewrites
+    these to local paths by stripping this prefix and joining with REPO_DIR.
+    """
+    global DOCKER_REPO_PREFIX
+    if not INTELLIGRAPH_URL or not PROJECT_ID:
+        return
+    try:
+        headers = {}
+        if MCP_TOKEN:
+            headers["X-MCP-Token"] = MCP_TOKEN
+        r = _session.get(
+            f"{INTELLIGRAPH_URL}/projects/{PROJECT_ID}/docker-prefix",
+            headers=headers, timeout=10, verify=SSL_VERIFY,
+        )
+        if r.status_code == 200:
+            DOCKER_REPO_PREFIX = r.json().get("docker_prefix", "")
+            if DOCKER_REPO_PREFIX:
+                print(f"[intelligraph-mcp] Docker repo prefix: {DOCKER_REPO_PREFIX}", file=sys.stderr)
+    except Exception as e:
+        print(f"[intelligraph-mcp] WARNING: could not fetch docker-prefix: {e}", file=sys.stderr)
+
+
+def _rewrite_path(fp: str) -> str:
+    """Rewrite a Docker-absolute path to a local path.
+
+    Deterministic — applies to ALL tool outputs (search, node, impact, path).
+    1. Strip the Docker repo prefix (e.g. /app/backend/data/repos/suser-1-xxx/)
+    2. Join the remaining repo-relative path with the local REPO_DIR
+    """
+    if not fp:
+        return fp
+    p = fp.replace("\\", "/")
+
+    # Strip Docker prefix if known
+    if DOCKER_REPO_PREFIX:
+        prefix = DOCKER_REPO_PREFIX.replace("\\", "/").rstrip("/") + "/"
+        if p.lower().startswith(prefix.lower()):
+            p = p[len(prefix):]
+    elif "/app/backend/data/repos/" in p:
+        # Fallback: strip the known Docker repos path pattern
+        idx = p.find("/app/backend/data/repos/")
+        if idx >= 0:
+            rest = p[idx + len("/app/backend/data/repos/"):]
+            # rest = suser-1-xxx/libs/shared/...
+            slash = rest.find("/")
+            if slash >= 0:
+                p = rest[slash + 1:]
+
+    # Join with local REPO_DIR if the path is now relative
+    if REPO_DIR and not os.path.isabs(p):
+        p = os.path.join(REPO_DIR, p)
+
+    return p.replace("\\", "/")
 
 
 def _build_tools() -> list[types.Tool]:
@@ -371,7 +431,7 @@ def _format_crg_search(results: list, query: str) -> str:
     for i, r in enumerate(results[:10], 1):
         name = r.get("name", "?")
         kind = r.get("kind", "?")
-        fp = r.get("file_path", "?")
+        fp = _rewrite_path(r.get("file_path", "?"))
         ls = r.get("line_start", 0)
         le = r.get("line_end", 0)
         r_conf = r.get("confidence", "MEDIUM")
@@ -427,7 +487,7 @@ def _format_crg_impact(results: list, target: str) -> str:
     lines.append("Exhaustive traversal of CRG + graphify links. Files not listed here do not depend on the target in the code graph.")
     lines.append("")
     for r in results:
-        fp = r.get("file_path", "?")
+        fp = _rewrite_path(r.get("file_path", "?"))
         depth = r.get("depth", 0)
         symbols = r.get("symbols", [])
         edge_types = r.get("edge_types", [])
@@ -570,7 +630,7 @@ def _format_node_result(data: dict, name: str) -> str:
         return f"No node found matching '{name}'."
 
     call_id = _SESSION_CALL_COUNTER[0] + 1
-    node_file = node.get("file", "unknown")
+    node_file = _rewrite_path(node.get("file", "unknown"))
     node_kind = node.get("kind", "unknown")
     degree = node.get("degree", 0)
     node_ls = node.get("line_start", 0)
@@ -590,7 +650,7 @@ def _format_node_result(data: dict, name: str) -> str:
         if incoming:
             for n in incoming:
                 nname = n.get("name", "?")
-                nfile = n.get("file", "")
+                nfile = _rewrite_path(n.get("file", ""))
                 nls = n.get("line_start", 0)
                 nle = n.get("line_end", 0)
                 nloc = f"{nfile}:{nls}-{nle}" if nls and nle else (f"{nfile}:{nls}" if nls else nfile)
@@ -600,7 +660,7 @@ def _format_node_result(data: dict, name: str) -> str:
         if outgoing:
             for n in outgoing:
                 nname = n.get("name", "?")
-                nfile = n.get("file", "")
+                nfile = _rewrite_path(n.get("file", ""))
                 nls = n.get("line_start", 0)
                 nle = n.get("line_end", 0)
                 nloc = f"{nfile}:{nls}-{nle}" if nls and nle else (f"{nfile}:{nls}" if nls else nfile)
@@ -621,7 +681,7 @@ def _format_path_result(data: dict, src: str, dst: str) -> str:
     lines = [f"## Path: {src} → {dst} ({hops} hops)", ""]
     for i, step in enumerate(path):
         name = step.get("name", "?")
-        fp = step.get("file", "")
+        fp = _rewrite_path(step.get("file", ""))
         edge = step.get("edge", "")
         prefix = "  " if i > 0 else ""
         edge_str = f" ({edge})" if edge else ""
@@ -736,6 +796,9 @@ async def main():
         print("WARNING: no --mcp-token provided. /graph/ endpoints will return 401 if SSO is enabled.", file=sys.stderr)
 
     print(f"Intelligraph MCP Server starting (url={INTELLIGRAPH_URL}, pid={PROJECT_ID}, repo={REPO_DIR}, token={'yes' if MCP_TOKEN else 'no'})", file=sys.stderr)
+
+    # Fetch Docker repo prefix for path rewriting
+    _fetch_docker_prefix()
 
     if args.self_test:
         _run_self_test()

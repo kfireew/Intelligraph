@@ -217,7 +217,8 @@ class CRGProvider(IntelligenceProvider):
 
         Priority:
         1. proj["repo_dir"] — known, absolute, correct (when MCP runs with --repo-dir)
-        2. Common prefix from DB paths — fallback for Docker/chat (no repo_dir)
+        2. proj["original_repo_dir"] — saved before Docker repo deletion
+        3. Common prefix from DB paths — fallback
 
         The returned prefix is forward-slashed and ends with /.
         """
@@ -228,7 +229,14 @@ class CRGProvider(IntelligenceProvider):
             _vmsg("CRG INTELLIGENCE: repo prefix (from repo_dir) = %s", prefix)
             return prefix
 
-        # 2. Fallback: common prefix from DB paths (for Docker/chat without repo_dir)
+        # 2. Saved original_repo_dir (Docker path, saved before deletion)
+        original = self.proj.get("original_repo_dir")
+        if original:
+            prefix = original.replace("\\", "/").rstrip("/") + "/"
+            _vmsg("CRG INTELLIGENCE: repo prefix (from original_repo_dir) = %s", prefix)
+            return prefix
+
+        # 3. Fallback: common prefix from DB paths
         conn = self._conn
         try:
             rows = conn.execute(
