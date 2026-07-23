@@ -89,7 +89,7 @@ def _build_tools() -> list[types.Tool]:
         types.Tool(
             name="node",
             description=(
-                "Get a symbol= symbol's connections (callers, callees, imports) with file:line ranges. "
+                "Get a symbol's connections (callers, callees, imports) with file:line ranges. "
                 "Use AFTER search. Then use built-in Read with those line ranges to get implementation details. "
                 "Replaces reading whole files — read only the specific line ranges shown."
             ),
