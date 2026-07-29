@@ -144,7 +144,8 @@ class IntelligenceProvider:
         """Architecture overview (communities, modules, summaries)."""
         return []
 
-    def impact(self, target: str) -> list[dict]:
+    def impact(self, target: str, change: str = "add-value",
+               offset: int = 0, max_tokens: int = 1500) -> list[dict]:
         """Blast-radius analysis: callers, callees, dependents of target."""
         return []
 
@@ -1544,21 +1545,74 @@ class CRGProvider(IntelligenceProvider):
 
     # ── Mode 3: Impact (exhaustive blast-radius over ALL edges) ────
 
-    def impact(self, target: str) -> list[dict]:
-        """Exhaustive BFS over ALL edge types to find the complete blast radius.
+    # Edge kinds filtered per change type.
+    # add-value: type-position uses break (REFERENCES/IMPORTS_FROM); call sites don't.
+    # rename: callers break (CALLS/IMPORTS_FROM).
+    # remove: everything breaks.
+    # full: current exhaustive behavior (all kinds, all depths).
+    _CHANGE_EDGE_FILTERS = {
+        "add-value": ("REFERENCES", "IMPORTS_FROM", "INHERITS", "CONTAINS"),
+        "rename": ("CALLS", "IMPORTS_FROM"),
+        "remove": None,        # None = all kinds
+        "full": None,
+    }
 
-        This is a SAFETY operation, not context delivery. No caps, no token
-        budget, no depth limit. Traverses both CRG edges AND graphify
-        links until the frontier is empty. The graph is finite — BFS terminates.
+    # Exhaustive-usage patterns scanned in node_snippets to tag breaks vs safe.
+    # These appear in actual source lines (node_snippets has verbatim code, ≤500 chars).
+    _BREAKS_PATTERNS = (
+        "Record<", "[K in ", "switch (", "switch(", "Object.keys(",
+        ".map(", ".reduce(", "satisfies ", " as const", "Partial<", "Pick<",
+        "Omit<", "keyof ", "enum ", "values(", "entries(",
+    )
 
-        Returns: [{file_path, depth, symbols, edge_types, sources, mode}]
+    def impact(self, target: str, change: str = "add-value",
+               offset: int = 0, max_tokens: int = 1500) -> list[dict]:
+        """Blast-radius analysis with change-type edge filtering + token-budget pagination.
+
+        change="add-value" (default): narrow — only type-position users (REFERENCES,
+          IMPORTS_FROM, INHERITS). ~6-30 files for most repos. Use for adding an enum
+          value, a new optional property, a new type variant.
+        change="rename": callers + importers (CALLS, IMPORTS_FROM).
+        change="remove": all edge kinds, all depths — removing a symbol breaks everything.
+        change="full": exhaustive — all edges, unlimited depth (the original behavior).
+          Use for repo-wide refactors where you truly need every transitive dependent.
+
+        Dynamic depth: computed from node count. Small repos (<2k nodes) get depth 2;
+        larger repos get depth 1 (narrow). change="full" always unlimited.
+
+        offset: skip first N results (pagination). The full result list is computed;
+        only the DISPLAY is paginated to stay within max_tokens. Callers can fetch
+        more pages with impact(target, offset=N).
+
+        max_tokens: display budget (default 1500; 4000 for full mode). Traversal is
+        never truncated — only output lines are capped.
+
+        Returns: [{file_path, depth, symbols, edge_types, sources, breaks, pattern,
+                   is_test, mode, total_count, shown_count, has_more}]
         """
         if not target:
             return []
         conn = self._get_conn()
         target_lower = target.lower()
 
-        # Find target nodes by name match (same logic as before)
+        change = change or "add-value"
+        allowed_kinds = self._CHANGE_EDGE_FILTERS.get(change, self._CHANGE_EDGE_FILTERS["add-value"])
+
+        # ── Dynamic depth limit based on repo size ──────────────────
+        if change == "full":
+            depth_max = 0  # unlimited
+        else:
+            try:
+                node_count = conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
+            except Exception:
+                node_count = 0
+            if node_count < 2000:
+                depth_max = 2
+            else:
+                depth_max = 1
+            _vmsg("CRG IMPACT: node_count=%d -> depth_max=%d (change=%s)", node_count, depth_max, change)
+
+        # ── Find target nodes ────────────────────────────────────────
         target_nodes = conn.execute(
             "SELECT id, name, qualified_name, file_path FROM nodes "
             "WHERE LOWER(name) = ? OR LOWER(qualified_name) LIKE ? "
@@ -1614,15 +1668,16 @@ class CRGProvider(IntelligenceProvider):
             if n["file_path"]:
                 target_files.add(self._normalize_path(n["file_path"]))
 
-        # BFS over CRG edges — ALL edge kinds, no filter, no cap, no depth limit.
-        # This is a safety operation — traverse until frontier is empty.
-        # The graph is finite; BFS terminates.
+        # ── BFS over CRG edges with edge-kind filter + depth limit ──
         visited_qnames = set()
-        file_data = defaultdict(lambda: {"depth": 99, "symbols": set(), "edge_types": set(), "sources": set()})
+        file_data = defaultdict(lambda: {
+            "depth": 99, "symbols": set(), "edge_types": set(),
+            "sources": set(), "is_test": False,
+        })
         frontier = set(target_qnames)
         depth = 0
 
-        while frontier:
+        while frontier and (depth_max == 0 or depth < depth_max):
             depth += 1
             next_frontier = set()
             for qname in frontier:
@@ -1630,7 +1685,7 @@ class CRGProvider(IntelligenceProvider):
                     continue
                 visited_qnames.add(qname)
 
-                # Find ALL edges where this qname is the target (callers/dependents)
+                # Edges where this qname is the target (callers/dependents)
                 try:
                     callers = conn.execute(
                         "SELECT DISTINCT e.source_qualified, e.kind, n.file_path, n.name "
@@ -1640,20 +1695,28 @@ class CRGProvider(IntelligenceProvider):
                         (qname,)
                     ).fetchall()
                     for c in callers:
+                        ek = c["kind"] or "link"
+                        if allowed_kinds is not None and ek not in allowed_kinds:
+                            # Edge kind filtered out — don't record file, but still
+                            # traverse if we're going deeper (so we don't miss chains).
+                            if c["source_qualified"]:
+                                next_frontier.add(c["source_qualified"])
+                            continue
                         fp = self._normalize_path(c["file_path"]) if c["file_path"] else ""
-                        if fp and not _is_junk_path(fp) and not _is_test_path(fp):
+                        if fp and not _is_junk_path(fp):
                             entry = file_data[fp]
                             entry["depth"] = min(entry["depth"], depth)
                             if c["name"]:
                                 entry["symbols"].add(c["name"])
-                            entry["edge_types"].add(c["kind"] or "link")
+                            entry["edge_types"].add(ek)
                             entry["sources"].add("crg")
+                            entry["is_test"] = entry["is_test"] or _is_test_path(fp)
                         if c["source_qualified"]:
                             next_frontier.add(c["source_qualified"])
                 except Exception as e:
                     log.warning("CRG impact callers query failed: %s", e)
 
-                # Find ALL edges where this qname is the source (callees/dependencies)
+                # Edges where this qname is the source (callees/dependencies)
                 try:
                     callees = conn.execute(
                         "SELECT DISTINCT e.target_qualified, e.kind, n.file_path, n.name "
@@ -1663,14 +1726,20 @@ class CRGProvider(IntelligenceProvider):
                         (qname,)
                     ).fetchall()
                     for c in callees:
+                        ek = c["kind"] or "link"
+                        if allowed_kinds is not None and ek not in allowed_kinds:
+                            if c["target_qualified"]:
+                                next_frontier.add(c["target_qualified"])
+                            continue
                         fp = self._normalize_path(c["file_path"]) if c["file_path"] else ""
-                        if fp and not _is_junk_path(fp) and not _is_test_path(fp):
+                        if fp and not _is_junk_path(fp):
                             entry = file_data[fp]
                             entry["depth"] = min(entry["depth"], depth)
                             if c["name"]:
                                 entry["symbols"].add(c["name"])
-                            entry["edge_types"].add(c["kind"] or "link")
+                            entry["edge_types"].add(ek)
                             entry["sources"].add("crg")
+                            entry["is_test"] = entry["is_test"] or _is_test_path(fp)
                         if c["target_qualified"]:
                             next_frontier.add(c["target_qualified"])
                 except Exception as e:
@@ -1678,90 +1747,174 @@ class CRGProvider(IntelligenceProvider):
 
             frontier = next_frontier - visited_qnames
 
-        # Also traverse graphify links (second data source)
-        gf = self.proj.get("graphify_data") or {}
-        gf_nodes = gf.get("nodes", [])
-        gf_links = gf.get("links", [])
+        # ── Graphify links (second data source) ─────────────────────
+        # Only traverse graphify for full/remove; for narrow modes it adds noise.
+        if change in ("full", "remove"):
+            gf = self.proj.get("graphify_data") or {}
+            gf_nodes = gf.get("nodes", [])
+            gf_links = gf.get("links", [])
 
-        # Build graphify node lookup
-        gf_node_lookup = {}
-        for n in gf_nodes:
-            nid = n.get("id") or n.get("label")
-            if nid:
-                gf_node_lookup[nid] = n
-                gf_node_lookup[nid.lower()] = n
+            gf_node_lookup = {}
+            for n in gf_nodes:
+                nid = n.get("id") or n.get("label")
+                if nid:
+                    gf_node_lookup[nid] = n
+                    gf_node_lookup[nid.lower()] = n
 
-        # Find target in graphify
-        gf_target_ids = set()
-        for n in gf_nodes:
-            for key in (n.get("id"), n.get("label"), n.get("qualified_name")):
-                if key and key.lower() in target_names:
-                    gf_target_ids.add(n.get("id") or n.get("label"))
-                    break
-                if key and target_lower in key.lower():
-                    gf_target_ids.add(n.get("id") or n.get("label"))
-                    break
+            gf_target_ids = set()
+            for n in gf_nodes:
+                for key in (n.get("id"), n.get("label"), n.get("qualified_name")):
+                    if key and key.lower() in target_names:
+                        gf_target_ids.add(n.get("id") or n.get("label"))
+                        break
+                    if key and target_lower in key.lower():
+                        gf_target_ids.add(n.get("id") or n.get("label"))
+                        break
 
-        # BFS over graphify links — ALL link types, no depth limit
-        # Build adjacency dict ONCE (O(links)) instead of scanning all links
-        # per frontier node (O(frontier × links)).
-        if gf_target_ids:
-            gf_adj = defaultdict(list)  # node_id -> [(connected_id, edge_type)]
-            for l in gf_links:
-                src = l.get("source") or l.get("from")
-                tgt = l.get("target") or l.get("to")
-                edge_type = l.get("type") or l.get("kind") or "link"
-                if src and tgt:
-                    gf_adj[src].append((tgt, edge_type))
-                    gf_adj[tgt].append((src, edge_type))
+            if gf_target_ids:
+                gf_adj = defaultdict(list)
+                for l in gf_links:
+                    src = l.get("source") or l.get("from")
+                    tgt = l.get("target") or l.get("to")
+                    edge_type = l.get("type") or l.get("kind") or "link"
+                    if src and tgt:
+                        gf_adj[src].append((tgt, edge_type))
+                        gf_adj[tgt].append((src, edge_type))
 
-            gf_visited = set()
-            gf_frontier = set(gf_target_ids)
-            gf_depth = 0
-            while gf_frontier:
-                gf_depth += 1
-                gf_next = set()
-                for nid in gf_frontier:
-                    if nid in gf_visited:
-                        continue
-                    gf_visited.add(nid)
-                    for connected_id, edge_type in gf_adj.get(nid, []):
-                        if connected_id not in gf_visited:
-                            gf_next.add(connected_id)
-                            cn = gf_node_lookup.get(connected_id, {})
-                            fp = cn.get("source_file", "")
-                            if fp:
-                                fp_norm = self._normalize_path(fp)
-                                if fp_norm and not _is_junk_path(fp_norm) and not _is_test_path(fp_norm):
-                                    entry = file_data[fp_norm]
-                                    entry["depth"] = min(entry["depth"], gf_depth)
-                                    if cn.get("label"):
-                                        entry["symbols"].add(cn["label"])
-                                    entry["edge_types"].add(edge_type)
-                                    entry["sources"].add("graphify")
-                gf_frontier = gf_next - gf_visited
+                gf_visited = set()
+                gf_frontier = set(gf_target_ids)
+                gf_depth = 0
+                gf_depth_max = 0 if change == "full" else 1
+                while gf_frontier and (gf_depth_max == 0 or gf_depth < gf_depth_max):
+                    gf_depth += 1
+                    gf_next = set()
+                    for nid in gf_frontier:
+                        if nid in gf_visited:
+                            continue
+                        gf_visited.add(nid)
+                        for connected_id, edge_type in gf_adj.get(nid, []):
+                            if connected_id not in gf_visited:
+                                gf_next.add(connected_id)
+                                cn = gf_node_lookup.get(connected_id, {})
+                                fp = cn.get("source_file", "")
+                                if fp:
+                                    fp_norm = self._normalize_path(fp)
+                                    if fp_norm and not _is_junk_path(fp_norm):
+                                        entry = file_data[fp_norm]
+                                        entry["depth"] = min(entry["depth"], gf_depth)
+                                        if cn.get("label"):
+                                            entry["symbols"].add(cn["label"])
+                                        entry["edge_types"].add(edge_type)
+                                        entry["sources"].add("graphify")
+                                        entry["is_test"] = entry["is_test"] or _is_test_path(fp_norm)
+                    gf_frontier = gf_next - gf_visited
 
         # Add target files themselves (depth 0)
         for fp in target_files:
-            if not _is_junk_path(fp) and not _is_test_path(fp):
+            if not _is_junk_path(fp):
                 entry = file_data[fp]
                 entry["depth"] = 0
                 entry["symbols"].add(target)
                 entry["edge_types"].add("definition")
                 entry["sources"].add("crg")
+                entry["is_test"] = _is_test_path(fp)
 
-        results = []
-        for fp, data in sorted(file_data.items(), key=lambda x: (x[1]["depth"], -len(x[1]["symbols"]))):
-            results.append({
+        # ── breaks/safe tagging via node_snippets (depth-1 only) ────
+        # Fetch snippets for symbols in depth-1 files and scan for exhaustive patterns.
+        # Depth-2+ files are not scanned (too expensive) — they sort lower.
+        depth1_files = {fp for fp, d in file_data.items() if d["depth"] == 1}
+        if depth1_files:
+            # Collect all symbol names from depth-1 files for batch snippet lookup
+            depth1_symbols = set()
+            for fp in depth1_files:
+                depth1_symbols.update(file_data[fp]["symbols"])
+            snippet_map = {}
+            if depth1_symbols:
+                try:
+                    placeholders = ",".join("?" * len(depth1_symbols))
+                    snip_rows = conn.execute(
+                        f"SELECT node_name, snippet FROM node_snippets "
+                        f"WHERE node_name IN ({placeholders})",
+                        tuple(depth1_symbols)
+                    ).fetchall()
+                    for sr in snip_rows:
+                        snippet_map[sr["node_name"]] = sr["snippet"] or ""
+                except Exception:
+                    pass  # node_snippets table may not exist
+
+            for fp in depth1_files:
+                entry = file_data[fp]
+                found_pattern = ""
+                for sym in entry["symbols"]:
+                    snip = snippet_map.get(sym, "")
+                    if not snip:
+                        continue
+                    for pat in self._BREAKS_PATTERNS:
+                        if pat in snip:
+                            found_pattern = pat.strip()
+                            break
+                    if found_pattern:
+                        break
+                entry["breaks"] = bool(found_pattern)
+                entry["pattern"] = found_pattern
+
+        # Set defaults for unscanned files
+        for fp, data in file_data.items():
+            data.setdefault("breaks", None)  # None = unscanned (depth 2+ or no snippet)
+            data.setdefault("pattern", "")
+
+        # ── Risk-priority sort ───────────────────────────────────────
+        # tier 0: depth 0 (definition)
+        # tier 1: depth 1 + breaks
+        # tier 2: depth 1 + safe (breaks=False)
+        # tier 3: depth 1 + unscanned (breaks=None)
+        # tier 4: depth 2+ (unscanned)
+        # tier 5: test files (always last within their depth)
+        def _sort_key(item):
+            fp, d = item
+            if d["depth"] == 0:
+                tier = 0
+            elif d["depth"] == 1:
+                if d["breaks"] is True:
+                    tier = 1
+                elif d["breaks"] is False:
+                    tier = 2
+                else:
+                    tier = 3
+            else:
+                tier = 4
+            if d["is_test"]:
+                tier += 10  # push tests to the bottom of any tier
+            return (tier, d["depth"], -len(d["symbols"]))
+
+        sorted_files = sorted(file_data.items(), key=_sort_key)
+
+        # ── Build full result list (not truncated — pagination is display-only) ──
+        all_results = []
+        for fp, data in sorted_files:
+            all_results.append({
                 "file_path": fp,
                 "depth": data["depth"],
                 "symbols": sorted(data["symbols"])[:10],
                 "edge_types": sorted(data["edge_types"]),
                 "sources": sorted(data["sources"]),
+                "breaks": data["breaks"],
+                "pattern": data["pattern"],
+                "is_test": data["is_test"],
                 "mode": "impact",
             })
-        _vmsg("CRG IMPACT: target='%s' -> %d files (exhaustive, %d hops)", target[:40], len(results), depth)
-        return results
+
+        # Attach pagination metadata to every result dict so the dispatch
+        # handler can emit the summary line. The list is NOT sliced here —
+        # the caller (dispatch) handles offset/limit for display.
+        total = len(all_results)
+        for r in all_results:
+            r["total_count"] = total
+            r["has_more"] = True  # dispatch sets False for last page
+
+        _vmsg("CRG IMPACT: target='%s' change=%s -> %d files (depth_max=%d, %d hops)",
+              target[:40], change, total, depth_max, depth)
+        return all_results
 
     # ── Mode 4: Execution flows ────────────────────────────────────
 

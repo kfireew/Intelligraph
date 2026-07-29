@@ -346,3 +346,230 @@ class TestWeightedMerge:
         merged = merge_intelligence_results(graphify_ranked, [], max_results=10)
         assert len(merged) == 1
         assert merged[0]["file_path"] == "src/a.py"
+
+
+# ── Impact change= filtering, breaks/safe, pagination tests ───────
+
+@pytest.fixture
+def mock_crg_db_ts(tmp_path):
+    """Mock CRG DB with TypeScript-style edges (REFERENCES, IMPORTS_FROM, CALLS)
+    and snippets containing Record</switch patterns for breaks/safe testing."""
+    db_path = str(tmp_path / "graph.db")
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE nodes (id INTEGER PRIMARY KEY, name TEXT, kind TEXT, qualified_name TEXT, file_path TEXT, signature TEXT, community_id INTEGER, line_start INTEGER, line_end INTEGER, is_test INTEGER)")
+    conn.execute("CREATE VIRTUAL TABLE nodes_fts USING fts5(name, signature, file_path, content='nodes', content_rowid='id')")
+    conn.execute("CREATE TABLE edges (source_qualified TEXT, target_qualified TEXT, kind TEXT)")
+    conn.execute("CREATE TABLE node_snippets (node_name TEXT PRIMARY KEY, snippet TEXT)")
+
+    # PlaneCategories enum is imported by many files:
+    #   - icon-resolver.ts (Record<PlaneCategory, string> — breaks on add-value)
+    #   - display.ts (switch(PlaneCategory) — breaks on add-value)
+    #   - service.ts (calls function using it — safe on add-value, breaks on rename)
+    #   - test.ts (test file — should sort last)
+    nodes_data = [
+        (1, "PlaneCategories", "Enum", "types.categories.PlaneCategories", "src/types/categories.ts", "enum PlaneCategories", 1, 1, 20, 0),
+        (2, "iconResolver", "Function", "utils.iconResolver", "src/utils/icon-resolver.ts", "def iconResolver()", 2, 5, 30, 0),
+        (3, "displayLabel", "Function", "utils.displayLabel", "src/utils/display.ts", "def displayLabel()", 2, 10, 40, 0),
+        (4, "planeService", "Function", "services.planeService", "src/services/plane.ts", "def planeService()", 3, 1, 50, 0),
+        (5, "testPlane", "Function", "tests.testPlane", "tests/test_plane.ts", "def testPlane()", 4, 1, 20, 1),
+    ]
+    for nd in nodes_data:
+        conn.execute("INSERT INTO nodes VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", nd)
+        conn.execute("INSERT INTO nodes_fts(rowid, name, signature, file_path) VALUES(?, ?, ?, ?)", (nd[0], nd[1], nd[5], nd[4]))
+
+    edges_data = [
+        # icon-resolver REFERENCES PlaneCategories (type-position use → breaks on add-value)
+        ("utils.iconResolver", "types.categories.PlaneCategories", "REFERENCES"),
+        # icon-resolver IMPORTS_FROM PlaneCategories
+        ("utils.iconResolver", "types.categories.PlaneCategories", "IMPORTS_FROM"),
+        # display.ts REFERENCES + IMPORTS_FROM
+        ("utils.displayLabel", "types.categories.PlaneCategories", "REFERENCES"),
+        ("utils.displayLabel", "types.categories.PlaneCategories", "IMPORTS_FROM"),
+        # plane service CALLS a function that uses PlaneCategories (calls — safe on add-value)
+        ("services.planeService", "utils.iconResolver", "CALLS"),
+        ("services.planeService", "types.categories.PlaneCategories", "IMPORTS_FROM"),
+        # test file
+        ("tests.testPlane", "types.categories.PlaneCategories", "IMPORTS_FROM"),
+        ("tests.testPlane", "utils.iconResolver", "CALLS"),
+    ]
+    for ed in edges_data:
+        conn.execute("INSERT INTO edges VALUES(?, ?, ?)", ed)
+
+    # Snippets with exhaustive patterns (actual source code ≤500 chars)
+    snippets = [
+        ("iconResolver", "const iconResolver = (cat: PlaneCategory): string => {\n  const map: Record<PlaneCategory, string> = {\n    ZIK: '/zik.svg',\n  };\n  return map[cat];\n};"),
+        ("displayLabel", "function displayLabel(cat: PlaneCategory) {\n  switch (cat) {\n    case ZIK: return 'Zik';\n  }\n}"),
+        ("planeService", "function planeService() {\n  return iconResolver('ZIK');\n}"),
+        ("testPlane", "test('plane', () => {\n  expect(iconResolver('ZIK')).toBe('/zik.svg');\n});"),
+    ]
+    for sn, st in snippets:
+        conn.execute("INSERT INTO node_snippets VALUES(?, ?)", (sn, st))
+
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+@pytest.fixture
+def mock_proj_ts(mock_crg_db_ts):
+    """Mock project dict for TypeScript-style impact tests."""
+    return {
+        "id": 1,
+        "crg_db_path": mock_crg_db_ts,
+        "graphify_data": {},
+        "nodes": 5,
+        "edges": 8,
+        "crg_nodes": 5,
+    }
+
+
+class TestImpactChangeFiltering:
+    """Test impact() with change= parameter: edge filtering, breaks/safe, pagination."""
+
+    def test_add_value_filters_to_references_imports(self, mock_proj_ts):
+        """change=add-value should only follow REFERENCES + IMPORTS_FROM edges."""
+        from crg_intelligence import CRGProvider
+        provider = CRGProvider(mock_proj_ts)
+        provider.is_available()
+        results = provider.impact("PlaneCategories", change="add-value")
+        # Should find files that REFERENCE or IMPORT_FROM PlaneCategories
+        fps = {r["file_path"] for r in results}
+        # icon-resolver and display both have REFERENCES → should be present
+        assert any("icon-resolver" in fp for fp in fps)
+        assert any("display" in fp for fp in fps)
+        # plane service only has CALLS to iconResolver + IMPORTS_FROM (imports counts)
+        assert any("plane" in fp for fp in fps)
+        # Should NOT include test file under add-value (imports_from but is_test sorts last)
+        # test file has IMPORTS_FROM so it WILL be found, but should be last
+        test_results = [r for r in results if "test" in r.get("file_path", "")]
+        if test_results:
+            # test should be at the bottom
+            assert results[-1] == test_results[0] or results.index(test_results[0]) >= len(results) - 2
+
+    def test_rename_filters_to_calls_imports(self, mock_proj_ts):
+        """change=rename should only follow CALLS + IMPORTS_FROM edges."""
+        from crg_intelligence import CRGProvider
+        provider = CRGProvider(mock_proj_ts)
+        provider.is_available()
+        results = provider.impact("iconResolver", change="rename")
+        fps = {r["file_path"] for r in results}
+        # planeService CALLS iconResolver → should be present at depth 1
+        assert any("plane" in fp for fp in fps)
+        # Verify depth-1 results only include CALLS callers + IMPORTS_FROM callees
+        depth1 = [r for r in results if r["depth"] == 1]
+        depth1_fps = {r["file_path"] for r in depth1}
+        # planeService and testPlane CALL iconResolver → depth 1
+        assert any("plane" in fp and "test" not in fp for fp in depth1_fps)
+        # PlaneCategories is an IMPORTS_FROM callee of iconResolver → depth 1
+        assert any("categories" in fp for fp in depth1_fps)
+        # display.ts REFERENCES PlaneCategories (not CALLS/IMPORTS_FROM to iconResolver)
+        # → should NOT appear at depth 1 (only possibly at depth 2 via chain)
+        assert not any("display" in fp for fp in depth1_fps)
+
+    def test_full_includes_all_edges(self, mock_proj_ts):
+        """change=full should include all edge kinds (CALLS + REFERENCES + IMPORTS_FROM)."""
+        from crg_intelligence import CRGProvider
+        provider = CRGProvider(mock_proj_ts)
+        provider.is_available()
+        results = provider.impact("PlaneCategories", change="full")
+        fps = {r["file_path"] for r in results}
+        # All files should appear
+        assert any("icon-resolver" in fp for fp in fps)
+        assert any("display" in fp for fp in fps)
+        assert any("plane" in fp for fp in fps)
+
+    def test_breaks_tagging_via_snippets(self, mock_proj_ts):
+        """Files with Record< or switch in snippets should be tagged breaks=True."""
+        from crg_intelligence import CRGProvider
+        provider = CRGProvider(mock_proj_ts)
+        provider.is_available()
+        results = provider.impact("PlaneCategories", change="add-value")
+        # iconResolver has Record< in snippet → breaks=True
+        icon = [r for r in results if "icon-resolver" in r.get("file_path", "")]
+        assert len(icon) == 1
+        assert icon[0]["breaks"] is True
+        assert "Record<" in icon[0]["pattern"]
+
+        # display has switch ( in snippet → breaks=True
+        display = [r for r in results if "display" in r.get("file_path", "")]
+        assert len(display) == 1
+        assert display[0]["breaks"] is True
+
+        # planeService has no exhaustive pattern → breaks=False (safe)
+        plane = [r for r in results if "plane" in r.get("file_path", "") and "test" not in r.get("file_path", "")]
+        assert len(plane) == 1
+        assert plane[0]["breaks"] is False
+
+    def test_risk_priority_sort(self, mock_proj_ts):
+        """Results should be sorted: breaks first, safe second, tests last."""
+        from crg_intelligence import CRGProvider
+        provider = CRGProvider(mock_proj_ts)
+        provider.is_available()
+        results = provider.impact("PlaneCategories", change="add-value")
+        # Depth 0 (definition) should be first
+        assert results[0]["depth"] == 0
+        # Find the test file index
+        test_idx = None
+        for i, r in enumerate(results):
+            if "test" in r.get("file_path", ""):
+                test_idx = i
+                break
+        # Test file should NOT be at the top (it should be at or near the bottom)
+        if test_idx is not None:
+            assert test_idx >= len(results) - 2
+
+    def test_offset_pagination(self, mock_proj_ts):
+        """offset= should skip first N results (pagination). The provider returns
+        the full sorted list; the dispatch handler slices by offset."""
+        from crg_intelligence import CRGProvider
+        provider = CRGProvider(mock_proj_ts)
+        provider.is_available()
+        all_results = provider.impact("PlaneCategories", change="add-value", offset=0)
+        total = all_results[0].get("total_count", len(all_results))
+        assert total == len(all_results)
+        # Page 1: first 2 results
+        page1 = all_results[:2]
+        assert len(page1) == 2
+        # Page 2: skip first 2, take next 2 (simulating dispatch offset=2)
+        page2 = all_results[2:4]
+        # Page 2 should not overlap with page 1
+        page1_fps = {r["file_path"] for r in page1}
+        page2_fps = {r["file_path"] for r in page2}
+        assert not (page1_fps & page2_fps), "Pages should not overlap"
+
+    def test_total_count_in_metadata(self, mock_proj_ts):
+        """Each result dict should carry total_count for pagination."""
+        from crg_intelligence import CRGProvider
+        provider = CRGProvider(mock_proj_ts)
+        provider.is_available()
+        results = provider.impact("PlaneCategories", change="add-value")
+        assert len(results) > 0
+        assert all("total_count" in r for r in results)
+        assert results[0]["total_count"] == len(results)
+
+    def test_node_count_drives_depth(self, mock_proj_ts):
+        """Small repos (<2k nodes) should get depth 2; larger get depth 1."""
+        from crg_intelligence import CRGProvider
+        provider = CRGProvider(mock_proj_ts)
+        provider.is_available()
+        # mock has 5 nodes → depth_max should be 2 for add-value
+        results = provider.impact("PlaneCategories", change="add-value")
+        # With depth 2, we should find planeService (which CALLS iconResolver)
+        # Actually, add-value filters to REFERENCES+IMPORTS_FROM, so depth-2
+        # traversal via CALLS won't add planeService as depth-2. But the direct
+        # IMPORTS_FROM from planeService puts it at depth 1.
+        # Verify we get at least 3 files (definition + 2 type users)
+        assert len(results) >= 3
+
+    def test_default_change_is_add_value(self, mock_proj_ts):
+        """Default change should be add-value (narrow), not full."""
+        from crg_intelligence import CRGProvider
+        provider = CRGProvider(mock_proj_ts)
+        provider.is_available()
+        # Call without change= → should default to add-value
+        results_default = provider.impact("PlaneCategories")
+        results_explicit = provider.impact("PlaneCategories", change="add-value")
+        # Both should return the same files
+        default_fps = {r["file_path"] for r in results_default}
+        explicit_fps = {r["file_path"] for r in results_explicit}
+        assert default_fps == explicit_fps

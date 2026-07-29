@@ -12,11 +12,14 @@ When you need to understand how code works:
 
 ### Editing (making changes safely)
 Before editing a type, enum, constant, or shared function:
-1. impact("SymbolName") FIRST → get every file that depends on it
-2. Then search/node/Read to understand the specific code you're changing
-3. Edit
+1. impact("SymbolName") FIRST → get files that BREAK when you change it (narrow by default, ~500 tokens)
+2. If impact shows [breaks] files — those need updating. [safe] files import but won't break.
+3. Then search/node/Read to understand the specific code you're changing
+4. Edit
 
-impact() is exhaustive — it traverses ALL edge types (CALLS, IMPORTS_FROM, INHERITS, REFERENCES, CONTAINS) with no depth limit. Files not listed do not depend on the target. You can skip grep entirely.
+impact() defaults to change="add-value" — narrow mode showing only type-position users (Record<T>, switch, Object.keys, .map). Files are tagged [breaks] or [safe] based on source pattern scanning. Risk-priority sorted: breaks first, safe last, tests at bottom. Output is paginated by token budget — call impact(name, offset=N) for more pages.
+
+Pass change="full" ONLY for repo-wide refactors where you need every transitive dependent (~4k tokens). The default narrow mode is what you want 95% of the time.
 
 Skipping impact() means you WILL miss dependent files and break things.
 
@@ -24,9 +27,9 @@ Skipping impact() means you WILL miss dependent files and break things.
 - **search("query", near="SymbolName")** — Find symbols, files, or concepts. Pass a specific symbol name ('UserStatus', 'zik'), a file path ('src/types/enums'), or ONE concept word ('authentication'). Do NOT pass multi-word descriptions — search('zik') not search('plane type enum plane types'). Returns `name (kind) file:start-end [H/M/L]` for symbol matches, bare paths + graph connections for path matches. Replaces grep and glob. Use FIRST.
   - **near="SymbolName" or "file/path.ts"** — filters ALL results to only files connected to this symbol or file (within 3 graph hops). Pass this on every search after the first. The first search (without near) tells you the subsystem. After that, near= is mandatory. The tool output will suggest a near= value — use it.
 - **node("name")** — Get connections (callers, callees) with file:line ranges. Use after search.
-- **impact("name")** — Complete blast radius. Exhaustive. Use BEFORE editing. Files not listed do not depend on the target.
+- **impact("name", change="add-value")** — Blast radius. Default (add-value) shows only files that BREAK: type-position users (Record<T>, switch, Object.keys, .map). ~5-30 files, ~500 tokens. Files tagged [breaks]/[safe], risk-sorted. Paginated — call impact(name, offset=N) for more. Pass change="full" for exhaustive (all depths, ~4k tokens) ONLY for repo-wide refactors. change="rename" for callers+importers. change="remove" for all dependents. Use BEFORE editing.
 - **path("from", "to")** — Trace how two symbols connect.
-- **package("name")** — Resolve an npm package to its entry point files (main, types, exports). Use for external packages in node_modules that aren't in the codebase graph. Then Read the returned types/main file.
+- **package("name")** — Resolve an npm package to its entry point files AND symbol line ranges. Returns symbol offsets (e.g. `PlaneCategories (enum): 307-322`) so you can Read surgically: `Read(types_file, offset=307, limit=17)` instead of reading 587 lines. Use for external packages in node_modules that aren't in the codebase graph.
 - **local_files(["path"])** — Read full files. EXPENSIVE. Prefer Read with line ranges from search/node.
 
 ## Rules

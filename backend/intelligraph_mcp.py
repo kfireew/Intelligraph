@@ -41,7 +41,7 @@ def _sync_from_pod(pod_url: str, project_id: int, mcp_token: str, ssl_verify: bo
 
     Returns the path to the cached graph.db.
     """
-    global _ORIGINAL_REPO_DIR
+    global _ORIGINAL_REPO_DIR, _NM_INDEX_PATH, _NODE_COUNT, _EDGE_COUNT
     cache_dir = CACHE_DIR / str(project_id)
     cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -74,6 +74,12 @@ def _sync_from_pod(pod_url: str, project_id: int, mcp_token: str, ssl_verify: bo
         meta = json.loads(meta_path.read_text())
 
     _ORIGINAL_REPO_DIR = meta.get("original_repo_dir", "")
+    _NODE_COUNT = meta.get("nodes", 0) or 0
+    _EDGE_COUNT = meta.get("edges", 0) or 0
+
+    # nm_index.db is extracted alongside graph.db in the cache dir
+    nm_path = cache_dir / "nm_index.db"
+    _NM_INDEX_PATH = str(nm_path) if nm_path.exists() else None
 
     nodes = meta.get("nodes", "?")
     edges = meta.get("edges", "?")
@@ -99,6 +105,10 @@ def _get_provider(graph_db_path: str, graphify_data: dict = None):
         "graphify_data": graphify_data or {},
         "repo_dir": REPO_DIR,
         "original_repo_dir": _ORIGINAL_REPO_DIR,
+        "nm_index_path": _NM_INDEX_PATH,
+        "nodes": _NODE_COUNT,
+        "edges": _EDGE_COUNT,
+        "crg_nodes": _NODE_COUNT,
     }
     from crg_intelligence import CRGProvider
     return CRGProvider(proj)
@@ -208,15 +218,75 @@ def _read_local_file(repo_relative_path: str, max_bytes: int = 15000) -> str:
         return f"ERROR reading {repo_relative_path}: {e}"
 
 
-def _format_search(results, query, near=""):
+def _format_search(results, query, near="", provider=None):
     guidance = [r for r in results if "low_confidence_guidance" in r.get("reason", []) or "no_match" in r.get("reason", [])]
     real_results = [r for r in results if r not in guidance]
 
     if not real_results:
-        _log_call("search", 0, 0)
-        for g in guidance:
-            return g.get("confidence_reason", f"No symbols found matching '{query}'.")
-        return f"No symbols found matching '{query}'."
+        # Fallback: scan node_snippets for the query term (catches symbols that
+        # FTS missed but appear in source snippets). Also scan previously-seen
+        # files from this session. Saves the 3-retry loop (~4k tokens).
+        fallback_hits = []
+        if provider:
+            try:
+                conn = provider._get_conn()
+                ql = f"%{query.lower()}%"
+                # Try node_snippets first (actual source code, up to 500 chars)
+                try:
+                    snip_rows = conn.execute(
+                        "SELECT node_name, snippet FROM node_snippets "
+                        "WHERE LOWER(snippet) LIKE ? LIMIT 5",
+                        (ql,)
+                    ).fetchall()
+                    for sr in snip_rows:
+                        # Find the node to get file_path + line range
+                        node_row = conn.execute(
+                            "SELECT name, kind, file_path, line_start, line_end "
+                            "FROM nodes WHERE LOWER(name) = LOWER(?) LIMIT 1",
+                            (sr["node_name"],)
+                        ).fetchone()
+                        if node_row:
+                            fallback_hits.append({
+                                "name": node_row["name"],
+                                "kind": node_row["kind"] or "?",
+                                "file_path": node_row["file_path"] or "?",
+                                "line_start": node_row["line_start"] or 0,
+                                "line_end": node_row["line_end"] or 0,
+                                "confidence": "MEDIUM",
+                                "reason": ["snippet_fallback"],
+                            })
+                except Exception:
+                    pass
+                # Also scan previously-seen files from this session
+                for seen_fp, seen_info in list(_SESSION_SEEN.items())[:20]:
+                    if seen_info.get("tool") != "search":
+                        continue
+                    # seen_fp is a rewritten path; query by basename
+                    base = os.path.basename(seen_fp).replace("\\", "/")
+                    node_rows = conn.execute(
+                        "SELECT name, kind, file_path, line_start, line_end "
+                        "FROM nodes WHERE file_path LIKE ? AND LOWER(name) LIKE ? LIMIT 3",
+                        (f"%{base}%", ql)
+                    ).fetchall()
+                    for nr in node_rows:
+                        fallback_hits.append({
+                            "name": nr["name"],
+                            "kind": nr["kind"] or "?",
+                            "file_path": nr["file_path"] or "?",
+                            "line_start": nr["line_start"] or 0,
+                            "line_end": nr["line_end"] or 0,
+                            "confidence": "MEDIUM",
+                            "reason": ["seen_file_fallback"],
+                        })
+            except Exception:
+                pass
+        if fallback_hits:
+            real_results = fallback_hits
+        else:
+            _log_call("search", 0, 0)
+            for g in guidance:
+                return g.get("confidence_reason", f"No symbols found matching '{query}'.")
+            return f"No symbols found matching '{query}'."
 
     cache_key = f"{query.lower().strip()}|{near.lower().strip()}"
     if cache_key in _SESSION_SEARCHES:
@@ -239,10 +309,29 @@ def _format_search(results, query, near=""):
         if is_path_match:
             files_list.append(fp)
             connections = r.get("connections", [])
+            # Sibling files hint: query DB for other files in the same directory
+            siblings = []
+            if provider:
+                try:
+                    conn = provider._get_conn()
+                    dir_prefix = "/".join(r.get("file_path", "").split("/")[:-1]) + "/"
+                    sib_rows = conn.execute(
+                        "SELECT DISTINCT file_path FROM nodes "
+                        "WHERE file_path LIKE ? AND file_path != ? LIMIT 3",
+                        (f"%{dir_prefix}%", r.get("file_path", ""))
+                    ).fetchall()
+                    for sr in sib_rows:
+                        sib_fp = _rewrite_path(sr["file_path"] or "")
+                        if sib_fp and sib_fp != fp:
+                            siblings.append(os.path.basename(sib_fp))
+                except Exception:
+                    pass
             if connections:
-                lines.append(f"{i}. {fp} — connected to: {', '.join(connections)} [{r_tag}]")
+                lines.append(f"{i}. {fp} connected to: {', '.join(connections)} [{r_tag}]")
             else:
                 lines.append(f"{i}. {fp} [{r_tag}]")
+            if siblings:
+                lines.append(f"   nearby: {', '.join(siblings)}")
             _track_seen(fp, "search", call_id)
         else:
             name = r.get("name", "?")
@@ -284,7 +373,7 @@ def _dispatch(name, args, provider):
         query = args.get("query", "")
         near = args.get("near", "")
         results = provider.hybrid_search(query, max_results=10, embedding_weight=0.4, near=near)
-        return _format_search(results, query, near=near)
+        return _format_search(results, query, near=near, provider=provider)
 
     if name == "node":
         sym = args.get("name", "")
@@ -329,23 +418,62 @@ def _dispatch(name, args, provider):
 
     if name == "impact":
         target = args.get("name", "")
-        results = provider.impact(target)
+        change = args.get("change", "add-value")
+        offset = max(0, int(args.get("offset", 0)))
+        max_tokens = int(args.get("max_tokens", 1500))
+        results = provider.impact(target, change=change, offset=offset, max_tokens=max_tokens)
         if not results:
             _log_call("impact", 0, 0)
             return f"No impact data found for '{target}'."
-        _log_call("impact", len(results), len(results) * 30)
-        lines = [f"## Impact: '{target}' ({len(results)} files — complete blast radius)", ""]
-        for r in results:
+
+        total = results[0].get("total_count", len(results))
+        # Slice to offset page (display cap = token budget, not file count)
+        page = results[offset:]
+        lines = []
+        est_tokens = 0
+        shown = 0
+        for r in page:
             fp = _rewrite_path(r.get("file_path", "?"))
             depth = r.get("depth", 0)
             symbols = r.get("symbols", [])
             edge_types = r.get("edge_types", [])
+            breaks = r.get("breaks")
+            pattern = r.get("pattern", "")
+            is_test = r.get("is_test", False)
             depth_label = "definition" if depth == 0 else f"depth {depth}"
-            lines.append(f"- `{fp}` ({depth_label})")
+            tag = ""
+            if breaks is True:
+                tag = " [breaks]"
+            elif breaks is False:
+                tag = " [safe]"
+            if is_test:
+                tag += " (test)"
+            lines.append(f"- `{fp}` ({depth_label}){tag}")
             if symbols:
                 lines.append(f"  symbols: {', '.join(symbols[:5])}")
             if edge_types:
                 lines.append(f"  edges: {', '.join(edge_types[:5])}")
+            if pattern:
+                lines.append(f"  pattern: {pattern}")
+            est_tokens += sum(len(l) for l in lines[-4:]) // 4
+            shown += 1
+            if est_tokens >= max_tokens and shown < len(page):
+                break
+
+        has_more = (offset + shown) < total
+        header = f"## Impact: '{target}' (change={change}) — {shown} of {total} files"
+        lines = [header, ""] + lines
+        if has_more:
+            remaining = total - (offset + shown)
+            lines.append("")
+            lines.append(f"+{remaining} more files exist. Call impact(name=\"{target}\", "
+                         f"change=\"{change}\", offset={offset + shown}) for next page.")
+            lines.append(f'Pass change="full" for exhaustive traversal (all depths).')
+        elif change != "full":
+            lines.append("")
+            lines.append(f'For exhaustive traversal (all depths + graphify), pass change="full".')
+
+        _log_call("impact", shown, est_tokens)
         return "\n".join(lines)
 
     if name == "path":
@@ -364,6 +492,21 @@ def _dispatch(name, args, provider):
         max_bytes = args.get("max_bytes", 15000)
         lines = []
         total_bytes = 0
+        # Warn if reading whole files when line ranges are already known from
+        # earlier search/node calls — saves tokens by nudging toward surgical reads.
+        warnings = []
+        for path in paths:
+            for seen_fp, seen_info in _SESSION_SEEN.items():
+                if path.lower().replace("\\", "/") in seen_fp.lower().replace("\\", "/") or seen_fp.lower().replace("\\", "/") in path.lower().replace("\\", "/"):
+                    if seen_info.get("tool") in ("search", "node"):
+                        warnings.append(
+                            f"WARNING: '{path}' has known line ranges from {seen_info['tool']}#"
+                            f"{seen_info.get('call_id', '?')}. Use built-in Read with offset/limit "
+                            f"instead of reading the whole file."
+                        )
+                        break
+        if warnings:
+            lines.append("\n".join(warnings) + "\n")
         for path in paths:
             content = _read_local_file(path, max_bytes)
             total_bytes += len(content)
@@ -436,6 +579,35 @@ def _resolve_package(pkg_name: str) -> str:
     if not any(line.startswith(("main:", "types:", "module:", "exports")) for line in lines[1:]):
         lines.append(f"(No entry point fields. Use Read to list: {rel_base}/)")
 
+    # Append symbol offsets from nm_index.db so the agent can Read surgically
+    # instead of reading the entire .d.ts file (~6k tokens for 587 lines).
+    if types and _NM_INDEX_PATH:
+        try:
+            import sqlite3 as _sqlite3
+            nm_conn = _sqlite3.connect(f"file:{_NM_INDEX_PATH}?mode=ro", uri=True)
+            nm_conn.row_factory = _sqlite3.Row
+            types_rel = f"{rel_base}/{types}".replace("\\", "/")
+            sym_rows = nm_conn.execute(
+                "SELECT name, kind, line_start, line_end, signature "
+                "FROM nm_symbols WHERE file_path = ? "
+                "ORDER BY line_start LIMIT 15",
+                (types_rel,)
+            ).fetchall()
+            nm_conn.close()
+            if sym_rows:
+                lines.append("symbols:")
+                for sr in sym_rows:
+                    s_name = sr["name"] or "?"
+                    s_kind = sr["kind"] or "?"
+                    s_ls = sr["line_start"] or 0
+                    s_le = sr["line_end"] or 0
+                    if s_ls and s_le and s_le > s_ls:
+                        lines.append(f"  {s_name} ({s_kind}): {s_ls}-{s_le}")
+                    elif s_ls:
+                        lines.append(f"  {s_name} ({s_kind}): {s_ls}")
+        except Exception:
+            pass  # nm_index.db missing or query failed — silently skip
+
     _log_call("package", 1, 50)
     return "\n".join(lines)
 
@@ -446,13 +618,16 @@ REPO_DIR = None
 _GRAPH_DB_PATH = None
 _GRAPHIFY_DATA = {}
 _ORIGINAL_REPO_DIR = None
+_NM_INDEX_PATH = None
+_NODE_COUNT = 0
+_EDGE_COUNT = 0
 _LAST_MTIME = 0.0
 _PROVIDER = None
 
 
 def _get_or_reload_provider():
     """Get provider, re-syncing from pod if graph.db changed on disk."""
-    global _PROVIDER, _LAST_MTIME, _GRAPH_DB_PATH, _GRAPHIFY_DATA
+    global _PROVIDER, _LAST_MTIME, _GRAPH_DB_PATH, _GRAPHIFY_DATA, _NM_INDEX_PATH, _NODE_COUNT, _EDGE_COUNT
 
     # Only check for updates if we already have a provider (skip on first call
     # when _LAST_MTIME is 0.0 — that's the initial load, not an update)
@@ -488,7 +663,7 @@ def _get_or_reload_provider():
 
 
 def main():
-    global REPO_DIR, _GRAPH_DB_PATH, _GRAPHIFY_DATA, _PROVIDER, _LAST_MTIME, _ORIGINAL_REPO_DIR
+    global REPO_DIR, _GRAPH_DB_PATH, _GRAPHIFY_DATA, _PROVIDER, _LAST_MTIME, _ORIGINAL_REPO_DIR, _NM_INDEX_PATH, _NODE_COUNT, _EDGE_COUNT
 
     parser = argparse.ArgumentParser(description="Intelligraph Local MCP Server (stdio)")
     parser.add_argument("--pod-url", required=True, help="Intelligraph pod URL")
@@ -574,12 +749,23 @@ def main():
             types.Tool(
                 name="impact",
                 description=(
-                    "Complete blast radius of changing a symbol. Exhaustive traversal of ALL edge types. "
-                    "Returns every affected file with symbols to check. Use before refactoring. "
-                    "Files not listed do not depend on the target."
+                    "Blast radius of changing a symbol. Default (change=add-value) shows only "
+                    "type-position users (Record<T>, switch, Object.keys) that BREAK when you add "
+                    "an enum value or property — typically 5-30 files, ~500 tokens. "
+                    "Each file is tagged [breaks] or [safe] based on pattern scanning. "
+                    "Results are risk-priority sorted (breaks first, safe last, tests at bottom). "
+                    "Output is paginated by token budget — call impact(name, offset=N) for more. "
+                    "Pass change=full for exhaustive traversal (all depths, all edges, ~4k tokens) "
+                    "when doing a repo-wide refactor. change=rename for callers+importers. "
+                    "change=remove for all dependents. Use BEFORE editing."
                 ),
                 inputSchema={"type": "object", "properties": {
-                    "name": {"type": "string"}
+                    "name": {"type": "string"},
+                    "change": {"type": "string", "enum": ["add-value", "rename", "remove", "full"],
+                               "default": "add-value",
+                               "description": "Type of change. add-value=narrow (type users), rename=callers, remove=all, full=exhaustive."},
+                    "offset": {"type": "integer", "default": 0, "description": "Pagination offset for large result sets."},
+                    "max_tokens": {"type": "integer", "default": 1500, "description": "Max output tokens (display cap). 4000 for full mode."},
                 }, "required": ["name"]},
             ),
             types.Tool(
@@ -593,7 +779,8 @@ def main():
                 name="local_files",
                 description=(
                     "Read full source files from disk. EXPENSIVE. "
-                    "Prefer built-in Read with line ranges from search/node results instead."
+                    "Prefer built-in Read with line ranges from search/node results instead. "
+                    "Warns if line ranges are already known from earlier search/node calls."
                 ),
                 inputSchema={"type": "object", "properties": {
                     "paths": {"type": "array", "items": {"type": "string"}},
@@ -603,10 +790,12 @@ def main():
             types.Tool(
                 name="package",
                 description=(
-                    "Resolve an npm package to its entry point files (main, types, exports). "
-                    "Reads node_modules/{name}/package.json. "
+                    "Resolve an npm package to its entry point files (main, types, exports) "
+                    "AND symbol offsets from the .d.ts index. Returns symbol names with line ranges "
+                    "so you can Read surgically (e.g. Read(types, offset=307, limit=17)) instead of "
+                    "reading the entire .d.ts file. "
                     "Use this when you need to find symbols in external npm packages "
-                    "that aren't in the codebase graph. Then use built-in Read on the returned types/main file path."
+                    "that aren't in the codebase graph."
                 ),
                 inputSchema={"type": "object", "properties": {
                     "name": {"type": "string", "description": "npm package name (e.g. @romach/enums, lodash)"}
