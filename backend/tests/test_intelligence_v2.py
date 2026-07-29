@@ -730,3 +730,140 @@ class TestImpact3472FileBlastRadius:
             first_breaks_idx = min(i for i, l in enumerate(lines) if "[breaks]" in l)
             first_safe_idx = min(i for i, l in enumerate(lines) if "[safe]" in l)
             assert first_breaks_idx < first_safe_idx
+
+
+# ── Phase 1: near= resilience, snippet schema, path validation ─────
+
+class TestNearResilience:
+    """Tests for near= snippet fallback, no-zero-out, and path validation."""
+
+    @pytest.fixture
+    def mock_crg_db_snippets(self, tmp_path):
+        """Mock CRG DB with v2 snippet schema (qualified_name + file_path)
+        and a const object whose snippet contains a property value (TRACK_ZIK)
+        that is NOT a graph node."""
+        db_path = str(tmp_path / "graph.db")
+        conn = sqlite3.connect(db_path)
+        conn.execute("CREATE TABLE nodes (id INTEGER PRIMARY KEY, name TEXT, kind TEXT, "
+                     "qualified_name TEXT, file_path TEXT, signature TEXT, "
+                     "community_id INTEGER, line_start INTEGER, line_end INTEGER, is_test INTEGER)")
+        conn.execute("CREATE VIRTUAL TABLE nodes_fts USING fts5(name, signature, file_path, "
+                     "content='nodes', content_rowid='id')")
+        conn.execute("CREATE TABLE edges (source_qualified TEXT, target_qualified TEXT, kind TEXT)")
+        conn.execute("CREATE TABLE node_snippets (qualified_name TEXT PRIMARY KEY, "
+                     "node_name TEXT, file_path TEXT, line_start INTEGER, line_end INTEGER, snippet TEXT)")
+        conn.execute("CREATE INDEX idx_snippet_name ON node_snippets(node_name)")
+        conn.execute("CREATE INDEX idx_snippet_file ON node_snippets(file_path)")
+
+        nodes_data = [
+            (1, "IconsNames", "Const", "icons.IconsNames", "src/icons/icons.ts",
+             "const IconsNames = {}", 1, 200, 210, 0),
+            (2, "iconResolver", "Function", "utils.iconResolver", "src/utils/icon-resolver.ts",
+             "function iconResolver()", 1, 5, 30, 0),
+            (3, "planeService", "Function", "services.planeService", "src/services/plane.ts",
+             "function planeService()", 2, 1, 50, 0),
+        ]
+        for nd in nodes_data:
+            conn.execute("INSERT INTO nodes VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", nd)
+            conn.execute("INSERT INTO nodes_fts(rowid, name, signature, file_path) VALUES(?, ?, ?, ?)",
+                         (nd[0], nd[1], nd[5], nd[4]))
+
+        edges_data = [
+            ("utils.iconResolver", "icons.IconsNames", "REFERENCES"),
+            ("utils.iconResolver", "icons.IconsNames", "IMPORTS_FROM"),
+            ("services.planeService", "utils.iconResolver", "CALLS"),
+        ]
+        for ed in edges_data:
+            conn.execute("INSERT INTO edges VALUES(?, ?, ?)", ed)
+
+        # Snippet for IconsNames contains TRACK_ZIK as a property value
+        snip_icons = "const IconsNames = {\n  TRACK_ZIK: 'zik',\n  TRACK_KARISH: 'karish',\n};"
+        conn.execute("INSERT INTO node_snippets VALUES(?, ?, ?, ?, ?, ?)",
+                     ("icons.IconsNames", "IconsNames", "src/icons/icons.ts", 200, 210, snip_icons))
+        conn.execute("INSERT INTO node_snippets VALUES(?, ?, ?, ?, ?, ?)",
+                     ("utils.iconResolver", "iconResolver", "src/utils/icon-resolver.ts", 5, 30,
+                      "function iconResolver() {\n  return IconsNames.TRACK_ZIK;\n}"))
+
+        conn.commit()
+        conn.close()
+        return db_path
+
+    @pytest.fixture
+    def mock_proj_snippets(self, mock_crg_db_snippets):
+        return {"id": 1, "name": "test", "crg_db_path": mock_crg_db_snippets}
+
+    def test_near_snippet_fallback_resolves_value(self, mock_proj_snippets):
+        """near='TRACK_ZIK' should resolve via snippet fallback (not a graph node
+        but appears in IconsNames snippet), returning the IconsNames file."""
+        from crg_intelligence import CRGProvider
+        provider = CRGProvider(mock_proj_snippets)
+        assert provider.is_available()
+        results = provider.search("iconResolver", near="TRACK_ZIK")
+        # Should NOT return [] — snippet fallback finds IconsNames file
+        assert len(results) > 0, "near='TRACK_ZIK' should resolve via snippet, not return empty"
+        # The result should include the IconsNames file or icon-resolver
+        files = {r.get("file_path", "") for r in results}
+        assert any("icons.ts" in f or "icon-resolver" in f for f in files), \
+            f"Expected icons.ts or icon-resolver in results, got {files}"
+
+    def test_near_unresolved_no_zero_out(self, mock_proj_snippets):
+        """near='NONEXISTENT' should NOT return []. Should return unfiltered
+        results tagged with 'near_unresolved' reason."""
+        from crg_intelligence import CRGProvider
+        provider = CRGProvider(mock_proj_snippets)
+        assert provider.is_available()
+        results = provider.search("iconResolver", near="TOTALLY_BOGUS_NONEXISTENT_XYZ")
+        assert len(results) > 0, "Unresolved near= should return unfiltered results, not []"
+        # At least one result should have near_unresolved tag
+        assert any("near_unresolved" in r.get("reason", []) for r in results), \
+            "Results should be tagged with 'near_unresolved'"
+
+    def test_libse2e_filtered_as_test_path(self):
+        """libsE2E/foo.ts (lowercased: libse2e) should be filtered as test path."""
+        from crg_intelligence import _is_test_path
+        assert _is_test_path("src/libsE2E/foo.ts")
+        assert _is_test_path("src/libsE2E/helpers/bar.ts")
+        # But a real source lib like 'e2e-helpers' should NOT be filtered
+        # (segment 'e2e-helpers' is not exactly 'e2e' or 'libse2e')
+        assert not _is_test_path("src/e2e-helpers/utils.ts")
+
+    def test_normal_query_unchanged_by_near_resilience(self, mock_proj):
+        """A normal symbol search (e.g. 'upsertEntity') should still work
+        without any near_unresolved or snippet fallback tags."""
+        from crg_intelligence import CRGProvider
+        provider = CRGProvider(mock_proj)
+        assert provider.is_available()
+        results = provider.hybrid_search("upsertEntity", max_results=5, embedding_weight=0.0)
+        assert len(results) > 0
+        # Should be HIGH or MEDIUM confidence, not LOW
+        assert results[0].get("confidence") in ("HIGH", "MEDIUM")
+        # Should NOT have near_unresolved reason
+        assert "near_unresolved" not in results[0].get("reason", [])
+
+    def test_stale_path_tagged_in_search_output(self, mock_proj_snippets, tmp_path):
+        """_format_search should tag [stale] on results whose file_path
+        doesn't exist in the local REPO_DIR."""
+        import intelligraph_mcp
+        intelligraph_mcp.REPO_DIR = str(tmp_path)
+        intelligraph_mcp._ORIGINAL_REPO_DIR = ""
+        # Wire repo_dir on the project so build_valid_paths() walks tmp_path
+        mock_proj_snippets["repo_dir"] = str(tmp_path)
+        from crg_intelligence import CRGProvider
+        provider = CRGProvider(mock_proj_snippets)
+        provider.is_available()
+        # Don't create any files in tmp_path — all results will be stale
+        output = intelligraph_mcp._dispatch("search", {"query": "iconResolver"}, provider)
+        # Output should contain [stale] tag since no files exist on disk
+        assert "[stale]" in output, f"Expected [stale] tag, got:\n{output}"
+
+    def test_snippet_schema_v2_join_on_qualified_name(self, mock_proj_snippets):
+        """get_snippets should find snippets using qualified_name (v2 schema),
+        even when node_name would collide."""
+        from crg_intelligence import CRGProvider
+        provider = CRGProvider(mock_proj_snippets)
+        assert provider.is_available()
+        provider._get_conn()  # trigger schema probe
+        assert provider._snippet_schema == "v2"
+        result = provider.get_snippets(["IconsNames"], max_chars=500)
+        assert "IconsNames" in result
+        assert "TRACK_ZIK" in result["IconsNames"]["snippet"]

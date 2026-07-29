@@ -25,7 +25,7 @@ Skipping impact() means you WILL miss dependent files and break things.
 
 ## Tools
 - **search("query", near="SymbolName")** — Find symbols, files, or concepts. Pass a specific symbol name ('UserStatus', 'zik'), a file path ('src/types/enums'), or ONE concept word ('authentication'). Do NOT pass multi-word descriptions — search('zik') not search('plane type enum plane types'). Returns `name (kind) file:start-end [H/M/L]` for symbol matches, bare paths + graph connections for path matches. Replaces grep and glob. Use FIRST.
-  - **near="SymbolName" or "file/path.ts"** — filters ALL results to only files connected to this symbol or file (within 3 graph hops). Pass this on every search after the first. The first search (without near) tells you the subsystem. After that, near= is mandatory. The tool output will suggest a near= value — use it.
+  - **near="SymbolName" or "file/path.ts"** — filters results to files connected to this symbol or file (within 3 graph hops). Use near= only with an exact symbol or file returned by a previous search or node() call. Do not invent anchors from broad words such as `planes`, `filter`, or `table` — these are not graph symbols and will not resolve. The first search may omit near= to discover the subsystem; subsequent searches use near= with a symbol from a prior result.
 - **node("name")** — Get connections (callers, callees) with file:line ranges. Use after search.
 - **impact("name", change="add-value")** — Blast radius. Default (add-value) shows only files that BREAK: type-position users (Record<T>, switch, Object.keys, .map). ~5-30 files, ~500 tokens. Files tagged [breaks]/[safe], risk-sorted. Paginated — call impact(name, offset=N) for more. Pass change="full" for exhaustive (all depths, ~4k tokens) ONLY for repo-wide refactors. change="rename" for callers+importers. change="remove" for all dependents. Use BEFORE editing.
 - **path("from", "to")** — Trace how two symbols connect.
@@ -39,7 +39,7 @@ Skipping impact() means you WILL miss dependent files and break things.
 - **DO NOT edit without running impact() first.** impact() finds files grep misses.
 - **DO NOT search for the same thing twice.** search() caches results in-session.
 - **ONLY 1 SEARCH AT A TIME.** Do not fire multiple searches in parallel — each search hits the CRG DB + embedding model. Concurrent searches overload the pod and cause 504s.
-- **Pass near= on EVERY search after the first.** The first search tells you the subsystem. After that, near= is mandatory. The tool output will suggest a near= value — use it.
+- **Use near= only with symbols returned by previous search or node() results.** Do not invent anchors from broad words (planes, filter, table) — they are not graph symbols and will not resolve. The first search may omit near= to discover the subsystem. If a near= anchor doesn't resolve, the search returns unfiltered results tagged with a hint — use a symbol from those results as near= next.
 - **Search what the user mentioned, not your abstraction of it.** If the user says "add a new plane type next to zik", search "zik" — not "plane type enum". Anchor on concrete names the user gives you. If no concrete name exists, use ONE concept word, not a multi-word description.
 - **If search returns [L] (low confidence), do NOT retry with similar terms.** Use node() on a known symbol, Read a file you already found, or ask the user.
 - **For external npm packages (node_modules), use package("name")** to find entry points, then Read the `.d.ts` file.

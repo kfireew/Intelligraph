@@ -145,6 +145,34 @@ def _rewrite_path(fp: str) -> str:
     return p.replace("\\", "/")
 
 
+def _is_stale_path(local_path: str, provider=None) -> bool:
+    """Check if a rewritten local path exists on disk (phantom file detection).
+
+    Returns False (not stale) when:
+    - no REPO_DIR configured (can't validate)
+    - provider has no _valid_paths cache yet (will be built on first call)
+    - the file exists in the cached valid path set
+    Returns True (stale) only when the path cache is populated and the file is missing.
+    """
+    if not local_path or not REPO_DIR:
+        return False
+    if provider is None:
+        return False
+    try:
+        valid = provider.build_valid_paths()
+        if not valid:
+            return False
+        p = local_path.replace("\\", "/")
+        prefix = REPO_DIR.replace("\\", "/").rstrip("/") + "/"
+        if p.lower().startswith(prefix.lower()):
+            rel = p[len(prefix):]
+        else:
+            rel = p
+        return rel not in valid and rel.lstrip("/") not in valid
+    except Exception:
+        return False
+
+
 # ── Session tracking (same as mini server) ───────────────────────
 _SESSION_SEEN = {}
 _SESSION_STATS = {"search": 0, "node": 0, "path": 0, "impact": 0, "local_files": 0, "est_tokens": 0}
@@ -231,30 +259,48 @@ def _format_search(results, query, near="", provider=None):
             try:
                 conn = provider._get_conn()
                 ql = f"%{query.lower()}%"
-                # Try node_snippets first (actual source code, up to 500 chars)
+                # Try node_snippets first (actual source code, up to 500 chars).
+                # v2 schema: node_snippets has file_path + line ranges directly,
+                # so we can join without a second query. v1: fall back to name lookup.
                 try:
-                    snip_rows = conn.execute(
-                        "SELECT node_name, snippet FROM node_snippets "
-                        "WHERE LOWER(snippet) LIKE ? LIMIT 5",
-                        (ql,)
-                    ).fetchall()
-                    for sr in snip_rows:
-                        # Find the node to get file_path + line range
-                        node_row = conn.execute(
-                            "SELECT name, kind, file_path, line_start, line_end "
-                            "FROM nodes WHERE LOWER(name) = LOWER(?) LIMIT 1",
-                            (sr["node_name"],)
-                        ).fetchone()
-                        if node_row:
+                    if provider._snippet_schema == "v2":
+                        snip_rows = conn.execute(
+                            "SELECT node_name, file_path, line_start, line_end, snippet "
+                            "FROM node_snippets WHERE LOWER(snippet) LIKE ? LIMIT 5",
+                            (ql,)
+                        ).fetchall()
+                        for sr in snip_rows:
                             fallback_hits.append({
-                                "name": node_row["name"],
-                                "kind": node_row["kind"] or "?",
-                                "file_path": node_row["file_path"] or "?",
-                                "line_start": node_row["line_start"] or 0,
-                                "line_end": node_row["line_end"] or 0,
+                                "name": sr["node_name"] or "?",
+                                "kind": "Value",
+                                "file_path": sr["file_path"] or "?",
+                                "line_start": sr["line_start"] or 0,
+                                "line_end": sr["line_end"] or 0,
                                 "confidence": "MEDIUM",
                                 "reason": ["snippet_fallback"],
                             })
+                    else:
+                        snip_rows = conn.execute(
+                            "SELECT node_name, snippet FROM node_snippets "
+                            "WHERE LOWER(snippet) LIKE ? LIMIT 5",
+                            (ql,)
+                        ).fetchall()
+                        for sr in snip_rows:
+                            node_row = conn.execute(
+                                "SELECT name, kind, file_path, line_start, line_end "
+                                "FROM nodes WHERE LOWER(name) = LOWER(?) LIMIT 1",
+                                (sr["node_name"],)
+                            ).fetchone()
+                            if node_row:
+                                fallback_hits.append({
+                                    "name": node_row["name"],
+                                    "kind": node_row["kind"] or "?",
+                                    "file_path": node_row["file_path"] or "?",
+                                    "line_start": node_row["line_start"] or 0,
+                                    "line_end": node_row["line_end"] or 0,
+                                    "confidence": "MEDIUM",
+                                    "reason": ["snippet_fallback"],
+                                })
                 except Exception:
                     pass
                 # Also scan previously-seen files from this session
@@ -297,6 +343,19 @@ def _format_search(results, query, near="", provider=None):
     top_conf = real_results[0].get("confidence", "MEDIUM")
     conf_tag = {"HIGH": "H", "MEDIUM": "M", "LOW": "L"}.get(top_conf, "M")
 
+    # Partition stale paths to render last (phantom file suppression).
+    # Only runs when provider + REPO_DIR are available; otherwise no-op.
+    if provider and REPO_DIR:
+        fresh = []
+        stale = []
+        for r in real_results:
+            fp = _rewrite_path(r.get("file_path", "?"))
+            if _is_stale_path(fp, provider):
+                stale.append(r)
+            else:
+                fresh.append(r)
+        real_results = fresh + stale
+
     lines = [f'## "{query}" — {len(real_results)} results [{conf_tag}]']
     files_list = []
 
@@ -305,13 +364,15 @@ def _format_search(results, query, near="", provider=None):
         r_conf = r.get("confidence", "MEDIUM")
         r_tag = {"HIGH": "H", "MEDIUM": "M", "LOW": "L"}.get(r_conf, "M")
         is_path_match = "path_match" in r.get("reason", [])
+        is_stale = _is_stale_path(fp, provider)
+        stale_tag = " [stale]" if is_stale else ""
 
         if is_path_match:
             files_list.append(fp)
             connections = r.get("connections", [])
             # Sibling files hint: query DB for other files in the same directory
             siblings = []
-            if provider:
+            if provider and not is_stale:
                 try:
                     conn = provider._get_conn()
                     dir_prefix = "/".join(r.get("file_path", "").split("/")[:-1]) + "/"
@@ -327,9 +388,9 @@ def _format_search(results, query, near="", provider=None):
                 except Exception:
                     pass
             if connections:
-                lines.append(f"{i}. {fp} connected to: {', '.join(connections)} [{r_tag}]")
+                lines.append(f"{i}. {fp} connected to: {', '.join(connections)} [{r_tag}]{stale_tag}")
             else:
-                lines.append(f"{i}. {fp} [{r_tag}]")
+                lines.append(f"{i}. {fp} [{r_tag}]{stale_tag}")
             if siblings:
                 lines.append(f"   nearby: {', '.join(siblings)}")
             _track_seen(fp, "search", call_id)
@@ -345,7 +406,7 @@ def _format_search(results, query, near="", provider=None):
             else:
                 loc = fp
             files_list.append(loc)
-            lines.append(f"{i}. {name} ({kind}) {loc} [{r_tag}]")
+            lines.append(f"{i}. {name} ({kind}) {loc} [{r_tag}]{stale_tag}")
             _track_seen(fp, "search", call_id, had_signature=bool(r.get("signature")))
 
     for g in guidance:
@@ -734,12 +795,13 @@ def main():
                     "Returns name, kind, file path with line ranges (file:start-end), and confidence [H/M/L]. "
                     "Use built-in Read with offset=line_start, limit=line_end-line_start to get source. "
                     "Use this FIRST - replaces grep and glob. "
-                    "ALWAYS pass near= - without it you get 16+ broad results wasting ~2000 tokens. "
-                    "With near= you get 2-3 targeted results (~300 tokens)."
+                    "Pass near= with a symbol or file returned by a previous search or node() result. "
+                    "Do not invent anchors from broad words (planes, filter, table) - they will not resolve. "
+                    "The first search may omit near= to discover the subsystem."
                 ),
                 inputSchema={"type": "object", "properties": {
                     "query": {"type": "string"},
-                    "near": {"type": "string", "description": "REQUIRED on every search after the first. Symbol or file path to filter results to your subsystem (3 graph hops). Without near=, search returns up to 16 broad results (~2000 tokens wasted). With near=, you get 2-3 targeted results (~300 tokens)."},
+                    "near": {"type": "string", "description": "Symbol or file path returned by a previous search or node() result, to filter results to your subsystem (3 graph hops). Pass a symbol or file from a prior result - inventing anchors from broad words wastes a round-trip. The first search may omit near=."},
                 }, "required": ["query"]},
             ),
             types.Tool(

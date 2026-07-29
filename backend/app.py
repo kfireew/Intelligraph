@@ -1460,15 +1460,32 @@ def _build_graphs(pid, proj, repo_dir, user_key=None):
         snip_conn = None
         try:
             snip_conn = sqlite3.connect(crg_path)
-            snip_conn.execute("CREATE TABLE IF NOT EXISTS node_snippets (node_name TEXT PRIMARY KEY, snippet TEXT)")
+            # Schema v2: keyed by qualified_name (unambiguous). Falls back to
+            # node_name|file_path when qualified_name is NULL. v1 (node_name PK)
+            # is migrated by DROP + CREATE so duplicate-name collisions are fixed.
+            try:
+                snip_conn.execute("DROP TABLE IF EXISTS node_snippets")
+            except Exception:
+                pass
+            snip_conn.execute(
+                "CREATE TABLE node_snippets ("
+                "qualified_name TEXT PRIMARY KEY, "
+                "node_name TEXT, "
+                "file_path TEXT, "
+                "line_start INTEGER, "
+                "line_end INTEGER, "
+                "snippet TEXT)"
+            )
+            snip_conn.execute("CREATE INDEX idx_snippet_name ON node_snippets(node_name)")
+            snip_conn.execute("CREATE INDEX idx_snippet_file ON node_snippets(file_path)")
             nodes_with_lines = snip_conn.execute(
-                "SELECT name, file_path, line_start, line_end FROM nodes "
+                "SELECT name, qualified_name, file_path, line_start, line_end FROM nodes "
                 "WHERE line_start IS NOT NULL AND file_path IS NOT NULL AND name IS NOT NULL"
             ).fetchall()
             from collections import defaultdict as _defaultdict
             file_groups = _defaultdict(list)
             for n in nodes_with_lines:
-                file_groups[n[1]].append(n)
+                file_groups[n[2]].append(n)
             stored = 0
             for fp, node_list in file_groups.items():
                 full_path = fp if os.path.isabs(fp) else os.path.join(repo_dir, fp)
@@ -1480,15 +1497,19 @@ def _build_graphs(pid, proj, repo_dir, user_key=None):
                 except Exception:
                     continue
                 for n in node_list:
-                    start = max(0, (n[2] or 1) - 1)
-                    end = min(len(lines), n[3] or start + 20)
+                    start = max(0, (n[3] or 1) - 1)
+                    end = min(len(lines), n[4] or start + 20)
                     snippet = "".join(lines[start:end])[:500]
-                    if snippet.strip():
-                        snip_conn.execute(
-                            "INSERT OR REPLACE INTO node_snippets (node_name, snippet) VALUES (?, ?)",
-                            (n[0], snippet)
-                        )
-                        stored += 1
+                    if not snippet.strip():
+                        continue
+                    qname = n[1] or f"{n[0]}|{n[2]}"
+                    snip_conn.execute(
+                        "INSERT OR REPLACE INTO node_snippets "
+                        "(qualified_name, node_name, file_path, line_start, line_end, snippet) "
+                        "VALUES (?, ?, ?, ?, ?, ?)",
+                        (qname, n[0], n[2], n[3], n[4], snippet)
+                    )
+                    stored += 1
             snip_conn.commit()
             _vmsg("SNIPPETS pid=%d - stored %d snippets from %d files", pid, stored, len(file_groups))
         except Exception as e:

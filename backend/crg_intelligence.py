@@ -64,7 +64,17 @@ def _is_test_path(fp):
     if not fp:
         return True
     lower = fp.lower() if isinstance(fp, str) else ""
-    return any(p in lower for p in _TEST_PATH_PATTERNS)
+    if not lower:
+        return True
+    # Existing substring patterns (handles /e2e/, .spec., /cypress/, etc.)
+    if any(p in lower for p in _TEST_PATH_PATTERNS):
+        return True
+    # Segment-level check: catches libsE2E/ which lowercased is "libse2e"
+    # (no "/e2e/" substring because the path is ".../libsE2E/foo.ts").
+    # Match segments EXACTLY to avoid catching a legit "e2e-helpers" source lib.
+    _TEST_SEGMENTS = {"e2e", "libse2e", "e2e-tests", "cypress", "playwright", "jest"}
+    segs = [s for s in lower.replace("\\", "/").split("/") if s]
+    return any(seg in _TEST_SEGMENTS for seg in segs)
 
 
 def _vmsg(msg, *args):
@@ -176,6 +186,8 @@ class CRGProvider(IntelligenceProvider):
         self._db_path = None
         self._conn = None
         self._repo_prefix = None
+        self._snippet_schema = None  # "v2" (qualified_name) or "v1" (node_name only)
+        self._valid_paths = None    # repo-relative path set (path validation cache)
 
     def is_available(self) -> bool:
         self._db_path = self._find_db()
@@ -211,7 +223,36 @@ class CRGProvider(IntelligenceProvider):
             self._conn = sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)
             self._conn.row_factory = sqlite3.Row
             self._repo_prefix = self._extract_repo_prefix()
+            self._probe_snippet_schema()
         return self._conn
+
+    def _probe_snippet_schema(self):
+        """Cache node_snippets schema version once at provider startup.
+
+        v2: has qualified_name column (unambiguous joins).
+        v1: only node_name (legacy — joins on (node_name, file_path) or bare node_name).
+        """
+        try:
+            cols = self._conn.execute("PRAGMA table_info(node_snippets)").fetchall()
+            names = {r[1] for r in cols}
+            if "qualified_name" in names:
+                self._snippet_schema = "v2"
+            else:
+                self._snippet_schema = "v1"
+        except Exception:
+            self._snippet_schema = "v1"
+        _vmsg("CRG SNIPPET schema: %s", self._snippet_schema)
+
+    def _snippet_join_clause(self, alias: str = "n", salias: str = "s") -> str:
+        """Return the SQL JOIN clause to match snippets to nodes.
+
+        v2: join on qualified_name (unambiguous).
+        v1: join on (node_name, file_path) pair (best effort, may collide for
+             duplicate names — but v1 is legacy and gradually replaced by re-sync).
+        """
+        if self._snippet_schema == "v2":
+            return f"JOIN nodes {alias} ON {alias}.qualified_name = {salias}.qualified_name"
+        return f"JOIN nodes {alias} ON {alias}.name = {salias}.node_name AND {alias}.file_path = {salias}.file_path"
 
     def _extract_repo_prefix(self) -> str:
         """Extract the repo root prefix for path normalization.
@@ -271,6 +312,41 @@ class CRGProvider(IntelligenceProvider):
         if self._repo_prefix and p.lower().startswith(self._repo_prefix.lower()):
             return p[len(self._repo_prefix):]
         return p
+
+    def build_valid_paths(self):
+        """Walk REPO_DIR once and cache the set of repo-relative file paths.
+
+        Used for path validation: results whose file_path isn't in this set
+        are tagged [stale] (phantom files from a stale graph or rewrite mismatch).
+        ~100ms for a typical repo. Call after _sync_from_pod or on first use.
+        """
+        if self._valid_paths is not None:
+            return self._valid_paths
+        repo_dir = self.proj.get("repo_dir")
+        if not repo_dir or not os.path.isdir(repo_dir):
+            self._valid_paths = set()
+            return self._valid_paths
+        valid = set()
+        repo_prefix = repo_dir.replace("\\", "/").rstrip("/") + "/"
+        for root, _dirs, files in os.walk(repo_dir):
+            for f in files:
+                full = os.path.join(root, f).replace("\\", "/")
+                if full.lower().startswith(repo_prefix.lower()):
+                    valid.add(full[len(repo_prefix):])
+                else:
+                    valid.add(full)
+        self._valid_paths = valid
+        _vmsg("CRG VALID_PATHS: cached %d files from %s", len(valid), repo_dir)
+        return valid
+
+    def is_path_valid(self, repo_rel_path: str) -> bool:
+        """Check if a repo-relative path exists in the project filesystem."""
+        if not repo_rel_path:
+            return False
+        if self._valid_paths is None:
+            self.build_valid_paths()
+        p = repo_rel_path.replace("\\", "/")
+        return p in self._valid_paths or p.lstrip("/") in self._valid_paths
 
     @staticmethod
     def _extract_terms(query: str) -> list[str]:
@@ -675,6 +751,37 @@ class CRGProvider(IntelligenceProvider):
                     pass
 
         if not start_nodes:
+            # Snippet fallback: scan node_snippets for the symbol string.
+            # Catches object property values (TRACK_ZIK), string literals,
+            # and dotted accessors that are never graph nodes but DO appear
+            # in source snippets. Returns the containing files directly —
+            # no BFS needed (the snippets define/use the value).
+            try:
+                if self._snippet_schema == "v2":
+                    snip_rows = conn.execute(
+                        "SELECT DISTINCT file_path FROM node_snippets "
+                        "WHERE LOWER(snippet) LIKE ? LIMIT 50",
+                        (f"%{sym_lower}%",)
+                    ).fetchall()
+                else:
+                    snip_rows = conn.execute(
+                        "SELECT DISTINCT s.node_name, n.file_path FROM node_snippets s "
+                        "LEFT JOIN nodes n ON n.name = s.node_name "
+                        "WHERE LOWER(s.snippet) LIKE ? LIMIT 50",
+                        (f"%{sym_lower}%",)
+                    ).fetchall()
+                if snip_rows:
+                    result_files = set()
+                    for r in snip_rows:
+                        fp = r["file_path"]
+                        if fp:
+                            result_files.add(self._normalize_path(fp))
+                    if result_files:
+                        _vmsg("CRG BFS near '%s': snippet fallback -> %d files",
+                              symbol[:40], len(result_files))
+                        return result_files
+            except Exception as e:
+                log.warning("CRG BFS snippet fallback failed: %s", e)
             return set()
 
         frontier = set()
@@ -752,13 +859,17 @@ class CRGProvider(IntelligenceProvider):
         if not terms:
             return []
 
-        # If near is provided, compute the allowed file set ONCE
+        # If near is provided, compute the allowed file set ONCE.
+        # If near can't be resolved (not a graph symbol AND not in snippets),
+        # we do NOT zero-out — run unfiltered and tag results as near_unresolved.
         near_files = None
+        near_unresolved = False
         if near:
             near_files = self._bfs_files_for_symbol(near, self._NEAR_HOPS)
             if not near_files:
-                _vmsg("CRG SEARCH: near '%s' not found — returning empty", near[:50])
-                return []
+                _vmsg("CRG SEARCH: near '%s' not found — running unfiltered", near[:50])
+                near_files = None
+                near_unresolved = True
 
         # Pass 0a: Path LIKE — bare paths + graph connections
         path_results = self._path_search(query, near=near)
@@ -864,12 +975,21 @@ class CRGProvider(IntelligenceProvider):
                 "mode": "search",
             })
 
-        # If near is provided, filter ALL results to only files in the near subgraph
+        # If near is provided, filter ALL results to only files in the near subgraph.
+        # If near was unresolved (near_files is None + near_unresolved), skip
+        # filtering and tag all results so the format layer can emit guidance.
         if near_files is not None:
             results = [r for r in results if r.get("file_path") in near_files]
+        elif near_unresolved:
+            for r in results:
+                reasons = r.get("reason", [])
+                if "near_unresolved" not in reasons:
+                    reasons.append("near_unresolved")
+                    r["reason"] = reasons
 
-        _vmsg("CRG SEARCH: query='%s' terms=%s near='%s' -> %d results (path=%d fts=%d)",
-              query[:50], terms[:5], near[:30], len(results), len(path_results), len(file_scores))
+        _vmsg("CRG SEARCH: query='%s' terms=%s near='%s' -> %d results (path=%d fts=%d%s)",
+              query[:50], terms[:5], near[:30], len(results), len(path_results),
+              len(file_scores), " [near_unresolved]" if near_unresolved else "")
 
         # Fallback: node_modules .d.ts index (external packages not in graph)
         if len(results) < 3:
@@ -1040,9 +1160,14 @@ class CRGProvider(IntelligenceProvider):
             for r in det_results[:max_results]:
                 is_path = "path_match" in r.get("reason", [])
                 is_exact = r.get("exact_match", False)
-                r["confidence"] = "HIGH" if (is_path or is_exact) else "MEDIUM"
-                r["confidence_reason"] = ("path match" if is_path else
-                                          ("exact match" if is_exact else "FTS match"))
+                is_near_unresolved = "near_unresolved" in r.get("reason", [])
+                if is_near_unresolved:
+                    r["confidence"] = "LOW"
+                    r["confidence_reason"] = "near= not resolved; showing unfiltered results"
+                else:
+                    r["confidence"] = "HIGH" if (is_path or is_exact) else "MEDIUM"
+                    r["confidence_reason"] = ("path match" if is_path else
+                                              ("exact match" if is_exact else "FTS match"))
                 r["semantic_score"] = 0.0
             _vmsg("CRG ROUTER: query='%s' -> deterministic only (path=%s exact=%d) -> %d results",
                   query[:50], has_path_match, exact_count, len(det_results[:max_results]))
@@ -1063,8 +1188,13 @@ class CRGProvider(IntelligenceProvider):
             # No semantic results — return deterministic with LOW confidence
             for r in det_results[:max_results]:
                 is_exact = r.get("exact_match", False)
-                r["confidence"] = "MEDIUM" if is_exact else "LOW"
-                r["confidence_reason"] = ("exact match" if is_exact else "FTS only, no semantic match")
+                is_near_unresolved = "near_unresolved" in r.get("reason", [])
+                if is_near_unresolved:
+                    r["confidence"] = "LOW"
+                    r["confidence_reason"] = "near= not resolved; showing unfiltered results"
+                else:
+                    r["confidence"] = "MEDIUM" if is_exact else "LOW"
+                    r["confidence_reason"] = ("exact match" if is_exact else "FTS only, no semantic match")
                 r["semantic_score"] = 0.0
             if not det_results:
                 return [{
@@ -1392,7 +1522,7 @@ class CRGProvider(IntelligenceProvider):
 
         try:
             rows = conn.execute(
-                f"SELECT name, file_path, line_start, line_end FROM nodes "
+                f"SELECT name, qualified_name, file_path, line_start, line_end FROM nodes "
                 f"WHERE name IN ({placeholders}) AND file_path IS NOT NULL "
                 f"ORDER BY LENGTH(name) ASC LIMIT 50",
                 query_names
@@ -1407,10 +1537,19 @@ class CRGProvider(IntelligenceProvider):
                     continue
                 snippet = ""
                 try:
-                    snip_row = conn.execute(
-                        "SELECT snippet FROM node_snippets WHERE node_name = ?",
-                        (name,)
-                    ).fetchone()
+                    if self._snippet_schema == "v2":
+                        qname = r["qualified_name"] or f"{name}|{r['file_path']}"
+                        snip_row = conn.execute(
+                            "SELECT snippet FROM node_snippets WHERE qualified_name = ?",
+                            (qname,)
+                        ).fetchone()
+                    else:
+                        # v1 schema: node_snippets only has (node_name, snippet).
+                        # No file_path column — use bare node_name lookup.
+                        snip_row = conn.execute(
+                            "SELECT snippet FROM node_snippets WHERE node_name = ?",
+                            (name,)
+                        ).fetchone()
                     if snip_row and snip_row["snippet"]:
                         snippet = snip_row["snippet"][:max_chars]
                 except Exception:
