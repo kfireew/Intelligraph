@@ -22,5 +22,9 @@ export const endpoints = {
   downloadGraphBuilder: "/download/graph-builder",
   downloadAgent: "/download/agent",
   downloadEnforcePlugin: "/download/enforce-plugin",
-  downloadClaudeHooks: "/download/claude-hooks"
+  downloadClaudeHooks: "/download/claude-hooks",
+  downloadIntelligraphMcp: "/download/intelligraph-mcp",
+  downloadSetupPs1: "/download/setup-ps1",
+  projectSync: (pid) => `/projects/${pid}/sync`,
+  projectMcpUpdate: (pid) => `/projects/${pid}/mcp-update`,
 };

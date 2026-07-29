@@ -9,18 +9,7 @@ export function useProjects() {
   const [tokenExpired, setTokenExpired] = useState(new Set());
   const pollRef = useRef(null);
   const pollingPids = useRef(new Set());
-
-  const fetchProjects = useCallback(async () => {
-    try {
-      setLoading(true);
-      const data = await projectsService.list();
-      setProjects(data || []);
-    } catch (e) {
-      console.error("fetchProjects:", e);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  const fetchProjectsRef = useRef(async () => {});
 
   const stopPolling = useCallback(() => {
     if (pollRef.current) {
@@ -55,11 +44,32 @@ export function useProjects() {
         }
         if (pollingPids.current.size === 0) {
           stopPolling();
-          fetchProjects();
+          fetchProjectsRef.current();
         }
       }, 2000);
     }
-  }, [fetchProjects, stopPolling]);
+  }, [stopPolling]);
+
+  const fetchProjects = useCallback(async () => {
+    try {
+      setLoading(true);
+      const data = await projectsService.list();
+      setProjects(data || []);
+      // Restart polling for any project that's mid-build (e.g. after page refresh)
+      for (const p of (data || [])) {
+        if (["building", "queued", "cloning", "pulling"].includes(p.status)) {
+          startPolling(p.id);
+        }
+      }
+    } catch (e) {
+      console.error("fetchProjects:", e);
+    } finally {
+      setLoading(false);
+    }
+  }, [startPolling]);
+
+  // Keep ref in sync so the polling interval can call the latest fetchProjects
+  fetchProjectsRef.current = fetchProjects;
 
   useEffect(() => () => stopPolling(), [stopPolling]);
 

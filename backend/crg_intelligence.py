@@ -298,6 +298,8 @@ class CRGProvider(IntelligenceProvider):
             "point", "run", "available", "targets", "affected", "generators",
             "workspace", "callers", "implementation", "invoke", "invokes",
             "operate", "main", "pipeline", "algorithm", "flow",
+            "type", "types", "enum", "enums", "interface", "interfaces",
+            "constant", "constants", "import", "imports", "export", "exports",
             # Intent keywords (already captured by semantic router)
             "impact", "blast", "radius", "test", "tests", "coverage", "spec",
             "secure", "security", "vulnerable", "debug", "error", "bug",
@@ -333,8 +335,14 @@ class CRGProvider(IntelligenceProvider):
             compounds.append("_".join(current_compound))
 
         # Return compounds first (more specific), then individual words.
+        # Dedupe: "plane type enum plane types" -> ["plane"] not ["plane", "plane"].
         # If nothing extracted (e.g. all stopwords), fall back to the raw query.
-        terms = compounds + words
+        seen = set()
+        terms = []
+        for t in compounds + words:
+            if t not in seen:
+                seen.add(t)
+                terms.append(t)
         return terms or [query.lower().strip()]
 
     # ── Mode 0: Target extraction ──────────────────────────────────
@@ -406,36 +414,364 @@ class CRGProvider(IntelligenceProvider):
             log.warning("CRG extract_target FTS failed for '%s': %s", term, e)
         return None
 
-    # ── Mode 1: FTS5 search ────────────────────────────────────────
+    # ── Mode 1: Deterministic search (path + symbol LIKE + FTS5) ───
 
-    def search(self, query: str, max_results: int = 20) -> list[dict]:
-        """FTS5 search for symbols/files matching the query.
+    _MAX_PATH_FILES = 50  # safety net for absurdly broad matches only
+    _MAX_CONNECTIONS_PER_FILE = 5
+    _NEAR_HOPS = 3
 
-        A LIKE pre-pass catches camelCase / concatenated matches that FTS
-        tokenization misses (e.g. "zik plane" → "ZikPlane"). FTS then adds
-        tokenized matches. Results carry line_start/line_end so callers
-        (MCP) can give the agent surgical read ranges instead of whole files.
+    def _path_search(self, query: str, near: str = "") -> list[dict]:
+        """Find files by path pattern. Returns bare paths + graph connections.
+
+        Only runs when the query looks path-like (contains /, \\, *, or a file
+        extension). Natural language queries skip this — they'd do a full table
+        scan for nothing.
+        """
+        conn = self._get_conn()
+        raw = query.strip()
+        if not raw or len(raw) < 2:
+            return []
+
+        # Skip path search for natural language queries
+        has_path_char = "/" in raw or "\\" in raw or "*" in raw or "?" in raw
+        has_file_ext = any(raw.lower().endswith(f".{e}") for e in
+                           ("ts", "js", "jsx", "tsx", "py", "java", "go", "rs",
+                            "rb", "php", "c", "cpp", "h", "cs", "kt", "swift", "scala"))
+        word_count = len(raw.split())
+        if not has_path_char and not has_file_ext and word_count > 2:
+            return []
+
+        path_query = raw.replace("\\", "/").lower()
+        like_pattern = path_query.replace("**", "%").replace("*", "%").replace("?", "_")
+        if "%" not in like_pattern and "_" not in like_pattern:
+            like_pattern = f"%{like_pattern}%"
+
+        try:
+            rows = conn.execute(
+                "SELECT DISTINCT file_path FROM nodes "
+                "WHERE file_path IS NOT NULL "
+                "AND REPLACE(LOWER(file_path), '\\', '/') LIKE ? "
+                f"LIMIT {self._MAX_PATH_FILES}",
+                (like_pattern,)
+            ).fetchall()
+        except Exception:
+            return []
+
+        # Normalize and deduplicate file paths
+        matched_files = []
+        seen = set()
+        for r in rows:
+            fp = self._normalize_path(r["file_path"])
+            if not fp or _is_junk_path(fp) or _is_test_path(fp):
+                continue
+            if fp in seen:
+                continue
+            seen.add(fp)
+            matched_files.append((fp, r["file_path"]))
+
+        if not matched_files:
+            return []
+
+        # If `near` param: BFS from near symbol, filter to connected files only
+        if near:
+            near_files = self._bfs_files_for_symbol(near, self._NEAR_HOPS)
+            if near_files:
+                filtered = [(fp, raw_fp) for fp, raw_fp in matched_files if fp in near_files]
+                if filtered:
+                    matched_files = filtered
+                    _vmsg("CRG PATH+NEAR: '%s' near '%s' -> %d files (filtered from %d)",
+                          raw[:50], near[:50], len(matched_files), len(seen))
+
+        # Rank: by edge count (centrality). Hub files first.
+        # One query for all matched files.
+        if len(matched_files) > 1:
+            raw_paths = [rf for _, rf in matched_files]
+            placeholders = ",".join("?" * len(raw_paths))
+            try:
+                edge_counts = conn.execute(
+                    f"SELECT file_path, COUNT(*) as cnt FROM edges "
+                    f"WHERE file_path IN ({placeholders}) "
+                    f"GROUP BY file_path",
+                    raw_paths
+                ).fetchall()
+                count_map = {self._normalize_path(r["file_path"]): r["cnt"] for r in edge_counts}
+            except Exception:
+                count_map = {}
+            matched_files.sort(key=lambda x: -count_map.get(x[0], 0))
+
+        # Build results: path + best symbol name + connections (max 5)
+        results = []
+        for fp, raw_fp in matched_files:
+            connections = self._get_file_connections(raw_fp)
+            # Look up the best (shortest non-File) symbol name from this file
+            best_name, best_kind, best_sig, best_ls, best_le = "", "", "", 0, 0
+            try:
+                sym_row = conn.execute(
+                    "SELECT name, kind, signature, line_start, line_end FROM nodes "
+                    "WHERE file_path = ? AND name IS NOT NULL AND name != '' "
+                    "AND kind != 'File' "
+                    "ORDER BY LENGTH(name) ASC, line_start ASC LIMIT 1",
+                    (raw_fp,)
+                ).fetchone()
+                if sym_row:
+                    best_name = sym_row["name"] or ""
+                    best_kind = sym_row["kind"] or ""
+                    best_sig = sym_row["signature"] or ""
+                    best_ls = sym_row["line_start"] or 0
+                    best_le = sym_row["line_end"] or 0
+            except Exception:
+                pass
+            results.append({
+                "file_path": fp,
+                "name": best_name,
+                "kind": best_kind,
+                "signature": best_sig,
+                "line_start": best_ls,
+                "line_end": best_le,
+                "score": 20.0,
+                "exact_match": True,
+                "matched_terms": [raw],
+                "reason": ["path_match"],
+                "source": "crg",
+                "mode": "search",
+                "connections": connections,
+            })
+
+        if results:
+            _vmsg("CRG PATH: query='%s' near='%s' -> %d files", raw[:50], near[:30], len(results))
+        return results
+
+    def _search_nm_index(self, terms: list[str], near: str = "") -> list[dict]:
+        """Search node_modules .d.ts index for symbols not in the graph.
+
+        Falls back when graph search finds <3 results. Returns symbols from
+        external npm packages (e.g. @romach/enums) with their .d.ts file:line.
+        """
+        nm_path = self.proj.get("nm_index_path")
+        if not nm_path or not os.path.isfile(nm_path):
+            return []
+        try:
+            nm_conn = sqlite3.connect(f"file:{nm_path}?mode=ro", uri=True)
+            nm_conn.row_factory = sqlite3.Row
+        except Exception:
+            return []
+
+        results = []
+        try:
+            for term in terms:
+                try:
+                    rows = nm_conn.execute(
+                        "SELECT name, kind, file_path, line_start, line_end, signature, package_name "
+                        "FROM nm_symbols WHERE LOWER(name) LIKE ? "
+                        "ORDER BY LENGTH(name) ASC LIMIT 10",
+                        (f"%{term}%",)
+                    ).fetchall()
+                except Exception:
+                    continue
+                for r in rows:
+                    is_exact = r["name"].lower() == term.lower()
+                    results.append({
+                        "file_path": r["file_path"],
+                        "name": r["name"],
+                        "kind": r["kind"] or "External",
+                        "signature": r["signature"] or "",
+                        "line_start": r["line_start"] or 0,
+                        "line_end": r["line_end"] or 0,
+                        "score": 15.0 if is_exact else 8.0,
+                        "exact_match": is_exact,
+                        "matched_terms": [term],
+                        "reason": ["node_modules"],
+                        "source": "node_modules",
+                        "mode": "search",
+                        "package": r["package_name"] or "",
+                    })
+        finally:
+            nm_conn.close()
+
+        if results:
+            _vmsg("NM SEARCH: terms=%s -> %d results", terms[:3], len(results))
+        return results
+
+    def _get_file_connections(self, raw_file_path: str) -> list[str]:
+        """Get up to 5 symbol names connected to symbols in this file (both directions).
+        Only returns actual symbol names (Function/Class/Method/etc.), not File-kind nodes."""
+        conn = self._get_conn()
+        connections = set()
+        try:
+            outgoing = conn.execute(
+                "SELECT DISTINCT n2.name FROM nodes n1 "
+                "JOIN edges e ON e.source_qualified = n1.qualified_name "
+                "JOIN nodes n2 ON n2.qualified_name = e.target_qualified "
+                "WHERE n1.file_path = ? AND n2.name IS NOT NULL AND n2.file_path != ? "
+                "AND n2.kind != 'File' "
+                "LIMIT ?",
+                (raw_file_path, raw_file_path, self._MAX_CONNECTIONS_PER_FILE)
+            ).fetchall()
+            for r in outgoing:
+                connections.add(r["name"])
+        except Exception:
+            pass
+        try:
+            if len(connections) < self._MAX_CONNECTIONS_PER_FILE:
+                remaining = self._MAX_CONNECTIONS_PER_FILE - len(connections)
+                incoming = conn.execute(
+                    "SELECT DISTINCT n2.name FROM nodes n1 "
+                    "JOIN edges e ON e.target_qualified = n1.qualified_name "
+                    "JOIN nodes n2 ON n2.qualified_name = e.source_qualified "
+                    "WHERE n1.file_path = ? AND n2.name IS NOT NULL AND n2.file_path != ? "
+                    "AND n2.kind != 'File' "
+                    "LIMIT ?",
+                    (raw_file_path, raw_file_path, remaining)
+                ).fetchall()
+                for r in incoming:
+                    connections.add(r["name"])
+        except Exception:
+            pass
+        return sorted(connections)[:self._MAX_CONNECTIONS_PER_FILE]
+
+    def _bfs_files_for_symbol(self, symbol: str, max_depth: int) -> set[str]:
+        """BFS from a symbol or file path, return all file_paths within max_depth hops.
+
+        Accepts either a symbol name ('AuthService') or a file path
+        ('src/auth/service.ts'). If it looks like a path (contains / or \\.),
+        matches against file_path; otherwise matches against symbol names.
+        """
+        conn = self._get_conn()
+        sym_lower = symbol.lower().strip()
+
+        # Detect: is this a file path or a symbol name?
+        is_path = "/" in sym_lower or "\\" in sym_lower or sym_lower.endswith(
+            tuple(f".{e}" for e in ("ts", "js", "jsx", "tsx", "py", "java", "go", "rs", "rb", "php", "c", "cpp", "h", "cs", "kt", "swift", "scala")))
+
+        start_nodes = []
+        if is_path:
+            # Match by file path (LIKE substring)
+            path_pattern = f"%{sym_lower.replace(chr(92), '/')}%"
+            try:
+                start_nodes = conn.execute(
+                    "SELECT qualified_name, file_path FROM nodes "
+                    "WHERE file_path IS NOT NULL "
+                    "AND REPLACE(LOWER(file_path), '\\', '/') LIKE ? LIMIT 20",
+                    (path_pattern,)
+                ).fetchall()
+            except Exception:
+                pass
+        else:
+            # Match by symbol name
+            start_nodes = conn.execute(
+                "SELECT qualified_name, file_path FROM nodes "
+                "WHERE LOWER(name) = ? OR LOWER(qualified_name) LIKE ? LIMIT 10",
+                (sym_lower, f"%{sym_lower}%")
+            ).fetchall()
+            if not start_nodes:
+                try:
+                    start_nodes = conn.execute(
+                        "SELECT n.qualified_name, n.file_path FROM nodes_fts f "
+                        "JOIN nodes n ON f.rowid = n.id WHERE nodes_fts MATCH ? LIMIT 10",
+                        (f'"{symbol}"',)
+                    ).fetchall()
+                except Exception:
+                    pass
+
+        if not start_nodes:
+            return set()
+
+        frontier = set()
+        result_files = set()
+        for n in start_nodes:
+            if n["qualified_name"]:
+                frontier.add(n["qualified_name"])
+            if n["file_path"]:
+                result_files.add(self._normalize_path(n["file_path"]))
+
+        visited = set()
+        depth = 0
+        while frontier and depth < max_depth:
+            depth += 1
+            next_frontier = set()
+            for qname in frontier:
+                if qname in visited:
+                    continue
+                visited.add(qname)
+                try:
+                    # Outgoing edges
+                    for r in conn.execute(
+                        "SELECT target_qualified FROM edges WHERE source_qualified = ?",
+                        (qname,)
+                    ).fetchall():
+                        if r["target_qualified"] and r["target_qualified"] not in visited:
+                            next_frontier.add(r["target_qualified"])
+                    # Incoming edges
+                    for r in conn.execute(
+                        "SELECT source_qualified, n.file_path FROM edges e "
+                        "LEFT JOIN nodes n ON n.qualified_name = e.source_qualified "
+                        "WHERE e.target_qualified = ?",
+                        (qname,)
+                    ).fetchall():
+                        if r["source_qualified"] and r["source_qualified"] not in visited:
+                            next_frontier.add(r["source_qualified"])
+                        if r["file_path"]:
+                            result_files.add(self._normalize_path(r["file_path"]))
+                except Exception:
+                    pass
+            # Also collect file_paths for outgoing edges
+            try:
+                qnames = list(next_frontier)
+                if qnames:
+                    placeholders = ",".join("?" * len(qnames))
+                    for r in conn.execute(
+                        f"SELECT file_path FROM nodes WHERE qualified_name IN ({placeholders})",
+                        qnames
+                    ).fetchall():
+                        if r["file_path"]:
+                            result_files.add(self._normalize_path(r["file_path"]))
+            except Exception:
+                pass
+            frontier = next_frontier - visited
+
+        _vmsg("CRG BFS near '%s': %d files within %d hops", symbol[:40], len(result_files), max_depth)
+        return result_files
+
+    def search(self, query: str, max_results: int = 20, near: str = "") -> list[dict]:
+        """Deterministic search: path LIKE + symbol LIKE + FTS5.
+
+        Three passes, all cheap (indexed columns, no embeddings):
+          Pass 0a: file_path LIKE — finds files by path pattern (bare paths + connections)
+          Pass 0b: symbol name LIKE — catches camelCase/underscore names
+          Pass 1:  FTS5 — tokenized symbol/signature match
+
+        If `near` is provided, ALL results are filtered to only files
+        connected to the near symbol/file (within 3 graph hops).
 
         Returns: [{file_path, name, kind, signature, line_start, line_end,
-                   community_id, score, exact_match, matched_terms, reason, source, mode}]
+                   score, exact_match, matched_terms, reason, source, mode, connections?}]
         """
         conn = self._get_conn()
         terms = self._extract_terms(query)
         if not terms:
             return []
 
+        # If near is provided, compute the allowed file set ONCE
+        near_files = None
+        if near:
+            near_files = self._bfs_files_for_symbol(near, self._NEAR_HOPS)
+            if not near_files:
+                _vmsg("CRG SEARCH: near '%s' not found — returning empty", near[:50])
+                return []
+
+        # Pass 0a: Path LIKE — bare paths + graph connections
+        path_results = self._path_search(query, near=near)
+        path_files = {r["file_path"] for r in path_results}
+
         file_scores = defaultdict(lambda: {"score": 0.0, "names": [], "kinds": set(),
                                            "matched_terms": set(), "signatures": [],
                                            "exact_match": False,
                                            "line_start": 0, "line_end": 0})
 
-        # Pass 0: LIKE pre-pass — catches camelCase / concatenated / underscore names.
-        # "zik plane" → "zikplane" → matches "ZikPlane"
-        # "hybrid_search" → tries both "hybrid_search" AND "hybridsearch"
-        # FTS5 tokenizes on underscore so "hybrid_search" needs LIKE to match it.
+        # Pass 0b: Symbol name LIKE — catches camelCase / concatenated / underscore names.
+        # No kind filter — File, Enum, Interface, Test all match.
         for term in terms:
             like_term = term.replace(" ", "").replace("_", "")
-            # Try both the original term and the underscore-stripped version
             for try_term in [term, like_term]:
                 if len(try_term) < 3:
                     continue
@@ -443,14 +779,15 @@ class CRGProvider(IntelligenceProvider):
                     rows = conn.execute(
                         "SELECT name, kind, file_path, signature, community_id, "
                         "line_start, line_end FROM nodes "
-                        "WHERE kind IN ('Function','Class','Method') "
-                        "AND LOWER(name) LIKE ? "
+                        "WHERE LOWER(name) LIKE ? "
                         "ORDER BY LENGTH(name) ASC LIMIT 10",
                         (f"%{try_term}%",)
                     ).fetchall()
                     for r in rows:
                         fp = self._normalize_path(r["file_path"])
                         if not fp or _is_junk_path(fp) or _is_test_path(fp):
+                            continue
+                        if fp in path_files:
                             continue
                         is_exact = r["name"].lower() == try_term
                         entry = file_scores[fp]
@@ -471,7 +808,7 @@ class CRGProvider(IntelligenceProvider):
 
         # Pass 1: FTS5 search
         for i, term in enumerate(terms):
-            weight = 5.0 if i < 3 else 3.0  # earlier terms weighted higher
+            weight = 5.0 if i < 3 else 3.0
             try:
                 rows = conn.execute(
                     "SELECT n.file_path, n.name, n.kind, n.signature, n.community_id, "
@@ -483,6 +820,8 @@ class CRGProvider(IntelligenceProvider):
                 for r in rows:
                     fp = self._normalize_path(r["file_path"])
                     if not fp or _is_junk_path(fp):
+                        continue
+                    if fp in path_files:
                         continue
                     is_exact = r["name"].lower() == term.lower()
                     entry = file_scores[fp]
@@ -506,7 +845,8 @@ class CRGProvider(IntelligenceProvider):
             if len(data["matched_terms"]) >= 2:
                 data["score"] *= 1.5
 
-        results = []
+        # Merge: path results (per-symbol) first, then FTS/symbol results (per-file)
+        results = list(path_results)
         for fp, data in sorted(file_scores.items(), key=lambda x: -x[1]["score"])[:max_results]:
             results.append({
                 "file_path": fp,
@@ -522,8 +862,20 @@ class CRGProvider(IntelligenceProvider):
                 "source": "crg",
                 "mode": "search",
             })
-        _vmsg("CRG SEARCH: query='%s' terms=%s -> %d files", query[:50], terms[:5], len(results))
-        return results
+
+        # If near is provided, filter ALL results to only files in the near subgraph
+        if near_files is not None:
+            results = [r for r in results if r.get("file_path") in near_files]
+
+        _vmsg("CRG SEARCH: query='%s' terms=%s near='%s' -> %d results (path=%d fts=%d)",
+              query[:50], terms[:5], near[:30], len(results), len(path_results), len(file_scores))
+
+        # Fallback: node_modules .d.ts index (external packages not in graph)
+        if len(results) < 3:
+            nm_results = self._search_nm_index(terms, near=near)
+            results.extend(nm_results)
+
+        return results[:max_results]
 
     # ── Mode 1b: Semantic (embedding) search ──────────────────────
 
@@ -654,51 +1006,85 @@ class CRGProvider(IntelligenceProvider):
         _vmsg("CRG SEMANTIC: query='%s' -> %d results", query[:50], len(results))
         return results
 
-    def hybrid_search(self, query: str, max_results: int = 20, embedding_weight: float = 0.4) -> list[dict]:
-        """Hybrid search using Reciprocal Rank Fusion (RRF).
+    def hybrid_search(self, query: str, max_results: int = 20, embedding_weight: float = 0.4, near: str = "") -> list[dict]:
+        """Sequential retrieval router: deterministic → semantic fallback.
 
-        RRF is rank-invariant: it uses each system's ranking, not raw scores,
-        so mismatched score scales don't corrupt the blend. Files appearing
-        in both FTS and semantic results get two additive terms -> higher
-        RRF score. Files in only one system get a single term -> lower score.
+        Stage 1 (Deterministic): path LIKE + symbol LIKE + FTS5.
+        If path matches found OR >=3 exact symbol matches → return immediately.
+        No embeddings computed. Fast (<1s).
 
-        After RRF ranking, an adaptive cutoff drops results below 50% of the
-        top score — so specific queries return 2-3 files and broad queries
-        return 5-8, instead of always returning max_results.
+        Stage 2 (Semantic): only if Stage 1 produced insufficient HIGH results.
+        Runs embedding search, merges with RRF.
 
-        Each result also carries a `confidence` (HIGH/MEDIUM/LOW) and
-        `confidence_reason` string so callers can decide whether to fetch
-        more context (snippets, full files) or trust the result.
+        This prevents retry loops: one call produces the best available answer
+        using at most one deterministic stage and, if necessary, one semantic
+        stage. No internal loops.
+
+        Each result carries `confidence` (HIGH/MEDIUM/LOW) and
+        `confidence_reason`. The LLM sees only confidence — not which
+        stage produced the result.
         """
-        fts_weight = 1.0 - embedding_weight
-        fts_results = self.search(query, max_results=max_results * 2)
+        # Stage 1: Deterministic
+        det_results = self.search(query, max_results=max_results * 2, near=near)
 
-        if embedding_weight <= 0.0:
-            ranked = sorted(fts_results, key=lambda x: -x.get("score", 0))
-            if ranked:
-                top = ranked[0].get("score", 0)
-                ranked = [r for r in ranked if r.get("score", 0) >= top * 0.3]
-            for r in ranked[:max_results]:
-                r["confidence"] = "MEDIUM" if r.get("exact_match") else "LOW"
-                r["confidence_reason"] = ("exact match + FTS" if r.get("exact_match") else "FTS only")
+        has_path_match = any("path_match" in r.get("reason", []) for r in det_results)
+        exact_count = sum(1 for r in det_results if r.get("exact_match"))
+
+        # Short-circuit: deterministic found enough OR embeddings disabled.
+        # `len(det_results) >= 3` is the key threshold: if FTS/LIKE/path found
+        # 3+ results, semantic adds latency (~50s first call for encoder load
+        # + 28k-node embedding) without changing the answer meaningfully.
+        # Semantic is reserved for genuinely sparse queries (<3 det results).
+        if has_path_match or len(det_results) >= 3 or exact_count >= 3 or embedding_weight <= 0.0:
+            for r in det_results[:max_results]:
+                is_path = "path_match" in r.get("reason", [])
+                is_exact = r.get("exact_match", False)
+                r["confidence"] = "HIGH" if (is_path or is_exact) else "MEDIUM"
+                r["confidence_reason"] = ("path match" if is_path else
+                                          ("exact match" if is_exact else "FTS match"))
                 r["semantic_score"] = 0.0
-            return ranked[:max_results]
+            _vmsg("CRG ROUTER: query='%s' -> deterministic only (path=%s exact=%d) -> %d results",
+                  query[:50], has_path_match, exact_count, len(det_results[:max_results]))
+            return det_results[:max_results]
 
+        # Stage 2: Semantic fallback
         sem_results = self.semantic_search(query, max_results=max_results * 2)
-        if embedding_weight >= 1.0:
-            ranked = sorted(sem_results, key=lambda x: -x.get("score", 0))
-            if ranked:
-                top = ranked[0].get("score", 0)
-                ranked = [r for r in ranked if r.get("score", 0) >= top * 0.3]
-            for r in ranked[:max_results]:
-                r["confidence"] = "HIGH" if r.get("score", 0) >= 0.5 else "LOW"
-                r["confidence_reason"] = f"semantic only ({r.get('score', 0):.2f})"
-                r["semantic_score"] = r.get("score", 0)
-            return ranked[:max_results]
 
-        k = 30  # RRF constant — lower k = steeper drop-off (k=60 is too flat for 10-20 results)
+        # If near is provided, filter semantic results too
+        if near and sem_results:
+            near_files_sem = self._bfs_files_for_symbol(near, self._NEAR_HOPS)
+            if near_files_sem:
+                sem_results = [r for r in sem_results if r.get("file_path") in near_files_sem]
+            else:
+                sem_results = []
+
+        if not sem_results:
+            # No semantic results — return deterministic with LOW confidence
+            for r in det_results[:max_results]:
+                is_exact = r.get("exact_match", False)
+                r["confidence"] = "MEDIUM" if is_exact else "LOW"
+                r["confidence_reason"] = ("exact match" if is_exact else "FTS only, no semantic match")
+                r["semantic_score"] = 0.0
+            if not det_results:
+                return [{
+                    "file_path": "", "name": "", "kind": "",
+                    "score": 0.0, "confidence": "LOW",
+                    "confidence_reason": "No exact symbol or file match found. Semantic retrieval also produced no candidates. Refine with a symbol name, filename, or feature description.",
+                    "semantic_score": 0.0, "reason": ["no_match"],
+                    "source": "crg", "mode": "search",
+                    "line_start": 0, "line_end": 0,
+                    "exact_match": False, "matched_terms": [],
+                }]
+            _vmsg("CRG ROUTER: query='%s' -> deterministic only (no semantic results) -> %d results",
+                  query[:50], len(det_results[:max_results]))
+            return det_results[:max_results]
+
+        # Merge deterministic + semantic via RRF
+        fts_weight = 1.0 - embedding_weight
+        k = 30
+
         fts_rank = {}
-        for i, r in enumerate(fts_results):
+        for i, r in enumerate(det_results):
             fp = r.get("file_path", "")
             if fp and fp not in fts_rank:
                 fts_rank[fp] = i + 1
@@ -709,8 +1095,7 @@ class CRGProvider(IntelligenceProvider):
             if fp and fp not in sem_rank:
                 sem_rank[fp] = i + 1
 
-        # Build lookup MERGING both result lists (not overwriting) so that
-        # semantic_score, exact_match, signature, matched_terms, line_start/end all survive.
+        # Build lookup merging both result lists
         lookup = {}
         for r in sem_results:
             fp = r.get("file_path", "")
@@ -725,7 +1110,7 @@ class CRGProvider(IntelligenceProvider):
                     "line_start": r.get("line_start", 0),
                     "line_end": r.get("line_end", 0),
                 }
-        for r in fts_results:
+        for r in det_results:
             fp = r.get("file_path", "")
             if fp:
                 if fp not in lookup:
@@ -744,7 +1129,6 @@ class CRGProvider(IntelligenceProvider):
                 lookup[fp]["fts_score"] = r.get("score", 0)
                 if not lookup[fp].get("signature") and r.get("signature"):
                     lookup[fp]["signature"] = r.get("signature", "")
-                # Prefer FTS line numbers if semantic had 0
                 if r.get("line_start") and not lookup[fp].get("line_start"):
                     lookup[fp]["line_start"] = r["line_start"]
                 if r.get("line_end") and not lookup[fp].get("line_end"):
@@ -769,7 +1153,6 @@ class CRGProvider(IntelligenceProvider):
             if fp in sem_rank:
                 reasons.add("rrf_semantic")
             entry["reason"] = sorted(reasons)
-            # Confidence signals
             in_both = fp in fts_rank and fp in sem_rank
             sem_score = base.get("semantic_score", 0.0)
             exact = base.get("exact_match", False)
@@ -789,9 +1172,20 @@ class CRGProvider(IntelligenceProvider):
             ranked = [r for r in ranked if r["score"] >= cutoff]
 
         results = ranked[:max_results]
-        _vmsg("CRG HYBRID(RRF): query='%s' ew=%.1f -> %d results (fts=%d sem=%d, cutoff=%.1f)",
-              query[:50], embedding_weight, len(results), len(fts_results), len(sem_results),
-              ranked[0]["score"] * 0.3 if ranked else 0)
+        # If all results are LOW confidence, append guidance
+        if results and all(r.get("confidence") == "LOW" for r in results):
+            results.append({
+                "file_path": "", "name": "", "kind": "",
+                "score": 0.0, "confidence": "LOW",
+                "confidence_reason": "No exact match found. Refine with a symbol name, filename, or feature description.",
+                "semantic_score": 0.0, "reason": ["low_confidence_guidance"],
+                "source": "crg", "mode": "search",
+                "line_start": 0, "line_end": 0,
+                "exact_match": False, "matched_terms": [],
+            })
+
+        _vmsg("CRG ROUTER: query='%s' -> deterministic+semantic (det=%d sem=%d) -> %d results",
+              query[:50], len(det_results), len(sem_results), len(results))
         return results
 
     @staticmethod
@@ -1309,7 +1703,18 @@ class CRGProvider(IntelligenceProvider):
                     break
 
         # BFS over graphify links — ALL link types, no depth limit
+        # Build adjacency dict ONCE (O(links)) instead of scanning all links
+        # per frontier node (O(frontier × links)).
         if gf_target_ids:
+            gf_adj = defaultdict(list)  # node_id -> [(connected_id, edge_type)]
+            for l in gf_links:
+                src = l.get("source") or l.get("from")
+                tgt = l.get("target") or l.get("to")
+                edge_type = l.get("type") or l.get("kind") or "link"
+                if src and tgt:
+                    gf_adj[src].append((tgt, edge_type))
+                    gf_adj[tgt].append((src, edge_type))
+
             gf_visited = set()
             gf_frontier = set(gf_target_ids)
             gf_depth = 0
@@ -1320,16 +1725,8 @@ class CRGProvider(IntelligenceProvider):
                     if nid in gf_visited:
                         continue
                     gf_visited.add(nid)
-                    for l in gf_links:
-                        src = l.get("source") or l.get("from")
-                        tgt = l.get("target") or l.get("to")
-                        edge_type = l.get("type") or l.get("kind") or "link"
-                        connected_id = None
-                        if src == nid and tgt:
-                            connected_id = tgt
-                        elif tgt == nid and src:
-                            connected_id = src
-                        if connected_id and connected_id not in gf_visited:
+                    for connected_id, edge_type in gf_adj.get(nid, []):
+                        if connected_id not in gf_visited:
                             gf_next.add(connected_id)
                             cn = gf_node_lookup.get(connected_id, {})
                             fp = cn.get("source_file", "")

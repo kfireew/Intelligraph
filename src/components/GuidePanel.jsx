@@ -113,11 +113,10 @@ export function GuidePanel({ activePid, activeProject }) {
     : null;
 
   const mcpContainerUrl = siteUrl || "http://localhost:5050";
-  const cleanScriptPath = scriptPath.trim().replace(/^["']|["']$/g, "");
   const tokenArg = mcpToken.trim() || "YOUR-MCP-TOKEN";
-  const repoDir = cleanScriptPath ? cleanScriptPath.replace(/[/\\][^/\\]+$/, "") : "";
-  const scriptArgs = cleanScriptPath
-    ? [cleanScriptPath, "--intelligraph-url", mcpContainerUrl, "--project-id", String(pid), "--mcp-token", tokenArg, "--repo-dir", repoDir]
+  const localMcpPath = "~/.intelligraph/intelligraph_mcp.py";
+  const scriptArgs = pid
+    ? [localMcpPath, "--pod-url", mcpContainerUrl, "--project-id", String(pid), "--mcp-token", tokenArg, "--repo-dir", "."]
     : null;
 
   const mcpCommand = (pid && scriptArgs) ? `python ${scriptArgs.join(" ")}` : null;
@@ -145,6 +144,10 @@ export function GuidePanel({ activePid, activeProject }) {
         },
         plugin: [".opencode/plugins/intelligraph-enforce.js"],
       }, null, 2)
+    : null;
+
+  const setupCommand = (pid && mcpToken)
+    ? `.\\intelligraph-setup.ps1 -PodUrl "${mcpContainerUrl}" -ProjectId ${pid} -McpToken "${mcpToken}"`
     : null;
 
   const handleGenerateToken = async () => {
@@ -197,14 +200,10 @@ export function GuidePanel({ activePid, activeProject }) {
 
   // Wizard steps
   const steps = [
-    { icon: Rocket, title: "Overview", desc: "You need 3 components that work together: the MCP Server (connects your AI assistant to the graph), the Agent Guide (tells the model how to use the tools), and the Enforcement Plugin (blocks grep/glob so the model is forced to use the graph). All three are required." },
-    { icon: Server, title: "Install dependencies", desc: "Run this once on your machine:" },
-    { icon: KeyRound, title: "Generate MCP token", desc: "The MCP server authenticates with this token (not your SSO session). Click generate, then copy it." },
-    { icon: Download, title: "Download MCP server script", desc: "Save this file into your project folder (the folder where you run your AI assistant). Then paste the full path below." },
-    { icon: BookOpen, title: "Download agent guide", desc: "Tells the model when and how to use each Intelligraph tool, and enforces impact() before edits." },
-    { icon: Shield, title: "Download enforcement plugin", desc: "Blocks grep/glob/find so the model is forced to use intelligraph search() instead. Without this, the model falls back to old habits." },
-    { icon: Plug, title: "Copy config file", desc: "Add this config to your AI assistant. It wires up the MCP server + enforcement plugin together." },
-    { icon: Check, title: "Done", desc: "Open your AI assistant in the project folder and ask questions like 'search for authentication' or 'who calls processPayment'. The assistant will use Intelligraph's code graph to answer." },
+    { icon: Rocket, title: "Quick Setup", desc: "Download the setup script and run it in your project folder. It installs everything: agent guide, grep/glob blocker, local MCP, and graph sync. One command does it all." },
+    { icon: KeyRound, title: "Generate MCP token", desc: "The MCP server authenticates with this token (not your SSO session). Click generate, then copy it for the setup command." },
+    { icon: Download, title: "Download + Run", desc: "Download the setup script, put it in your project folder (where you run your AI assistant), and run the command below." },
+    { icon: Check, title: "Done", desc: "Open your AI assistant in the project folder. The MCP server starts locally on launch — it syncs the graph from the pod automatically. Run 'mcp-update' after rebuilding a project to re-sync." },
   ];
 
   const openWizard = () => { setWizardStep(0); setWizardOpen(true); };
@@ -234,6 +233,77 @@ export function GuidePanel({ activePid, activeProject }) {
           How to Setup
         </button>
         {!pid && <p className="text-[10px] text-muted-subtle m-0 mt-2">Select a project first.</p>}
+      </Section>
+
+      {/* ── Quick Setup ── */}
+      <Section title="Quick Setup" icon={Rocket}>
+        <p className="text-xs text-text-secondary m-0 mb-3 leading-relaxed">
+          One command installs the agent guide, grep/glob blocker, local MCP, and graph sync.
+          The local MCP serves all tools from a synced <code className="px-1 py-0.5 rounded bg-accent/10 text-accent-light text-[11px] font-mono">graph.db</code> — zero pod requests during normal operation.
+        </p>
+
+        {activeProject && isReady && mcpToken ? (
+          <div className="space-y-3">
+            <a href={endpoints.downloadSetupPs1} download
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-accent/15 hover:bg-accent/25 text-accent-light text-xs font-bold transition-colors no-underline">
+              <Download size={15} /> Download intelligraph-setup.ps1
+            </a>
+
+            <div>
+              <p className="text-[11px] font-bold text-muted uppercase tracking-wider m-0 mb-1">Run in your project root:</p>
+              <CodeBlock id="setupCmd" code={`./intelligraph-setup.ps1 -PodUrl ${siteUrl} -ProjectId ${pid} -McpToken ${mcpToken}`} />
+            </div>
+
+            <details className="mt-2">
+              <summary className="text-[11px] font-bold text-muted cursor-pointer hover:text-text transition-colors">What it does</summary>
+              <ul className="mt-2 space-y-1 text-[11px] text-muted-subtle m-0 list-disc pl-4">
+                <li>Downloads agent guide (intelligraph-agent.md) to project root</li>
+                <li>Downloads enforcement plugin (grep/glob blocker) for opencode or Claude Code</li>
+                <li>Downloads intelligraph MCP server (intelligraph_mcp.py) to ~/.intelligraph/</li>
+                <li>Syncs graph data (graph.db + graph.json) from pod to ~/.intelligraph/cache/{pid}/</li>
+                <li>Configures opencode.json or Claude Code MCP settings</li>
+                <li>Creates <code className="px-1 py-0.5 rounded bg-accent/10 text-accent-light text-[10px] font-mono">mcp-update</code> command for re-syncing after project rebuild</li>
+              </ul>
+            </details>
+
+            <details>
+              <summary className="text-[11px] font-bold text-muted cursor-pointer hover:text-text transition-colors">After setup</summary>
+              <div className="mt-2 space-y-1 text-[11px] text-muted-subtle">
+                <p className="m-0">The MCP server starts automatically when your AI harness (opencode/Claude Code) launches. On startup it prints:</p>
+                <CodeBlock id="startupMsg" code={`Updating MCP... (syncing from ${siteUrl})\nMCP ready (437 nodes, 2551 edges)`} />
+                <p className="m-0 mt-2">After a project rebuild on the pod, run <code className="px-1 py-0.5 rounded bg-accent/10 text-accent-light text-[10px] font-mono">mcp-update</code> to re-sync graph data. The running MCP picks up changes automatically.</p>
+              </div>
+            </details>
+
+            <details>
+              <summary className="text-[11px] font-bold text-muted cursor-pointer hover:text-text transition-colors">Manual downloads (advanced)</summary>
+              <div className="mt-2 space-y-2">
+                <a href={endpoints.downloadIntelligraphMcp} download
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-muted text-[11px] font-medium transition-colors no-underline">
+                  <Download size={12} /> intelligraph_mcp.py
+                </a>
+                <a href={endpoints.downloadAgent} download
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-muted text-[11px] font-medium transition-colors no-underline">
+                  <Download size={12} /> intelligraph-agent.md
+                </a>
+                <a href={endpoints.downloadEnforcePlugin} download
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-muted text-[11px] font-medium transition-colors no-underline">
+                  <Download size={12} /> intelligraph-enforce.js (opencode)
+                </a>
+                <a href={endpoints.downloadClaudeHooks} download
+                  className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-muted text-[11px] font-medium transition-colors no-underline">
+                  <Download size={12} /> settings.json (Claude Code)
+                </a>
+              </div>
+            </details>
+          </div>
+        ) : (
+          <p className="text-xs text-muted-subtle m-0">
+            {!activeProject ? "Select a project first."
+            : !isReady ? "Wait for the project to finish building."
+            : "Generate an MCP token below first."}
+          </p>
+        )}
       </Section>
 
       {/* ── API Endpoints ── */}
@@ -366,35 +436,32 @@ export function GuidePanel({ activePid, activeProject }) {
               {/* Step-specific content */}
               {wizardStep === 0 && (
                 <div className="space-y-2 mb-4">
+                  <p className="text-xs text-text-secondary m-0 leading-relaxed">The setup script does everything in one command:</p>
                   <div className="flex items-start gap-2 p-2 rounded-lg bg-white/3">
-                    <Plug size={14} className="text-accent-light mt-0.5 flex-shrink-0" />
+                    <Download size={14} className="text-accent-light mt-0.5 flex-shrink-0" />
                     <div>
-                      <p className="text-[11px] font-bold text-text m-0">MCP Server</p>
-                      <p className="text-[10px] text-muted-subtle m-0">Connects your AI assistant to the code graph</p>
-                    </div>
-                  </div>
-                  <div className="flex items-start gap-2 p-2 rounded-lg bg-white/3">
-                    <BookOpen size={14} className="text-accent-light mt-0.5 flex-shrink-0" />
-                    <div>
-                      <p className="text-[11px] font-bold text-text m-0">Agent Guide</p>
-                      <p className="text-[10px] text-muted-subtle m-0">Tells the model when and how to use the tools</p>
+                      <p className="text-[11px] font-bold text-text m-0">Downloads agent guide</p>
+                      <p className="text-[10px] text-muted-subtle m-0">intelligraph-agent.md - tells the model how to use the tools</p>
                     </div>
                   </div>
                   <div className="flex items-start gap-2 p-2 rounded-lg bg-white/3">
                     <Shield size={14} className="text-accent-light mt-0.5 flex-shrink-0" />
                     <div>
-                      <p className="text-[11px] font-bold text-text m-0">Enforcement Plugin</p>
-                      <p className="text-[10px] text-muted-subtle m-0">Blocks grep/glob — forces the model to use the graph</p>
+                      <p className="text-[11px] font-bold text-text m-0">Installs enforcement plugin</p>
+                      <p className="text-[10px] text-muted-subtle m-0">Blocks grep/glob/Get-ChildItem - forces the model to use search()</p>
+                    </div>
+                  </div>
+                  <div className="flex items-start gap-2 p-2 rounded-lg bg-white/3">
+                    <Plug size={14} className="text-accent-light mt-0.5 flex-shrink-0" />
+                    <div>
+                      <p className="text-[11px] font-bold text-text m-0">Installs local MCP + syncs graph</p>
+                      <p className="text-[10px] text-muted-subtle m-0">Downloads graph.db from pod - zero pod requests during normal operation</p>
                     </div>
                   </div>
                 </div>
               )}
 
               {wizardStep === 1 && (
-                <div className="mb-4"><CodeBlock id="wizardPip" code="pip install mcp requests" /></div>
-              )}
-
-              {wizardStep === 2 && (
                 <div className="mb-4">
                   <div className="flex gap-2 items-center">
                     {mcpToken ? (
@@ -421,97 +488,53 @@ export function GuidePanel({ activePid, activeProject }) {
                 </div>
               )}
 
-              {wizardStep === 3 && (
+              {wizardStep === 2 && (
                 <div className="mb-4 space-y-3">
-                  <a href={endpoints.downloadMCPServer} download
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-accent/10 hover:bg-accent/20 text-accent-light text-xs font-medium transition-colors no-underline">
-                    <Download size={14} /> Download mcp_server_standalone.py
+                  <a href={endpoints.downloadSetupPs1} download
+                    className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-accent/15 hover:bg-accent/25 text-accent-light text-xs font-bold transition-colors no-underline">
+                    <Download size={15} /> Download intelligraph-setup.ps1
                   </a>
                   <div>
-                    <div className="flex items-center gap-1.5 mb-1">
-                      <p className="text-[11px] font-bold text-muted uppercase tracking-wider m-0">Full path to the script</p>
-                      {!cleanScriptPath && <span className="text-[10px] text-red font-bold">REQUIRED</span>}
-                      {scriptSaved && <span className="text-[10px] text-green flex items-center gap-0.5"><Check size={10} /> Saved</span>}
-                    </div>
-                    <p className="text-[10px] text-muted-subtle m-0 mb-1.5">
-                      Paste the full path where you saved the file (with or without quotes). <span className="text-red">This is required — MCP will not work without it.</span>
-                    </p>
-                    <input type="text" value={scriptPath}
-                      onChange={(e) => { setScriptPath(e.target.value); saveScriptPath(pid, e.target.value); }}
-                      placeholder="C:\Users\me\projects\myapp\mcp_server_standalone.py"
-                      className={`w-full px-2.5 py-1.5 rounded-lg bg-white/5 border text-[11px] text-text font-mono outline-none transition-colors ${
-                        cleanScriptPath ? "border-glass-border focus:border-accent/40" : "border-red/40 focus:border-red/60"}`} />
+                    <p className="text-[11px] font-bold text-muted uppercase tracking-wider m-0 mb-1">Put it in your project folder and run:</p>
+                    {setupCommand ? <CodeBlock id="setupCmd" code={setupCommand} /> : <p className="text-[10px] text-muted-subtle m-0">Generate a token first (Step 2).</p>}
                   </div>
-                </div>
-              )}
-
-              {wizardStep === 4 && (
-                <div className="mb-4 space-y-3">
-                  <a href={endpoints.downloadAgent} download
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-accent/10 hover:bg-accent/20 text-accent-light text-xs font-medium transition-colors no-underline">
-                    <Download size={14} /> Download intelligraph-agent.md
-                  </a>
-                  <details className="mt-2">
-                    <summary className="text-[11px] font-bold text-muted cursor-pointer hover:text-text transition-colors">Claude Code instructions</summary>
-                    <div className="mt-2"><CodeBlock id="wizardClaudeAgent" code={`# Save as CLAUDE.md in your project root\n# Claude Code reads this automatically\n\n@intelligraph-agent.md`} /></div>
-                  </details>
                   <details>
-                    <summary className="text-[11px] font-bold text-muted cursor-pointer hover:text-text transition-colors">opencode instructions</summary>
-                    <div className="mt-2"><CodeBlock id="wizardOpencodeAgent" code={`# Save as AGENTS.md in your project root\n# opencode reads this automatically\n\n@intelligraph-agent.md`} /></div>
+                    <summary className="text-[11px] font-bold text-muted cursor-pointer hover:text-text transition-colors">Manual setup (advanced)</summary>
+                    <div className="mt-2 space-y-2">
+                      <p className="text-[10px] text-muted-subtle m-0">If you prefer to configure manually, download these files:</p>
+                      <a href={endpoints.downloadIntelligraphMcp} download className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-muted text-[11px] font-medium transition-colors no-underline">
+                        <Download size={12} /> intelligraph_mcp.py
+                      </a>
+                      <a href={endpoints.downloadAgent} download className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-muted text-[11px] font-medium transition-colors no-underline">
+                        <Download size={12} /> intelligraph-agent.md
+                      </a>
+                      <a href={endpoints.downloadEnforcePlugin} download className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-muted text-[11px] font-medium transition-colors no-underline">
+                        <Download size={12} /> intelligraph-enforce.js (opencode)
+                      </a>
+                      <a href={endpoints.downloadClaudeHooks} download className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-muted text-[11px] font-medium transition-colors no-underline">
+                        <Download size={12} /> settings.json (Claude Code)
+                      </a>
+                      {scriptArgs && (
+                        <>
+                          <p className="text-[10px] text-muted-subtle m-0 mt-2">opencode.json / Claude Code MCP config:</p>
+                          <details>
+                            <summary className="text-[11px] font-bold text-muted cursor-pointer hover:text-text transition-colors">opencode (opencode.json)</summary>
+                            <div className="mt-2"><CodeBlock id="wizardOpencodeMcp" code={opencodeMcp} /></div>
+                          </details>
+                          <details>
+                            <summary className="text-[11px] font-bold text-muted cursor-pointer hover:text-text transition-colors">Claude Code (.mcp.json)</summary>
+                            <div className="mt-2"><CodeBlock id="wizardClaudeMcp" code={claudeMcp} /></div>
+                          </details>
+                        </>
+                      )}
+                    </div>
                   </details>
                 </div>
               )}
 
-              {wizardStep === 5 && (
-                <div className="mb-4 space-y-3">
-                  <a href={endpoints.downloadEnforcePlugin} download
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-accent/10 hover:bg-accent/20 text-accent-light text-xs font-medium transition-colors no-underline">
-                    <Download size={14} /> Download intelligraph-enforce.js (opencode)
-                  </a>
-                  <a href={endpoints.downloadClaudeHooks} download
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-accent/10 hover:bg-accent/20 text-accent-light text-xs font-medium transition-colors no-underline">
-                    <Download size={14} /> Download settings.json (Claude Code)
-                  </a>
-                  <details className="mt-2">
-                    <summary className="text-[11px] font-bold text-muted cursor-pointer hover:text-text transition-colors">opencode install</summary>
-                    <div className="mt-2 space-y-1">
-                      <p className="text-[10px] text-muted-subtle m-0">Place the file at <code className="px-1 py-0.5 rounded bg-accent/10 text-accent-light text-[10px] font-mono">.opencode/plugins/intelligraph-enforce.js</code> in your project root.</p>
-                    </div>
-                  </details>
-                  <details>
-                    <summary className="text-[11px] font-bold text-muted cursor-pointer hover:text-text transition-colors">Claude Code install</summary>
-                    <div className="mt-2 space-y-1">
-                      <p className="text-[10px] text-muted-subtle m-0">Place the file at <code className="px-1 py-0.5 rounded bg-accent/10 text-accent-light text-[10px] font-mono">.claude/settings.json</code> in your project root.</p>
-                    </div>
-                  </details>
-                </div>
-              )}
-
-              {wizardStep === 6 && (
-                <div className="mb-4 space-y-3">
-                  {!cleanScriptPath ? (
-                    <div className="p-2.5 rounded-lg bg-red/5 border border-red/20 flex items-center gap-1.5">
-                      <AlertCircle size={14} className="text-red flex-shrink-0" />
-                      <p className="text-[11px] text-red m-0">Go back to Step 4 and fill in the full path to the script first.</p>
-                    </div>
-                  ) : (
-                    <>
-                      <details open className="mt-2">
-                        <summary className="text-[11px] font-bold text-muted cursor-pointer hover:text-text transition-colors">Claude Code (.mcp.json)</summary>
-                        <div className="mt-2"><CodeBlock id="wizardClaudeMcp" code={claudeMcp} /></div>
-                      </details>
-                      <details open>
-                        <summary className="text-[11px] font-bold text-muted cursor-pointer hover:text-text transition-colors">opencode (opencode.json)</summary>
-                        <div className="mt-2"><CodeBlock id="wizardOpencodeMcp" code={opencodeMcp} /></div>
-                      </details>
-                    </>
-                  )}
-                </div>
-              )}
-
-              {wizardStep === 7 && (
+              {wizardStep === 3 && (
                 <div className="mb-4 p-3 rounded-lg bg-green/5 border border-green/20">
-                  <p className="text-xs text-green m-0">You're all set! Open your AI assistant in the project folder and ask a question like "search for authentication" or "who calls processPayment".</p>
+                  <p className="text-xs text-green m-0">You're all set! Open your AI assistant in the project folder. The MCP server starts locally on launch - it syncs the graph from the pod automatically. Run 'mcp-update' after rebuilding a project to re-sync.</p>
                 </div>
               )}
 

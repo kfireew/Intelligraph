@@ -36,8 +36,7 @@ Skipping impact() means you WILL miss dependent files and break things.
 - **DO NOT edit without running impact() first.** impact() finds files grep misses.
 - **DO NOT search for the same thing twice.** search() caches results in-session.
 - **ONLY 1 SEARCH AT A TIME.** Do not fire multiple searches in parallel — each search hits the CRG DB + embedding model. Concurrent searches overload the pod and cause 504s.
-- **Pass near= on EVERY search including the FIRST.** Without near=, search returns broad noise across the entire codebase (16+ results, ~2000 tokens wasted). With near=, you get 2-3 targeted results (~300 tokens). The first search may use near= with any symbol you know from the user's request. If you truly don't know any symbol, search once without near=, then use near= on EVERY subsequent search. The tool output suggests a near= value — use it.
-- **Not using near= wastes tokens.** Each search without near= returns up to 16 results across the entire codebase. That's ~2000 tokens of noise per search. With near=, you get 2-3 results focused on your subsystem. This is the #1 way to waste tokens and context. ALWAYS use near=.
+- **Pass near= on EVERY search after the first.** The first search tells you the subsystem. After that, near= is mandatory. The tool output will suggest a near= value — use it.
 - **Search what the user mentioned, not your abstraction of it.** If the user says "add a new plane type next to zik", search "zik" — not "plane type enum". Anchor on concrete names the user gives you. If no concrete name exists, use ONE concept word, not a multi-word description.
 - **If search returns [L] (low confidence), do NOT retry with similar terms.** Use node() on a known symbol, Read a file you already found, or ask the user.
 - **For external npm packages (node_modules), use package("name")** to find entry points, then Read the `.d.ts` file.

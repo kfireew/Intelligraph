@@ -1,11 +1,22 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "mcp": {
-    "intelligraph-mini": {
-      "type": "local",
-      "command": ["C:\\Users\\kfirm\\AppData\\Local\\Python\\pythoncore-3.14-64\\Scripts\\intelligraph-mini.exe"],
-      "enabled": true,
-      "timeout": 120000
-    }
-  }
+    "mcp":  {
+                "intelligraph":  {
+                                     "type":  "local",
+                                     "command":  [
+                                                     "C:\\Users\\kfirm\\AppData\\Local\\Python\\bin\\python.exe",
+                                                     "C:\\Users\\kfirm\\.intelligraph\\intelligraph_mcp.py",
+                                                     "--pod-url",
+                                                     "http://localhost:5050",
+                                                     "--project-id",
+                                                     "1",
+                                                     "--repo-dir",
+                                                     "C:\\Users\\kfirm\\Downloads\\Intelligraph",
+                                                     "--mcp-token",
+                                                     "mcp_wSN_IaL771-NqEJPDezG0SdIgP96YyJCFuxAkT1IDCg"
+                                                 ],
+                                     "enabled":  true,
+                                     "timeout":  120000
+                                 }
+            }
 }

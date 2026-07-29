@@ -133,6 +133,8 @@ def _build_tools() -> list[types.Tool]:
             name="search",
             description=(
                 "Search the codebase for symbols, files, or concepts. "
+                "Works equally well for exact names ('UserStatus'), file paths ('types/enums'), "
+                "or natural language ('how authentication works'). "
                 "Returns name, kind, file path with line ranges (file:start-end), and confidence [H/M/L]. "
                 "Use built-in Read with offset=line_start, limit=line_end-line_start to get source. "
                 "Use this FIRST — replaces grep and glob."
@@ -140,8 +142,8 @@ def _build_tools() -> list[types.Tool]:
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "Symbol name or concept to search for"},
-                    "semantic": {"type": "boolean", "description": "Use semantic-only search (default: false, uses hybrid)", "default": False},
+                    "query": {"type": "string", "description": "Symbol name, file path, or concept to search for"},
+                    "near": {"type": "string", "description": "Symbol or file path to filter results to your subsystem (3 hops). Pass this on every search after the first to get 2-3 targeted results instead of 16 broad ones."},
                 },
                 "required": ["query"],
             },
@@ -233,6 +235,23 @@ def _build_tools() -> list[types.Tool]:
                 "required": ["paths"],
             },
         ),
+        types.Tool(
+            name="package",
+            description=(
+                "Resolve an npm package to its entry point files (main, types, exports). "
+                "Reads node_modules/{name}/package.json. "
+                "Use this when you need to find symbols in external npm packages "
+                "(e.g. @romach/enums, lodash) that aren't in the codebase graph. "
+                "Then use built-in Read on the returned types/main file path."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "npm package name (e.g. @romach/enums, lodash)"},
+                },
+                "required": ["name"],
+            },
+        ),
     ]
 
     if REPO_DIR:
@@ -301,24 +320,27 @@ def _retrieve(query: str) -> dict:
         url,
         json={"prompt": query, "project_id": PROJECT_ID},
         headers=headers,
-        timeout=30,
+        timeout=60,
         verify=SSL_VERIFY,
     )
     r.raise_for_status()
     return r.json()
 
 
-def _crg(mode: str, query: str) -> dict:
+def _crg(mode: str, query: str, near: str = "") -> dict:
     """Call the Intelligraph CRG endpoint for direct mode access."""
     url = f"{INTELLIGRAPH_URL}/graph/crg"
     headers = {"Content-Type": "application/json"}
     if MCP_TOKEN:
         headers["X-MCP-Token"] = MCP_TOKEN
+    body = {"project_id": PROJECT_ID, "mode": mode, "query": query}
+    if near:
+        body["near"] = near
     r = _session.post(
         url,
-        json={"project_id": PROJECT_ID, "mode": mode, "query": query},
+        json=body,
         headers=headers,
-        timeout=30,
+        timeout=60,
         verify=SSL_VERIFY,
     )
     r.raise_for_status()
@@ -403,7 +425,7 @@ def _detect_language(path: str) -> str:
 _SESSION_SEARCHES = {}
 
 
-def _format_crg_search(results: list, query: str) -> str:
+def _format_crg_search(results: list, query: str, near: str = "") -> str:
     """Compact search output — one line per result with file:line_start-end.
 
     The MCP is a NAVIGATOR, not a content provider. It tells the agent WHERE
@@ -415,38 +437,74 @@ def _format_crg_search(results: list, query: str) -> str:
         _log_call("search", 0, 0)
         return f"No symbols found matching '{query}'."
 
-    # Dedup: same query in same session → cached one-liner
-    cache_key = query.lower().strip()
+    # Check for LOW confidence guidance entry (appended by router when all results are LOW)
+    guidance = [r for r in results if "low_confidence_guidance" in r.get("reason", []) or "no_match" in r.get("reason", [])]
+    real_results = [r for r in results if r not in guidance]
+
+    if not real_results:
+        _log_call("search", 0, 0)
+        for g in guidance:
+            return g.get("confidence_reason", f"No symbols found matching '{query}'.")
+        return f"No symbols found matching '{query}'."
+
+    # Dedup: same query+near in same session → cached one-liner
+    cache_key = f"{query.lower().strip()}|{near.lower().strip()}"
     if cache_key in _SESSION_SEARCHES:
         prev = _SESSION_SEARCHES[cache_key]
         return f"[CACHED] Same as search#{prev['call_id']}. Files: {', '.join(prev['files'])}"
 
     call_id = _SESSION_CALL_COUNTER[0] + 1
-    top_conf = results[0].get("confidence", "MEDIUM")
+    top_conf = real_results[0].get("confidence", "MEDIUM")
     conf_tag = {"HIGH": "H", "MEDIUM": "M", "LOW": "L"}.get(top_conf, "M")
 
-    lines = [f'## "{query}" — {len(results)} results [{conf_tag}]']
+    lines = [f'## "{query}" — {len(real_results)} results [{conf_tag}]']
     files_list = []
 
-    for i, r in enumerate(results[:10], 1):
-        name = r.get("name", "?")
-        kind = r.get("kind", "?")
+    for i, r in enumerate(real_results, 1):
         fp = _rewrite_path(r.get("file_path", "?"))
-        ls = r.get("line_start", 0)
-        le = r.get("line_end", 0)
         r_conf = r.get("confidence", "MEDIUM")
         r_tag = {"HIGH": "H", "MEDIUM": "M", "LOW": "L"}.get(r_conf, "M")
+        is_path_match = "path_match" in r.get("reason", [])
 
-        # Format location: file:start-end (or just file if no line info)
-        if ls and le and le > ls:
-            loc = f"{fp}:{ls}-{le}"
-        elif ls:
-            loc = f"{fp}:{ls}"
+        if is_path_match:
+            # Path match: bare path + graph connections
+            files_list.append(fp)
+            connections = r.get("connections", [])
+            if connections:
+                lines.append(f"{i}. {fp} — connected to: {', '.join(connections)} [{r_tag}]")
+            else:
+                lines.append(f"{i}. {fp} [{r_tag}]")
+            _track_seen(fp, "search", call_id)
         else:
-            loc = fp
-        files_list.append(loc)
-        lines.append(f"{i}. {name} ({kind}) {loc} [{r_tag}]")
-        _track_seen(fp, "search", call_id, had_signature=bool(r.get("signature")))
+            # Symbol/FTS match: name (kind) file:start-end
+            name = r.get("name", "?")
+            kind = r.get("kind", "?")
+            ls = r.get("line_start", 0)
+            le = r.get("line_end", 0)
+            if ls and le and le > ls:
+                loc = f"{fp}:{ls}-{le}"
+            elif ls:
+                loc = f"{fp}:{ls}"
+            else:
+                loc = fp
+            files_list.append(loc)
+            lines.append(f"{i}. {name} ({kind}) {loc} [{r_tag}]")
+            _track_seen(fp, "search", call_id, had_signature=bool(r.get("signature")))
+
+    # Append LOW confidence guidance if present
+    for g in guidance:
+        lines.append(f"\n{g.get('confidence_reason', '')}")
+
+    # Nudge: if no near= was used and results are broad (>5), suggest near= values
+    if not near and len(real_results) > 5:
+        suggest_names = []
+        for r in real_results[:4]:
+            n = r.get("name", "")
+            if n and n not in suggest_names:
+                suggest_names.append(n)
+        if suggest_names:
+            suggest_str = " or ".join(f'near="{n}"' for n in suggest_names[:2])
+            lines.append(f"\n-> Pass {suggest_str} to filter to your subsystem.")
 
     _SESSION_SEARCHES[cache_key] = {"call_id": call_id, "files": files_list}
     est_tokens = sum(len(l) for l in lines) // 4
@@ -689,6 +747,74 @@ def _format_path_result(data: dict, src: str, dst: str) -> str:
     return "\n".join(lines)
 
 
+def _resolve_package(pkg_name: str) -> str:
+    """Resolve an npm package to its entry point files.
+
+    Reads node_modules/{name}/package.json from REPO_DIR and returns
+    the main/types/exports fields so the agent knows which file to Read.
+    Handles scoped packages (@scope/name).
+    """
+    if not REPO_DIR:
+        return "ERROR: --repo-dir not set. The package tool requires the MCP server to run with --repo-dir pointing to your project."
+    if not pkg_name:
+        return "ERROR: package name required."
+
+    pkg_name = pkg_name.strip().strip('"').strip("'")
+    pkg_json_path = os.path.join(REPO_DIR, "node_modules", pkg_name, "package.json")
+
+    if not os.path.isfile(pkg_json_path):
+        # Try unscoping: @scope/name → name (some packages are installed flat)
+        if pkg_name.startswith("@") and "/" in pkg_name:
+            flat = pkg_name.split("/", 1)[1]
+            flat_path = os.path.join(REPO_DIR, "node_modules", flat, "package.json")
+            if os.path.isfile(flat_path):
+                pkg_json_path = flat_path
+            else:
+                return f"Package '{pkg_name}' not found in node_modules. Try: Read(node_modules/{pkg_name}/package.json) or check if it's installed."
+        else:
+            return f"Package '{pkg_name}' not found in node_modules. Try: Read(node_modules/{pkg_name}/package.json) or check if it's installed."
+
+    try:
+        with open(pkg_json_path, "r", encoding="utf-8", errors="replace") as f:
+            pkg = json.load(f)
+    except Exception as e:
+        return f"ERROR reading package.json for '{pkg_name}': {e}"
+
+    lines = [f"## {pkg_name} (v{pkg.get('version', '?')})"]
+
+    main = pkg.get("main")
+    types = pkg.get("types") or pkg.get("typings")
+    module_field = pkg.get("module")
+    exports = pkg.get("exports")
+
+    pkg_dir = os.path.dirname(pkg_json_path)
+    rel_base = os.path.relpath(pkg_dir, REPO_DIR).replace("\\", "/")
+
+    if main:
+        lines.append(f"main: {rel_base}/{main}")
+    if module_field:
+        lines.append(f"module: {rel_base}/{module_field}")
+    if types:
+        lines.append(f"types: {rel_base}/{types}")
+    if exports:
+        if isinstance(exports, dict):
+            for key in list(exports.keys())[:5]:
+                val = exports[key]
+                if isinstance(val, str):
+                    lines.append(f"exports['{key}']: {rel_base}/{val}")
+                elif isinstance(val, dict) and "." in val:
+                    lines.append(f"exports['{key}']: {rel_base}/{val['.']}")
+        elif isinstance(exports, str):
+            lines.append(f"exports: {rel_base}/{exports}")
+
+    if not any(line.startswith(("main:", "types:", "module:", "exports")) for line in lines[1:]):
+        lines.append("(No entry point fields in package.json. Use Read to list the directory.)")
+        lines.append(f"dir: {rel_base}/")
+
+    _log_call("package", 1, 50)
+    return "\n".join(lines)
+
+
 def _dispatch_tool(name: str, arguments: dict) -> str:
     """Map a tool call to the appropriate backend and return formatted text."""
     # Local Nx commands — runs on host, no HTTP needed
@@ -730,17 +856,20 @@ def _dispatch_tool(name: str, arguments: dict) -> str:
     # CRG direct mode tools
     if name == "search":
         query = arguments.get("query", "")
-        semantic_only = arguments.get("semantic", False)
-        mode = "semantic" if semantic_only else "hybrid"
-        result = _crg(mode, query)
+        near = arguments.get("near", "")
+        result = _crg("hybrid", query, near=near)
         results = result.get("results", [])
-        return _format_crg_search(results, query)
+        return _format_crg_search(results, query, near=near)
 
     if name == "impact":
         query = arguments.get("name", "")
         result = _crg("impact", query)
         results = result.get("results", [])
         return _format_crg_impact(results, query)
+
+    if name == "package":
+        pkg_name = arguments.get("name", "")
+        return _resolve_package(pkg_name)
 
     return f"Unknown tool: {name}"
 
@@ -760,7 +889,7 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
     except requests.exceptions.ConnectionError:
         text = f"Cannot reach Intelligraph at {INTELLIGRAPH_URL}. Is the container running?"
     except requests.exceptions.Timeout:
-        text = "Intelligraph request timed out (30s). The project may be large or still indexing."
+        text = "Intelligraph request timed out (60s). The project may be large or still indexing."
     except Exception as e:
         text = f"Error: {str(e)[:500]}"
     return [types.TextContent(type="text", text=text)]

@@ -44,7 +44,7 @@ def _vmsg(msg, *args):
             msg = msg % args
         except Exception:
             pass
-    print(f"[{ts}] {msg}", flush=True)
+    print(f"[{ts}] {msg}", file=sys.stderr, flush=True)
 
 
 # ── Route definitions ────────────────────────────────────────────
@@ -397,6 +397,8 @@ def _get_encoder():
         return None
 
     try:
+        os.environ["TRANSFORMERS_OFFLINE"] = "1"
+        os.environ["HF_HUB_OFFLINE"] = "1"
         os.environ["TRANSFORMERS_VERBOSITY"] = "error"
         os.environ["TOKENIZERS_PARALLELISM"] = "false"
 

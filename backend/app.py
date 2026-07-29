@@ -146,6 +146,7 @@ _SSO_OPEN_PREFIXES = (
     "/auth/", "/status", "/diagnostics", "/assets/", "/static/",
     "/download/", "/projects/<int:pid>/graph-html",
     "/projects/<int:pid>/graph-data", "/projects/<int:pid>/crg-db",
+    "/projects/<int:pid>/mcp-token", "/projects/<int:pid>/sync",
 )
 # ── SQLite persistence (optional) ──
 INTELLIGRAPH_DB = os.environ.get("INTELLIGRAPH_DB", os.path.join(TEMP_DIR, "intelligraph.db"))
@@ -338,12 +339,13 @@ def _load_projects(uk=None):
     try:
         _PROJECTS.setdefault(uk, {})
         conn = _db_conn()
-        # Owned projects
+        # Owned projects — use _PROJECTS[uk] directly, NOT _projects()
+        # (which calls _user_key() and would cause infinite recursion)
         rows = conn.execute("SELECT id, data FROM projects WHERE user_key = ?", (uk,)).fetchall()
         for row in rows:
             data = json.loads(row["data"])
-            if row["id"] not in _projects():
-                _projects()[row["id"]] = data
+            if row["id"] not in _PROJECTS[uk]:
+                _PROJECTS[uk][row["id"]] = data
         # Shared projects (member of but not owner)
         shared_rows = conn.execute(
             "SELECT pm.project_id, p.data FROM project_members pm "
@@ -353,8 +355,8 @@ def _load_projects(uk=None):
         ).fetchall()
         for row in shared_rows:
             data = json.loads(row["data"])
-            if row["project_id"] not in _projects():
-                _projects()[row["project_id"]] = data
+            if row["project_id"] not in _PROJECTS[uk]:
+                _PROJECTS[uk][row["project_id"]] = data
                 _vmsg("SHARED LOAD user=%s pid=%d", uk, row["project_id"])
     except Exception as e:
         app.logger.warning("DB load failed: %s", e)
@@ -802,13 +804,15 @@ FILE_PATH_PATTERN = re.compile(
 )
 
 
-def _verify_paths(project_id, llm_output):
+def _verify_paths(project_id, llm_output, uk=None, proj=None):
     """Extract file paths from LLM output and verify against project graph data."""
     mentioned = set(FILE_PATH_PATTERN.findall(llm_output or ""))
     if not mentioned:
         return []
-    uk = _user_key()
-    proj = _PROJECTS.get(uk, {}).get(project_id, {})
+    if proj is None:
+        if uk is None:
+            uk = _user_key()
+        proj = _PROJECTS.get(uk, {}).get(project_id, {})
     gf = proj.get("graphify_data") or {}
     valid = set()
     for n in gf.get("nodes", []):
@@ -884,6 +888,127 @@ def download_graph_builder():
     return send_file(py, as_attachment=True,
                      download_name="graph_builder.py",
                      mimetype="text/x-python")
+
+
+@app.route("/download/intelligraph-mcp")
+def download_intelligraph_mcp():
+    """Download the local MCP server as a zip with all dependencies.
+
+    Contains: intelligraph_mcp.py, crg_intelligence.py, semantic_planner.py,
+    models/all-MiniLM-L6-v2/ (embedding model for semantic search).
+    Extract to ~/.intelligraph/ and run.
+    """
+    import io, zipfile
+    backend_dir = os.path.dirname(os.path.abspath(__file__))
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        # MCP server script
+        zf.write(os.path.join(backend_dir, "intelligraph_mcp.py"), "intelligraph_mcp.py")
+        # CRG intelligence provider (same code as pod)
+        zf.write(os.path.join(backend_dir, "crg_intelligence.py"), "crg_intelligence.py")
+        # Semantic planner (encoder loader, uses bundled model)
+        zf.write(os.path.join(backend_dir, "semantic_planner.py"), "semantic_planner.py")
+        # Bundled MiniLM model (87MB, for semantic search)
+        model_dir = os.path.join(backend_dir, "models", "all-MiniLM-L6-v2")
+        if os.path.isdir(model_dir):
+            for root, dirs, files in os.walk(model_dir):
+                for f in files:
+                    full = os.path.join(root, f)
+                    arc = os.path.relpath(full, backend_dir)
+                    zf.write(full, arc)
+    buf.seek(0)
+    return send_file(buf, as_attachment=True,
+                     download_name="intelligraph_mcp.zip",
+                     mimetype="application/zip")
+
+
+@app.route("/download/setup-ps1")
+def download_setup_ps1():
+    """Download the PowerShell setup script."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "intelligraph-setup.ps1")
+    return send_file(path, as_attachment=True,
+                     download_name="intelligraph-setup.ps1",
+                     mimetype="text/plain")
+
+
+@app.route("/projects/<int:pid>/sync")
+def project_sync(pid):
+    """Download graph.db + graph.json + metadata as a zip for local MCP sync.
+
+    Auth handled by _sso_guard (same as /graph/ endpoints):
+    - SSO off: no auth needed
+    - SSO on: MCP token via X-MCP-Token header
+    """
+    proj = _projects().get(pid) or _get_shared_project(pid)
+    if not proj:
+        return jsonify({"error": "project not found"}), 404
+
+    crg_path = proj.get("crg_db_path")
+    gf_path = proj.get("graphify_path")
+
+    if not crg_path or not os.path.isfile(crg_path):
+        return jsonify({"error": "graph.db not available"}), 404
+
+    # Build zip in memory
+    import io
+    import zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.write(crg_path, "graph.db")
+        if gf_path and os.path.isfile(gf_path):
+            zf.write(gf_path, "graph.json")
+        meta = {
+            "project_id": pid,
+            "project_name": proj.get("name", ""),
+            "nodes": proj.get("nodes", 0),
+            "edges": proj.get("edges", 0),
+            "original_repo_dir": proj.get("original_repo_dir", ""),
+            "synced_at": datetime.now(timezone.utc).isoformat(),
+        }
+        zf.writestr("metadata.json", json.dumps(meta, indent=2))
+        # Include node_modules index if available
+        nm_path = proj.get("nm_index_path")
+        if nm_path and os.path.isfile(nm_path):
+            zf.write(nm_path, "nm_index.db")
+    buf.seek(0)
+
+    _vmsg("SYNC pid=%d - sending zip (graph.db=%s, graph.json=%s)", pid,
+          os.path.getsize(crg_path) if os.path.isfile(crg_path) else 0,
+          os.path.getsize(gf_path) if gf_path and os.path.isfile(gf_path) else 0)
+    return send_file(buf, as_attachment=True,
+                     download_name=f"intelligraph-sync-{pid}.zip",
+                     mimetype="application/zip")
+
+
+@app.route("/projects/<int:pid>/mcp-update", methods=["POST"])
+def project_mcp_update(pid):
+    """Check if graph data has been updated since last sync.
+
+    Returns last_modified timestamp and sync URL.
+    The local MCP calls this to decide if re-sync is needed.
+    """
+    proj = _projects().get(pid) or _get_shared_project(pid)
+    if not proj:
+        return jsonify({"error": "project not found"}), 404
+
+    mcp_pid = _validate_mcp_token(request.path)
+    if mcp_pid != pid:
+        return jsonify({"error": "unauthorized"}), 401
+
+    crg_path = proj.get("crg_db_path")
+    last_modified = None
+    if crg_path and os.path.isfile(crg_path):
+        last_modified = datetime.fromtimestamp(
+            os.path.getmtime(crg_path), tz=timezone.utc
+        ).isoformat()
+
+    return jsonify({
+        "project_id": pid,
+        "sync_url": f"/projects/{pid}/sync",
+        "last_modified": last_modified,
+        "nodes": proj.get("nodes", 0),
+        "edges": proj.get("edges", 0),
+    })
 
 
 
@@ -1088,11 +1213,18 @@ def clone_project():
 
             # ── Enqueue build (async via build queue, or sync in TESTING mode) ──
             def _build_job(pid=pid, proj=proj, repo_dir=repo_dir, uk=uk):
-                _vmsg("BUILD START pid=%d - graphify + CRG", pid)
-                _build_graphs(pid, proj, repo_dir, user_key=uk)
-                proj["status"] = "ready"
-                _save_project(pid, proj, uk=uk)
-                _vmsg("BUILD DONE pid=%d - status=ready nodes=%s edges=%s", pid, proj.get("nodes", 0), proj.get("edges", 0))
+                try:
+                    _vmsg("BUILD START pid=%d - graphify + CRG", pid)
+                    _build_graphs(pid, proj, repo_dir, user_key=uk)
+                    proj["status"] = "ready"
+                    _save_project(pid, proj, uk=uk)
+                    _vmsg("BUILD DONE pid=%d - status=ready nodes=%s edges=%s", pid, proj.get("nodes", 0), proj.get("edges", 0))
+                except Exception as e:
+                    proj["status"] = "error"
+                    proj["build_error"] = str(e)[:500]
+                    _save_project(pid, proj, uk=uk)
+                    _vmsg("BUILD FAILED pid=%d - %s", pid, str(e)[:300])
+                    print(f"[BUILD ERROR] pid={pid}: {e}", file=sys.stderr, flush=True)
 
             if app.config.get("TESTING"):
                 _build_job()
@@ -1129,7 +1261,7 @@ def clone_project():
     except Exception as e:
         import traceback
         app.logger.warning("Clone error [%s]: %s\n%s", _user_key(), str(e)[:500], traceback.format_exc())
-        return jsonify({"error": redact_secret(str(e)[:500], access_token)}), 500
+        return jsonify({"error": redact_secret(str(e)[:500], access_token if 'access_token' in locals() else None)}), 500
 
 
 def _tail_log(path, lines=5):
@@ -1140,6 +1272,97 @@ def _tail_log(path, lines=5):
             return "".join(all_lines[-lines:])[:500]
     except Exception:
         return "(log unavailable)"
+
+
+def _build_nm_index(repo_dir, index_path):
+    """Scan node_modules/**/*.d.ts and build a SQLite index of exported symbols.
+
+    Indexes: class, enum, type, const, function, interface, declare statements.
+    Returns the path to nm_index.db.
+    """
+    import re, sqlite3, glob
+
+    nm_dir = os.path.join(repo_dir, "node_modules")
+    if not os.path.isdir(nm_dir):
+        _vmsg("NM INDEX - no node_modules dir, skipping")
+        return
+
+    # Symbol patterns: export class X, export declare enum X, declare class X, etc.
+    patterns = [
+        re.compile(r'^\s*export\s+(?:default\s+)?(?:declare\s+)?(?:abstract\s+)?(class|enum|interface|type|const|function)\s+(\w+)', re.MULTILINE),
+        re.compile(r'^\s*declare\s+(?:abstract\s+)?(class|enum|interface|type|const|function)\s+(\w+)', re.MULTILINE),
+        re.compile(r'^\s*export\s+\{[^}]*\s+(\w+)\s*(?:as\s+\w+)?\s*\}', re.MULTILINE),
+    ]
+
+    conn = sqlite3.connect(index_path)
+    conn.execute("DROP TABLE IF EXISTS nm_symbols")
+    conn.execute("""CREATE TABLE nm_symbols (
+        name TEXT, kind TEXT, file_path TEXT,
+        line_start INTEGER, line_end INTEGER,
+        signature TEXT, package_name TEXT
+    )""")
+    conn.execute("CREATE INDEX idx_nm_name ON nm_symbols(LOWER(name))")
+
+    dts_files = glob.glob(os.path.join(nm_dir, "**", "*.d.ts"), recursive=True)
+    total_symbols = 0
+
+    for dts_path in dts_files:
+        try:
+            with open(dts_path, "r", encoding="utf-8", errors="replace") as f:
+                content = f.read()
+        except Exception:
+            continue
+
+        rel_path = os.path.relpath(dts_path, repo_dir).replace("\\", "/")
+
+        # Derive package name from path: node_modules/@scope/name/dist/index.d.ts -> @scope/name
+        parts = rel_path.split("/")
+        if len(parts) >= 3 and parts[0] == "node_modules":
+            if parts[1].startswith("@"):
+                pkg_name = "/".join(parts[1:3]) if len(parts) >= 3 else parts[1]
+            else:
+                pkg_name = parts[1]
+        else:
+            pkg_name = parts[-2] if len(parts) >= 2 else "unknown"
+
+        lines = content.split("\n")
+
+        for pat in patterns:
+            for m in pat.finditer(content):
+                groups = m.groups()
+                if len(groups) >= 2 and groups[-2]:
+                    kind = groups[-2]
+                    name = groups[-1]
+                elif len(groups) >= 1 and groups[0]:
+                    kind = "export"
+                    name = groups[0]
+                else:
+                    continue
+
+                if not name or len(name) < 2:
+                    continue
+
+                line_start = content[:m.start()].count("\n") + 1
+                # Estimate line_end: find closing brace or next export
+                line_end = line_start
+                for i in range(line_start, min(line_start + 50, len(lines))):
+                    if i < len(lines) and lines[i].strip().endswith("}"):
+                        line_end = i + 1
+                        break
+                if line_end == line_start:
+                    line_end = line_start + 1
+
+                signature = lines[line_start - 1].strip()[:200] if line_start <= len(lines) else ""
+
+                conn.execute(
+                    "INSERT INTO nm_symbols (name, kind, file_path, line_start, line_end, signature, package_name) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (name, kind, rel_path, line_start, line_end, signature, pkg_name)
+                )
+                total_symbols += 1
+
+    conn.commit()
+    conn.close()
+    _vmsg("NM INDEX - %d symbols from %d .d.ts files", total_symbols, len(dts_files))
 
 
 def _build_graphs(pid, proj, repo_dir, user_key=None):
@@ -1234,6 +1457,7 @@ def _build_graphs(pid, proj, repo_dir, user_key=None):
     # Reads source files from repo_dir before it's deleted, stores ~500 char
     # snippets per node. Enables code snippets in lightweight path + MCP tools.
     if os.path.exists(crg_path) and repo_dir:
+        snip_conn = None
         try:
             snip_conn = sqlite3.connect(crg_path)
             snip_conn.execute("CREATE TABLE IF NOT EXISTS node_snippets (node_name TEXT PRIMARY KEY, snippet TEXT)")
@@ -1241,7 +1465,8 @@ def _build_graphs(pid, proj, repo_dir, user_key=None):
                 "SELECT name, file_path, line_start, line_end FROM nodes "
                 "WHERE line_start IS NOT NULL AND file_path IS NOT NULL AND name IS NOT NULL"
             ).fetchall()
-            file_groups = defaultdict(list)
+            from collections import defaultdict as _defaultdict
+            file_groups = _defaultdict(list)
             for n in nodes_with_lines:
                 file_groups[n[1]].append(n)
             stored = 0
@@ -1265,10 +1490,12 @@ def _build_graphs(pid, proj, repo_dir, user_key=None):
                         )
                         stored += 1
             snip_conn.commit()
-            snip_conn.close()
             _vmsg("SNIPPETS pid=%d - stored %d snippets from %d files", pid, stored, len(file_groups))
         except Exception as e:
             _vmsg("SNIPPETS pid=%d - failed: %s", pid, str(e)[:200])
+        finally:
+            if snip_conn is not None:
+                snip_conn.close()
 
     # Generate graph.html with CRG-enriched community labels
     pre_built_html = os.path.join(repo_dir, "graphify-out", "graph.html") if repo_dir else None
@@ -1315,6 +1542,17 @@ def _build_graphs(pid, proj, repo_dir, user_key=None):
         app.logger.warning("Nx detection failed (non-fatal): %s", str(e)[:200])
     if "nx_metadata" not in proj:
         proj["nx_metadata"] = {}
+
+    # ── Build node_modules .d.ts index (before repo_dir is deleted) ──
+    if repo_dir:
+        try:
+            nm_index_path = os.path.join(ARTIFACTS_DIR, str(pid), "nm_index.db")
+            os.makedirs(os.path.dirname(nm_index_path), exist_ok=True)
+            _build_nm_index(repo_dir, nm_index_path)
+            proj["nm_index_path"] = nm_index_path
+            _vmsg("NM INDEX pid=%d - built at %s", pid, nm_index_path)
+        except Exception as e:
+            _vmsg("NM INDEX pid=%d - failed: %s", pid, str(e)[:200])
 
     # ── Relocate artifacts + delete repo_dir (saves disk + RAM) ──
     _relocate_artifacts(pid, proj, repo_dir)
@@ -2283,6 +2521,7 @@ def graph_crg():
     project_id = data.get("project_id")
     mode = data.get("mode", "search")
     query = (data.get("query") or "").strip()
+    near = (data.get("near") or "").strip()
 
     if not project_id:
         return jsonify({"error": "project_id required"}), 400
@@ -2300,12 +2539,12 @@ def graph_crg():
 
         provider = providers[0]
         if mode == "search":
-            results = provider.search(query, max_results=20)
+            results = provider.search(query, max_results=20, near=near)
         elif mode == "semantic":
             results = provider.semantic_search(query, max_results=20)
         elif mode == "hybrid":
             ew = float(data.get("embedding_weight", 0.4))
-            results = provider.hybrid_search(query, max_results=20, embedding_weight=ew)
+            results = provider.hybrid_search(query, max_results=20, embedding_weight=ew, near=near)
             # NOTE: DB snippet enrichment removed — MCP is a navigator, not a
             # content provider. Results now carry line_start/line_end so the
             # MCP server can tell the agent WHERE to read (file:start-end).
@@ -2940,14 +3179,21 @@ def project_completions(pid):
     if not proj:
         return jsonify({"error": "project not found", "intent": "planner", "context_used": False}), 404
 
+    # Pre-compute Flask-context-dependent values while we still have the request context.
+    # The generator runs after the request context is torn down, so we can't call
+    # _user_key(), _get_auto_tuned_weight(), or _db_conn() inside it.
+    uk = _user_key()
+    auto_weight = _get_auto_tuned_weight(pid, 0.4)
+    conn = _db_conn()
+
     return Response(
-        _stream_completions(pid, proj, data, prompt),
+        _stream_completions(pid, proj, data, prompt, uk=uk, auto_weight=auto_weight, conn=conn),
         mimetype="application/x-ndjson",
         headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
     )
 
 
-def _stream_completions(pid, proj, data, prompt):
+def _stream_completions(pid, proj, data, prompt, uk="", auto_weight=0.4, conn=None):
     """Generator that yields NDJSON progress events + final answer.
 
     Each yield is a JSON object on its own line:
@@ -3001,7 +3247,7 @@ def _stream_completions(pid, proj, data, prompt):
             retrieval_strategy = intent
 
             if intent in ("what_is", "coverage") and target:
-                embedding_weight = float(data.get("embedding_weight", _get_auto_tuned_weight(pid, 0.4)))
+                embedding_weight = float(data.get("embedding_weight", auto_weight))
                 snippet_chars = int(data.get("snippet_chars", 800))
                 traversal_depth = int(data.get("traversal_depth", 1))
 
@@ -3166,7 +3412,7 @@ def _stream_completions(pid, proj, data, prompt):
         except RuntimeError:
             pass
         except Exception as e:
-            app.logger.warning("Lightweight intent routing failed: %s", e)
+            print(f"[stream] Lightweight intent routing failed: {e}", file=sys.stderr)
 
     # Heavy pipeline
     if include_context and proj.get("graphify_data") and not retrieved:
@@ -3192,7 +3438,7 @@ def _stream_completions(pid, proj, data, prompt):
             context_stats = result.get("context_stats", {})
             matched_nodes = result.get("matched_nodes", [])
         except Exception as e:
-            app.logger.warning("Completions context retrieval failed: %s", e)
+            print(f"[stream] Completions context retrieval failed: {e}", file=sys.stderr)
 
     # ── Build LLM messages ──
     system_msg = _build_system_prompt(retrieval_strategy)
@@ -3251,7 +3497,7 @@ def _stream_completions(pid, proj, data, prompt):
         answer = choices[0].get("message", {}).get("content", "")
         if not answer.strip():
             answer = "(No response content. Try rephrasing your question.)"
-        path_warnings = _verify_paths(pid, answer) or []
+        path_warnings = _verify_paths(pid, answer, uk=uk, proj=proj) or []
 
         context_tokens = len(retrieved) // 4 if retrieved else 0
         full_corpus_tokens = (proj.get("nodes", 0) * 200) // 4
@@ -3264,8 +3510,6 @@ def _stream_completions(pid, proj, data, prompt):
         }
 
         try:
-            uk = _user_key()
-            conn = _db_conn()
             log_id = secrets.token_hex(12)
             conn.execute(
                 "INSERT INTO query_logs(id, project_id, user_key, prompt, intent, strategy, context_tokens, answer_tokens, retrieval_mode, trace_id, created_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -3530,7 +3774,9 @@ def status():
         "downloads": {"mcp_server": "/download/mcp-server",
                      "graph_builder": "/download/graph-builder",
                      "agent": "/download/agent",
-                     "test_mcp": "/download/test-mcp"},
+                     "test_mcp": "/download/test-mcp",
+                     "intelligraph_mcp": "/download/intelligraph-mcp",
+                     "setup_ps1": "/download/setup-ps1"},
         "project": proj,
         "projects": list(_projects().keys()),
         "build_queue_depth": build_queue.depth,
