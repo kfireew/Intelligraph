@@ -952,6 +952,60 @@ class CRGProvider(IntelligenceProvider):
             except Exception as e:
                 log.warning("CRG FTS search for '%s' failed: %s", term, e)
 
+        # Pass 1b: Lexical (snippet/value) lookup — catches string values that
+        # FTS misses: const object properties (TRACK_ZIK), string literals,
+        # dotted accessors (IconsNames.TRACK_ZIK). These live in source code
+        # snippets, not as graph nodes. Additive — only runs when results are
+        # sparse OR a term looks like a constant/dotted accessor.
+        _constant_re = re.compile(r"^[A-Z][A-Z0-9_]{2,}$")
+        has_exact = any(d["exact_match"] for d in file_scores.values())
+        has_constant_term = any(_constant_re.match(t) or "." in t for t in terms)
+        # Lexical pass: run when (a) a term looks like a constant/dotted accessor
+        # (these are values, not graph nodes), OR (b) results are sparse AND no
+        # exact symbol match was found. Skip when we already have exact matches
+        # for normal symbol queries — lexical adds noise without value.
+        needs_lexical = has_constant_term or (not has_exact and len(file_scores) < 3)
+        lexical_hits = {}  # fp -> {names, term} for transparency tracking
+        if needs_lexical:
+            join_clause = self._snippet_join_clause("n", "s")
+            for term in terms:
+                if len(term) < 3:
+                    continue
+                try:
+                    if self._snippet_schema == "v2":
+                        snip_rows = conn.execute(
+                            f"SELECT s.node_name, n.file_path, n.kind, "
+                            f"n.line_start, n.line_end, n.qualified_name "
+                            f"FROM node_snippets s {join_clause} "
+                            f"WHERE LOWER(s.snippet) LIKE ? LIMIT 15",
+                            (f"%{term.lower()}%",)
+                        ).fetchall()
+                    else:
+                        snip_rows = conn.execute(
+                            f"SELECT s.node_name, n.file_path, n.kind, "
+                            f"n.line_start, n.line_end, '' as qualified_name "
+                            f"FROM node_snippets s LEFT JOIN nodes n ON n.name = s.node_name "
+                            f"WHERE LOWER(s.snippet) LIKE ? LIMIT 15",
+                            (f"%{term.lower()}%",)
+                        ).fetchall()
+                except Exception:
+                    continue
+                for r in snip_rows:
+                    fp = self._normalize_path(r["file_path"]) if r["file_path"] else ""
+                    if not fp or _is_junk_path(fp) or _is_test_path(fp):
+                        continue
+                    if fp in path_files:
+                        continue
+                    entry = file_scores[fp]
+                    entry["score"] += 6.0
+                    entry["names"].append(r["node_name"] or "")
+                    entry["kinds"].add(r["kind"] or "Value")
+                    entry["matched_terms"].add(term)
+                    if r["line_start"]:
+                        entry["line_start"] = r["line_start"]
+                        entry["line_end"] = r["line_end"]
+                    lexical_hits.setdefault(fp, {"name": r["node_name"] or "", "term": term})
+
         # Boost files matching multiple terms
         for fp, data in file_scores.items():
             if len(data["matched_terms"]) >= 2:
@@ -960,6 +1014,9 @@ class CRGProvider(IntelligenceProvider):
         # Merge: path results (per-symbol) first, then FTS/symbol results (per-file)
         results = list(path_results)
         for fp, data in sorted(file_scores.items(), key=lambda x: -x[1]["score"])[:max_results]:
+            reasons = ["crg_fts_match"]
+            if fp in lexical_hits:
+                reasons.append("lexical")
             results.append({
                 "file_path": fp,
                 "score": round(data["score"], 1),
@@ -970,9 +1027,10 @@ class CRGProvider(IntelligenceProvider):
                 "line_end": data["line_end"],
                 "exact_match": data["exact_match"],
                 "matched_terms": sorted(data["matched_terms"]),
-                "reason": ["crg_fts_match"],
+                "reason": reasons,
                 "source": "crg",
                 "mode": "search",
+                "lexical_hit": lexical_hits.get(fp),
             })
 
         # If near is provided, filter ALL results to only files in the near subgraph.
@@ -987,9 +1045,9 @@ class CRGProvider(IntelligenceProvider):
                     reasons.append("near_unresolved")
                     r["reason"] = reasons
 
-        _vmsg("CRG SEARCH: query='%s' terms=%s near='%s' -> %d results (path=%d fts=%d%s)",
+        _vmsg("CRG SEARCH: query='%s' terms=%s near='%s' -> %d results (path=%d fts=%d lex=%d%s)",
               query[:50], terms[:5], near[:30], len(results), len(path_results),
-              len(file_scores), " [near_unresolved]" if near_unresolved else "")
+              len(file_scores), len(lexical_hits), " [near_unresolved]" if near_unresolved else "")
 
         # Fallback: node_modules .d.ts index (external packages not in graph)
         if len(results) < 3:
@@ -1161,9 +1219,15 @@ class CRGProvider(IntelligenceProvider):
                 is_path = "path_match" in r.get("reason", [])
                 is_exact = r.get("exact_match", False)
                 is_near_unresolved = "near_unresolved" in r.get("reason", [])
+                is_lexical = "lexical" in r.get("reason", [])
                 if is_near_unresolved:
                     r["confidence"] = "LOW"
                     r["confidence_reason"] = "near= not resolved; showing unfiltered results"
+                elif is_lexical and not is_exact:
+                    lex = r.get("lexical_hit") or {}
+                    r["confidence"] = "MEDIUM"
+                    r["confidence_reason"] = (f"lexical ({lex.get('term','?')} in {lex.get('name','?')}) "
+                                              "— value found in source, not a graph node")
                 else:
                     r["confidence"] = "HIGH" if (is_path or is_exact) else "MEDIUM"
                     r["confidence_reason"] = ("path match" if is_path else
@@ -1189,9 +1253,15 @@ class CRGProvider(IntelligenceProvider):
             for r in det_results[:max_results]:
                 is_exact = r.get("exact_match", False)
                 is_near_unresolved = "near_unresolved" in r.get("reason", [])
+                is_lexical = "lexical" in r.get("reason", [])
                 if is_near_unresolved:
                     r["confidence"] = "LOW"
                     r["confidence_reason"] = "near= not resolved; showing unfiltered results"
+                elif is_lexical and not is_exact:
+                    lex = r.get("lexical_hit") or {}
+                    r["confidence"] = "MEDIUM"
+                    r["confidence_reason"] = (f"lexical ({lex.get('term','?')} in {lex.get('name','?')}) "
+                                              "— value found in source, not a graph node")
                 else:
                     r["confidence"] = "MEDIUM" if is_exact else "LOW"
                     r["confidence_reason"] = ("exact match" if is_exact else "FTS only, no semantic match")

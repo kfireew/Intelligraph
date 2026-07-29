@@ -734,63 +734,65 @@ class TestImpact3472FileBlastRadius:
 
 # ── Phase 1: near= resilience, snippet schema, path validation ─────
 
+@pytest.fixture
+def mock_crg_db_snippets(tmp_path):
+    """Mock CRG DB with v2 snippet schema (qualified_name + file_path)
+    and a const object whose snippet contains a property value (TRACK_ZIK)
+    that is NOT a graph node."""
+    db_path = str(tmp_path / "graph.db")
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE nodes (id INTEGER PRIMARY KEY, name TEXT, kind TEXT, "
+                 "qualified_name TEXT, file_path TEXT, signature TEXT, "
+                 "community_id INTEGER, line_start INTEGER, line_end INTEGER, is_test INTEGER)")
+    conn.execute("CREATE VIRTUAL TABLE nodes_fts USING fts5(name, signature, file_path, "
+                 "content='nodes', content_rowid='id')")
+    conn.execute("CREATE TABLE edges (source_qualified TEXT, target_qualified TEXT, kind TEXT)")
+    conn.execute("CREATE TABLE node_snippets (qualified_name TEXT PRIMARY KEY, "
+                 "node_name TEXT, file_path TEXT, line_start INTEGER, line_end INTEGER, snippet TEXT)")
+    conn.execute("CREATE INDEX idx_snippet_name ON node_snippets(node_name)")
+    conn.execute("CREATE INDEX idx_snippet_file ON node_snippets(file_path)")
+
+    nodes_data = [
+        (1, "IconsNames", "Const", "icons.IconsNames", "src/icons/icons.ts",
+         "const IconsNames = {}", 1, 200, 210, 0),
+        (2, "iconResolver", "Function", "utils.iconResolver", "src/utils/icon-resolver.ts",
+         "function iconResolver()", 1, 5, 30, 0),
+        (3, "planeService", "Function", "services.planeService", "src/services/plane.ts",
+         "function planeService()", 2, 1, 50, 0),
+    ]
+    for nd in nodes_data:
+        conn.execute("INSERT INTO nodes VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", nd)
+        conn.execute("INSERT INTO nodes_fts(rowid, name, signature, file_path) VALUES(?, ?, ?, ?)",
+                     (nd[0], nd[1], nd[5], nd[4]))
+
+    edges_data = [
+        ("utils.iconResolver", "icons.IconsNames", "REFERENCES"),
+        ("utils.iconResolver", "icons.IconsNames", "IMPORTS_FROM"),
+        ("services.planeService", "utils.iconResolver", "CALLS"),
+    ]
+    for ed in edges_data:
+        conn.execute("INSERT INTO edges VALUES(?, ?, ?)", ed)
+
+    # Snippet for IconsNames contains TRACK_ZIK as a property value
+    snip_icons = "const IconsNames = {\n  TRACK_ZIK: 'zik',\n  TRACK_KARISH: 'karish',\n};"
+    conn.execute("INSERT INTO node_snippets VALUES(?, ?, ?, ?, ?, ?)",
+                 ("icons.IconsNames", "IconsNames", "src/icons/icons.ts", 200, 210, snip_icons))
+    conn.execute("INSERT INTO node_snippets VALUES(?, ?, ?, ?, ?, ?)",
+                 ("utils.iconResolver", "iconResolver", "src/utils/icon-resolver.ts", 5, 30,
+                  "function iconResolver() {\n  return IconsNames.TRACK_ZIK;\n}"))
+
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+@pytest.fixture
+def mock_proj_snippets(mock_crg_db_snippets):
+    return {"id": 1, "name": "test", "crg_db_path": mock_crg_db_snippets}
+
+
 class TestNearResilience:
     """Tests for near= snippet fallback, no-zero-out, and path validation."""
-
-    @pytest.fixture
-    def mock_crg_db_snippets(self, tmp_path):
-        """Mock CRG DB with v2 snippet schema (qualified_name + file_path)
-        and a const object whose snippet contains a property value (TRACK_ZIK)
-        that is NOT a graph node."""
-        db_path = str(tmp_path / "graph.db")
-        conn = sqlite3.connect(db_path)
-        conn.execute("CREATE TABLE nodes (id INTEGER PRIMARY KEY, name TEXT, kind TEXT, "
-                     "qualified_name TEXT, file_path TEXT, signature TEXT, "
-                     "community_id INTEGER, line_start INTEGER, line_end INTEGER, is_test INTEGER)")
-        conn.execute("CREATE VIRTUAL TABLE nodes_fts USING fts5(name, signature, file_path, "
-                     "content='nodes', content_rowid='id')")
-        conn.execute("CREATE TABLE edges (source_qualified TEXT, target_qualified TEXT, kind TEXT)")
-        conn.execute("CREATE TABLE node_snippets (qualified_name TEXT PRIMARY KEY, "
-                     "node_name TEXT, file_path TEXT, line_start INTEGER, line_end INTEGER, snippet TEXT)")
-        conn.execute("CREATE INDEX idx_snippet_name ON node_snippets(node_name)")
-        conn.execute("CREATE INDEX idx_snippet_file ON node_snippets(file_path)")
-
-        nodes_data = [
-            (1, "IconsNames", "Const", "icons.IconsNames", "src/icons/icons.ts",
-             "const IconsNames = {}", 1, 200, 210, 0),
-            (2, "iconResolver", "Function", "utils.iconResolver", "src/utils/icon-resolver.ts",
-             "function iconResolver()", 1, 5, 30, 0),
-            (3, "planeService", "Function", "services.planeService", "src/services/plane.ts",
-             "function planeService()", 2, 1, 50, 0),
-        ]
-        for nd in nodes_data:
-            conn.execute("INSERT INTO nodes VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", nd)
-            conn.execute("INSERT INTO nodes_fts(rowid, name, signature, file_path) VALUES(?, ?, ?, ?)",
-                         (nd[0], nd[1], nd[5], nd[4]))
-
-        edges_data = [
-            ("utils.iconResolver", "icons.IconsNames", "REFERENCES"),
-            ("utils.iconResolver", "icons.IconsNames", "IMPORTS_FROM"),
-            ("services.planeService", "utils.iconResolver", "CALLS"),
-        ]
-        for ed in edges_data:
-            conn.execute("INSERT INTO edges VALUES(?, ?, ?)", ed)
-
-        # Snippet for IconsNames contains TRACK_ZIK as a property value
-        snip_icons = "const IconsNames = {\n  TRACK_ZIK: 'zik',\n  TRACK_KARISH: 'karish',\n};"
-        conn.execute("INSERT INTO node_snippets VALUES(?, ?, ?, ?, ?, ?)",
-                     ("icons.IconsNames", "IconsNames", "src/icons/icons.ts", 200, 210, snip_icons))
-        conn.execute("INSERT INTO node_snippets VALUES(?, ?, ?, ?, ?, ?)",
-                     ("utils.iconResolver", "iconResolver", "src/utils/icon-resolver.ts", 5, 30,
-                      "function iconResolver() {\n  return IconsNames.TRACK_ZIK;\n}"))
-
-        conn.commit()
-        conn.close()
-        return db_path
-
-    @pytest.fixture
-    def mock_proj_snippets(self, mock_crg_db_snippets):
-        return {"id": 1, "name": "test", "crg_db_path": mock_crg_db_snippets}
 
     def test_near_snippet_fallback_resolves_value(self, mock_proj_snippets):
         """near='TRACK_ZIK' should resolve via snippet fallback (not a graph node
@@ -867,3 +869,123 @@ class TestNearResilience:
         result = provider.get_snippets(["IconsNames"], max_chars=500)
         assert "IconsNames" in result
         assert "TRACK_ZIK" in result["IconsNames"]["snippet"]
+
+
+# ── Phase 2: lexical retrieval, focus anchors, smarter guidance ───
+
+class TestLexicalRetrieval:
+    """Tests for the lexical (snippet/value) retrieval stage."""
+
+    def test_lexical_finds_string_constant(self, mock_proj_snippets):
+        """search('TRACK_KARISH') should find the defining file via the
+        lexical snippet pass, even though no graph node is named TRACK_KARISH."""
+        from crg_intelligence import CRGProvider
+        provider = CRGProvider(mock_proj_snippets)
+        assert provider.is_available()
+        results = provider.search("TRACK_KARISH")
+        assert len(results) > 0, "Lexical pass should find TRACK_KARISH in IconsNames snippet"
+        # At least one result should have 'lexical' in its reason
+        has_lexical = any("lexical" in r.get("reason", []) for r in results)
+        assert has_lexical, f"Expected 'lexical' reason, got reasons: {[r.get('reason') for r in results]}"
+        # The result should point to icons.ts
+        files = {r.get("file_path", "") for r in results}
+        assert any("icons.ts" in f for f in files), f"Expected icons.ts in results, got {files}"
+
+    def test_lexical_skipped_for_symbol_queries(self, mock_proj):
+        """search('upsertEntity') (a real symbol) should NOT add 'lexical'
+        reason — the lexical pass is gated on sparse results or constant-shape."""
+        from crg_intelligence import CRGProvider
+        provider = CRGProvider(mock_proj)
+        assert provider.is_available()
+        results = provider.search("upsertEntity")
+        assert len(results) > 0
+        # upsertEntity is a real symbol with FTS match — lexical shouldn't fire
+        for r in results:
+            assert "lexical" not in r.get("reason", []), \
+                f"Lexical pass should not fire for symbol query, got reason: {r.get('reason')}"
+
+    def test_focus_anchor_on_results(self, mock_proj_snippets, tmp_path):
+        """_format_search should emit anchor="SymbolName" on the top 3 results."""
+        import intelligraph_mcp
+        intelligraph_mcp.REPO_DIR = str(tmp_path)
+        intelligraph_mcp._ORIGINAL_REPO_DIR = ""
+        intelligraph_mcp._SESSION_SEARCHES.clear()  # avoid cache from prior tests
+        intelligraph_mcp._SESSION_SEEN.clear()
+        intelligraph_mcp._SESSION_CALL_COUNTER[0] = 0
+        # Create the files so they're not stale
+        for fp in ["utils/icon-resolver.ts", "icons/icons.ts", "services/plane.ts"]:
+            full = os.path.join(str(tmp_path), fp)
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            with open(full, "w") as f:
+                f.write("// stub")
+        from crg_intelligence import CRGProvider
+        provider = CRGProvider(mock_proj_snippets)
+        provider.is_available()
+        output = intelligraph_mcp._dispatch("search", {"query": "iconResolver"}, provider)
+        assert "anchor=" in output, f"Expected anchor= in output:\n{output}"
+
+    def test_focused_results_no_suggestion(self, mock_proj_snippets, tmp_path):
+        """When near= is used and results are 1-4 HIGH-confidence, output should
+        say 'sufficiently focused' and recommend node(), NOT suggest another near=."""
+        import intelligraph_mcp
+        intelligraph_mcp.REPO_DIR = str(tmp_path)
+        intelligraph_mcp._ORIGINAL_REPO_DIR = ""
+        intelligraph_mcp._SESSION_SEARCHES.clear()
+        intelligraph_mcp._SESSION_SEEN.clear()
+        intelligraph_mcp._SESSION_CALL_COUNTER[0] = 0
+        for fp in ["utils/icon-resolver.ts"]:
+            full = os.path.join(str(tmp_path), fp)
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            with open(full, "w") as f:
+                f.write("// stub")
+        from crg_intelligence import CRGProvider
+        provider = CRGProvider(mock_proj_snippets)
+        provider.is_available()
+        output = intelligraph_mcp._dispatch(
+            "search", {"query": "iconResolver", "near": "IconsNames"}, provider)
+        assert "sufficiently focused" in output or "node()" in output, \
+            f"Expected 'sufficiently focused' or 'node()' for focused results:\n{output}"
+
+    def test_transparency_block_on_fallback(self, mock_proj_snippets, tmp_path):
+        """When lexical fallback occurs, output should include 'Found via:'
+        transparency block. When results are HIGH (no fallback), it should not."""
+        import intelligraph_mcp
+        intelligraph_mcp.REPO_DIR = str(tmp_path)
+        intelligraph_mcp._ORIGINAL_REPO_DIR = ""
+        intelligraph_mcp._SESSION_SEARCHES.clear()
+        intelligraph_mcp._SESSION_SEEN.clear()
+        intelligraph_mcp._SESSION_CALL_COUNTER[0] = 0
+        for fp in ["icons/icons.ts"]:
+            full = os.path.join(str(tmp_path), fp)
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            with open(full, "w") as f:
+                f.write("// stub")
+        from crg_intelligence import CRGProvider
+        provider = CRGProvider(mock_proj_snippets)
+        provider.is_available()
+        # TRACK_KARISH triggers lexical fallback
+        output = intelligraph_mcp._dispatch("search", {"query": "TRACK_KARISH"}, provider)
+        assert "Found via:" in output, f"Expected 'Found via:' transparency block:\n{output}"
+
+    def test_blocker_message_no_near_placeholder(self):
+        """The JS enforcement plugin should convert glob patterns to search
+        hints without a near='<placeholder>' that teaches the model to invent
+        anchors. The message should say 'search first' then 'use near= only
+        with an exact symbol returned'."""
+        import json
+        # Read the JS file and verify the message structure
+        js_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                               "intelligraph-enforce.js")
+        with open(js_path, "r") as f:
+            js_content = f.read()
+        # Should NOT contain the old "Pass near= on every search" message
+        assert "Pass near= on every search" not in js_content, \
+            "Old 'pass near= on every search' message should be removed"
+        # Should contain the new guidance
+        assert "Use near= only with an exact symbol returned" in js_content, \
+            "New 'use near= only with exact symbol returned' guidance should be present"
+        # Should NOT have a near="<placeholder>" in search hints
+        assert 'near="<subsystem symbol>"' not in js_content, \
+            "Should not have near= placeholder that teaches model to invent anchors"
+        # Should have searchHint function
+        assert "function searchHint" in js_content or "searchHint" in js_content

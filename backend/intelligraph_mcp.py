@@ -359,13 +359,35 @@ def _format_search(results, query, near="", provider=None):
     lines = [f'## "{query}" — {len(real_results)} results [{conf_tag}]']
     files_list = []
 
+    # Track whether any fallback occurred (for transparency block)
+    any_lexical = False
+    any_near_unresolved = False
+    any_snippet_fallback = False
+
     for i, r in enumerate(real_results, 1):
         fp = _rewrite_path(r.get("file_path", "?"))
         r_conf = r.get("confidence", "MEDIUM")
         r_tag = {"HIGH": "H", "MEDIUM": "M", "LOW": "L"}.get(r_conf, "M")
-        is_path_match = "path_match" in r.get("reason", [])
+        reasons = r.get("reason", [])
+        is_path_match = "path_match" in reasons
         is_stale = _is_stale_path(fp, provider)
         stale_tag = " [stale]" if is_stale else ""
+        is_lexical = "lexical" in reasons
+        is_near_unr = "near_unresolved" in reasons
+        is_snip_fb = "snippet_fallback" in reasons
+        if is_lexical:
+            any_lexical = True
+        if is_near_unr:
+            any_near_unresolved = True
+        if is_snip_fb:
+            any_snippet_fallback = True
+
+        # Focus anchor: best symbol for near= anchoring (top 3 results only)
+        anchor_tag = ""
+        if i <= 3 and not is_stale and r_tag != "L":
+            anchor_name = r.get("name", "")
+            if anchor_name and anchor_name != "?":
+                anchor_tag = f' anchor="{anchor_name}"'
 
         if is_path_match:
             files_list.append(fp)
@@ -388,9 +410,9 @@ def _format_search(results, query, near="", provider=None):
                 except Exception:
                     pass
             if connections:
-                lines.append(f"{i}. {fp} connected to: {', '.join(connections)} [{r_tag}]{stale_tag}")
+                lines.append(f"{i}. {fp} connected to: {', '.join(connections)} [{r_tag}]{stale_tag}{anchor_tag}")
             else:
-                lines.append(f"{i}. {fp} [{r_tag}]{stale_tag}")
+                lines.append(f"{i}. {fp} [{r_tag}]{stale_tag}{anchor_tag}")
             if siblings:
                 lines.append(f"   nearby: {', '.join(siblings)}")
             _track_seen(fp, "search", call_id)
@@ -406,22 +428,60 @@ def _format_search(results, query, near="", provider=None):
             else:
                 loc = fp
             files_list.append(loc)
-            lines.append(f"{i}. {name} ({kind}) {loc} [{r_tag}]{stale_tag}")
+            lines.append(f"{i}. {name} ({kind}) {loc} [{r_tag}]{stale_tag}{anchor_tag}")
             _track_seen(fp, "search", call_id, had_signature=bool(r.get("signature")))
 
     for g in guidance:
         lines.append(f"\n{g.get('confidence_reason', '')}")
 
-    # Nudge: if no near= was used and results are broad (>5), suggest near= values
+    # ── Smarter guidance: three branches, no stepping-stone loop ──
+    # Branch 1: no near, broad results → list candidate anchors from results
     if not near and len(real_results) > 5:
-        suggest_names = []
+        candidates = []
         for r in real_results[:4]:
             n = r.get("name", "")
-            if n and n not in suggest_names:
-                suggest_names.append(n)
-        if suggest_names:
-            suggest_str = " or ".join(f'near="{n}"' for n in suggest_names[:2])
-            lines.append(f"\n-> Pass {suggest_str} to filter to your subsystem.")
+            if n and n not in candidates and len(n) <= 40:
+                candidates.append(n)
+        if candidates:
+            cand_str = ", ".join(f'near="{c}"' for c in candidates[:3])
+            lines.append(f"\n-> Candidate anchors: {cand_str}. Use one returned by this search.")
+
+    # Branch 2: near used, unresolved → tell agent to drop near= and use a result symbol
+    elif near and any_near_unresolved:
+        hint_name = ""
+        for r in real_results:
+            n = r.get("name", "")
+            if n and n != "?":
+                hint_name = n
+                break
+        if hint_name:
+            lines.append(f'\n-> near="{near}" found no graph connections. '
+                         f'Drop near= for this search, then use near="{hint_name}" next.')
+        else:
+            lines.append(f'\n-> near="{near}" not found in graph. '
+                         f'Drop near= for this search, then use a symbol from the results as near= next.')
+
+    # Branch 3: near used, focused (1-4 HIGH-confidence) → no suggestion, recommend node()
+    elif near and 1 <= len(real_results) <= 4 and top_conf == "HIGH":
+        lines.append("\n-> Results are sufficiently focused; inspect the top symbol with node().")
+
+    # ── Transparency block: expose retrieval decisions when fallback occurred ──
+    if any_lexical or any_near_unresolved or any_snippet_fallback:
+        strat_parts = []
+        if any_near_unresolved:
+            strat_parts.append("near= unresolved")
+        if any_lexical:
+            lex_terms = set()
+            for r in real_results:
+                lh = r.get("lexical_hit")
+                if lh:
+                    lex_terms.add(f"{lh.get('term','?')} in {lh.get('name','?')}")
+            if lex_terms:
+                strat_parts.append(f"lexical ({', '.join(sorted(lex_terms)[:2])})")
+        if any_snippet_fallback:
+            strat_parts.append("snippet fallback")
+        if strat_parts:
+            lines.append(f"\nFound via: {' | '.join(strat_parts)}")
 
     _SESSION_SEARCHES[cache_key] = {"call_id": call_id, "files": files_list}
     est_tokens = sum(len(l) for l in lines) // 4
