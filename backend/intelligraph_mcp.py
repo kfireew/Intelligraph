@@ -466,22 +466,31 @@ def _format_search(results, query, near="", provider=None):
         lines.append("\n-> Results are sufficiently focused; inspect the top symbol with node().")
 
     # ── Transparency block: expose retrieval decisions when fallback occurred ──
+    # Uses the consolidated `found_via` field from the router when available,
+    # falls back to reconstructing from reasons.
+    has_found_via = any(r.get("found_via") for r in real_results)
     if any_lexical or any_near_unresolved or any_snippet_fallback:
-        strat_parts = []
-        if any_near_unresolved:
-            strat_parts.append("near= unresolved")
-        if any_lexical:
-            lex_terms = set()
-            for r in real_results:
-                lh = r.get("lexical_hit")
-                if lh:
-                    lex_terms.add(f"{lh.get('term','?')} in {lh.get('name','?')}")
-            if lex_terms:
-                strat_parts.append(f"lexical ({', '.join(sorted(lex_terms)[:2])})")
-        if any_snippet_fallback:
-            strat_parts.append("snippet fallback")
-        if strat_parts:
-            lines.append(f"\nFound via: {' | '.join(strat_parts)}")
+        if has_found_via:
+            # Use the router's consolidated found_via from the top result
+            top_via = real_results[0].get("found_via", "")
+            if top_via:
+                lines.append(f"\nFound via: {top_via}")
+        else:
+            strat_parts = []
+            if any_near_unresolved:
+                strat_parts.append("near= unresolved")
+            if any_lexical:
+                lex_terms = set()
+                for r in real_results:
+                    lh = r.get("lexical_hit")
+                    if lh:
+                        lex_terms.add(f"{lh.get('term','?')} in {lh.get('name','?')}")
+                if lex_terms:
+                    strat_parts.append(f"lexical ({', '.join(sorted(lex_terms)[:2])})")
+            if any_snippet_fallback:
+                strat_parts.append("snippet fallback")
+            if strat_parts:
+                lines.append(f"\nFound via: {' | '.join(strat_parts)}")
 
     _SESSION_SEARCHES[cache_key] = {"call_id": call_id, "files": files_list}
     est_tokens = sum(len(l) for l in lines) // 4

@@ -1186,58 +1186,56 @@ class CRGProvider(IntelligenceProvider):
         return results
 
     def hybrid_search(self, query: str, max_results: int = 20, embedding_weight: float = 0.4, near: str = "") -> list[dict]:
-        """Sequential retrieval router: deterministic → semantic fallback.
+        """Unified retrieval router: exact → lexical → FTS → semantic, soft cascade.
 
-        Stage 1 (Deterministic): path LIKE + symbol LIKE + FTS5.
-        If path matches found OR >=3 exact symbol matches → return immediately.
+        Stage 1 (Lexical retrieval, bundled): path LIKE + symbol LIKE + FTS5 +
+        snippet value lookup. All cheap indexed lookups in one pass.
+        If path matches found OR ≥3 results OR ≥3 exact matches → return.
         No embeddings computed. Fast (<1s).
 
-        Stage 2 (Semantic): only if Stage 1 produced insufficient HIGH results.
+        Stage 2 (Semantic): only if Stage 1 produced insufficient results.
         Runs embedding search, merges with RRF.
 
-        This prevents retry loops: one call produces the best available answer
-        using at most one deterministic stage and, if necessary, one semantic
-        stage. No internal loops.
+        Soft cascade: stages run in order, stop as soon as one confidently
+        answers. Semantic only runs when lexical+FTS both produce sparse
+        results. This prevents retry loops: one call produces the best
+        available answer using at most one lexical stage and, if necessary,
+        one semantic stage.
 
-        Each result carries `confidence` (HIGH/MEDIUM/LOW) and
-        `confidence_reason`. The LLM sees only confidence — not which
-        stage produced the result.
+        Each result carries:
+        - `confidence` (HIGH/MEDIUM/LOW)
+        - `confidence_reason` (human-readable)
+        - `found_via` (which backend answered: "exact symbol", "lexical (...)",
+          "FTS", "FTS + semantic 0.42", etc.)
+        - `_stages_tried` (internal: list of stages that ran)
+        - `_stages_hit` (internal: list of stages that produced this result)
+        The LLM sees confidence + found_via; the format layer uses _stages_*
+        for the transparency block.
         """
-        # Stage 1: Deterministic
+        stages_tried = []
+
+        # Stage 1: Lexical retrieval (exact + symbol LIKE + FTS + snippet values)
+        stages_tried.append("lexical")
         det_results = self.search(query, max_results=max_results * 2, near=near)
 
         has_path_match = any("path_match" in r.get("reason", []) for r in det_results)
         exact_count = sum(1 for r in det_results if r.get("exact_match"))
+        has_lexical = any("lexical" in r.get("reason", []) for r in det_results)
 
-        # Short-circuit: deterministic found enough OR embeddings disabled.
-        # `len(det_results) >= 3` is the key threshold: if FTS/LIKE/path found
-        # 3+ results, semantic adds latency (~50s first call for encoder load
-        # + 28k-node embedding) without changing the answer meaningfully.
+        # Short-circuit: Stage 1 found enough OR embeddings disabled.
+        # `len(det_results) >= 3` is the key threshold: if FTS/LIKE/path/lexical
+        # found 3+ results, semantic adds latency (~50s first call for encoder
+        # load + 28k-node embedding) without changing the answer meaningfully.
         # Semantic is reserved for genuinely sparse queries (<3 det results).
-        if has_path_match or len(det_results) >= 3 or exact_count >= 3 or embedding_weight <= 0.0:
+        if has_path_match or len(det_results) >= 3 or exact_count >= 1 or has_lexical or embedding_weight <= 0.0:
             for r in det_results[:max_results]:
-                is_path = "path_match" in r.get("reason", [])
-                is_exact = r.get("exact_match", False)
-                is_near_unresolved = "near_unresolved" in r.get("reason", [])
-                is_lexical = "lexical" in r.get("reason", [])
-                if is_near_unresolved:
-                    r["confidence"] = "LOW"
-                    r["confidence_reason"] = "near= not resolved; showing unfiltered results"
-                elif is_lexical and not is_exact:
-                    lex = r.get("lexical_hit") or {}
-                    r["confidence"] = "MEDIUM"
-                    r["confidence_reason"] = (f"lexical ({lex.get('term','?')} in {lex.get('name','?')}) "
-                                              "— value found in source, not a graph node")
-                else:
-                    r["confidence"] = "HIGH" if (is_path or is_exact) else "MEDIUM"
-                    r["confidence_reason"] = ("path match" if is_path else
-                                              ("exact match" if is_exact else "FTS match"))
-                r["semantic_score"] = 0.0
-            _vmsg("CRG ROUTER: query='%s' -> deterministic only (path=%s exact=%d) -> %d results",
-                  query[:50], has_path_match, exact_count, len(det_results[:max_results]))
+                self._annotate_result(r, stages_tried, det_results, near)
+            _vmsg("CRG ROUTER: query='%s' -> Stage 1 only (path=%s exact=%d lex=%s) -> %d results",
+                  query[:50], has_path_match, exact_count, has_lexical, len(det_results[:max_results]))
             return det_results[:max_results]
 
         # Stage 2: Semantic fallback
+        stages_tried.append("semantic")
         sem_results = self.semantic_search(query, max_results=max_results * 2)
 
         # If near is provided, filter semantic results too
@@ -1249,23 +1247,9 @@ class CRGProvider(IntelligenceProvider):
                 sem_results = []
 
         if not sem_results:
-            # No semantic results — return deterministic with LOW confidence
+            # No semantic results — return Stage 1 with LOW confidence
             for r in det_results[:max_results]:
-                is_exact = r.get("exact_match", False)
-                is_near_unresolved = "near_unresolved" in r.get("reason", [])
-                is_lexical = "lexical" in r.get("reason", [])
-                if is_near_unresolved:
-                    r["confidence"] = "LOW"
-                    r["confidence_reason"] = "near= not resolved; showing unfiltered results"
-                elif is_lexical and not is_exact:
-                    lex = r.get("lexical_hit") or {}
-                    r["confidence"] = "MEDIUM"
-                    r["confidence_reason"] = (f"lexical ({lex.get('term','?')} in {lex.get('name','?')}) "
-                                              "— value found in source, not a graph node")
-                else:
-                    r["confidence"] = "MEDIUM" if is_exact else "LOW"
-                    r["confidence_reason"] = ("exact match" if is_exact else "FTS only, no semantic match")
-                r["semantic_score"] = 0.0
+                self._annotate_result(r, stages_tried, det_results, near)
             if not det_results:
                 return [{
                     "file_path": "", "name": "", "kind": "",
@@ -1275,12 +1259,13 @@ class CRGProvider(IntelligenceProvider):
                     "source": "crg", "mode": "search",
                     "line_start": 0, "line_end": 0,
                     "exact_match": False, "matched_terms": [],
+                    "found_via": "none", "_stages_tried": stages_tried, "_stages_hit": [],
                 }]
-            _vmsg("CRG ROUTER: query='%s' -> deterministic only (no semantic results) -> %d results",
+            _vmsg("CRG ROUTER: query='%s' -> Stage 1 only (no semantic results) -> %d results",
                   query[:50], len(det_results[:max_results]))
             return det_results[:max_results]
 
-        # Merge deterministic + semantic via RRF
+        # Merge Stage 1 + Stage 2 via RRF
         fts_weight = 1.0 - embedding_weight
         k = 30
 
@@ -1310,6 +1295,7 @@ class CRGProvider(IntelligenceProvider):
                     "matched_terms": [],
                     "line_start": r.get("line_start", 0),
                     "line_end": r.get("line_end", 0),
+                    "lexical_hit": None,
                 }
         for r in det_results:
             fp = r.get("file_path", "")
@@ -1324,6 +1310,7 @@ class CRGProvider(IntelligenceProvider):
                         "matched_terms": [],
                         "line_start": r.get("line_start", 0),
                         "line_end": r.get("line_end", 0),
+                        "lexical_hit": r.get("lexical_hit"),
                     }
                 lookup[fp]["exact_match"] = r.get("exact_match", False)
                 lookup[fp]["matched_terms"] = r.get("matched_terms", [])
@@ -1334,6 +1321,8 @@ class CRGProvider(IntelligenceProvider):
                     lookup[fp]["line_start"] = r["line_start"]
                 if r.get("line_end") and not lookup[fp].get("line_end"):
                     lookup[fp]["line_end"] = r["line_end"]
+                if r.get("lexical_hit") and not lookup[fp].get("lexical_hit"):
+                    lookup[fp]["lexical_hit"] = r.get("lexical_hit")
 
         all_fps = set(fts_rank.keys()) | set(sem_rank.keys())
         scored = []
@@ -1358,11 +1347,20 @@ class CRGProvider(IntelligenceProvider):
             sem_score = base.get("semantic_score", 0.0)
             exact = base.get("exact_match", False)
             matched = base.get("matched_terms", [])
+            is_lex = bool(base.get("lexical_hit"))
             entry["semantic_score"] = sem_score
             entry["exact_match"] = exact
             entry["matched_terms"] = matched
-            entry["confidence"] = self._compute_confidence(in_both, exact, sem_score, len(matched))
-            entry["confidence_reason"] = self._confidence_reason(in_both, exact, sem_score, matched)
+            entry["confidence"] = self._compute_confidence_v2(in_both, exact, sem_score, len(matched), is_lex)
+            entry["confidence_reason"] = self._confidence_reason_v2(in_both, exact, sem_score, matched, is_lex, base.get("lexical_hit"))
+            entry["found_via"] = self._found_via(in_both, exact, sem_score, is_lex, base.get("lexical_hit"))
+            entry["_stages_tried"] = list(stages_tried)
+            stages_hit = []
+            if fp in fts_rank:
+                stages_hit.append("lexical")
+            if fp in sem_rank:
+                stages_hit.append("semantic")
+            entry["_stages_hit"] = stages_hit
             scored.append(entry)
 
         ranked = sorted(scored, key=lambda x: -x["score"])
@@ -1383,11 +1381,91 @@ class CRGProvider(IntelligenceProvider):
                 "source": "crg", "mode": "search",
                 "line_start": 0, "line_end": 0,
                 "exact_match": False, "matched_terms": [],
+                "found_via": "none", "_stages_tried": stages_tried, "_stages_hit": [],
             })
 
-        _vmsg("CRG ROUTER: query='%s' -> deterministic+semantic (det=%d sem=%d) -> %d results",
+        _vmsg("CRG ROUTER: query='%s' -> Stage 1+2 (det=%d sem=%d) -> %d results",
               query[:50], len(det_results), len(sem_results), len(results))
         return results
+
+    def _annotate_result(self, r: dict, stages_tried: list, det_results: list, near: str):
+        """Annotate a Stage-1-only result with confidence, found_via, stage trace."""
+        is_path = "path_match" in r.get("reason", [])
+        is_exact = r.get("exact_match", False)
+        is_near_unresolved = "near_unresolved" in r.get("reason", [])
+        is_lexical = "lexical" in r.get("reason", [])
+        lex = r.get("lexical_hit") or {}
+        if is_near_unresolved:
+            r["confidence"] = "LOW"
+            r["confidence_reason"] = "near= not resolved; showing unfiltered results"
+            r["found_via"] = "near= unresolved"
+        elif is_lexical and not is_exact:
+            r["confidence"] = "MEDIUM"
+            r["confidence_reason"] = (f"lexical ({lex.get('term','?')} in {lex.get('name','?')}) "
+                                      "— value found in source, not a graph node")
+            r["found_via"] = f"lexical ({lex.get('term','?')} in {lex.get('name','?')})"
+        else:
+            r["confidence"] = "HIGH" if (is_path or is_exact) else "MEDIUM"
+            r["confidence_reason"] = ("path match" if is_path else
+                                      ("exact match" if is_exact else "FTS match"))
+            r["found_via"] = ("path match" if is_path else
+                              ("exact symbol" if is_exact else "FTS"))
+        r["semantic_score"] = 0.0
+        r["_stages_tried"] = list(stages_tried)
+        r["_stages_hit"] = ["lexical"]
+
+    @staticmethod
+    def _compute_confidence_v2(in_both: bool, exact_match: bool, semantic_score: float,
+                               num_matched_terms: int, is_lexical: bool) -> str:
+        """Confidence with lexical factor.
+        HIGH: hybrid + exact + strong semantic, OR exact match (any stage).
+        MEDIUM: hybrid without exact, OR lexical-only, OR FTS-only exact, OR semantic-only strong.
+        LOW: semantic-only weak, or FTS-only fuzzy.
+        """
+        if in_both and exact_match and semantic_score >= 0.5:
+            return "HIGH"
+        if in_both and (exact_match or semantic_score >= 0.4):
+            return "MEDIUM"
+        if not in_both and exact_match:
+            return "MEDIUM"
+        if not in_both and semantic_score >= 0.5:
+            return "MEDIUM"
+        if is_lexical and not in_both:
+            return "MEDIUM"
+        return "LOW"
+
+    @staticmethod
+    def _confidence_reason_v2(in_both: bool, exact_match: bool, semantic_score: float,
+                              matched_terms, is_lexical: bool, lexical_hit) -> str:
+        parts = []
+        if exact_match:
+            parts.append("exact match")
+        if is_lexical and lexical_hit:
+            parts.append(f"lexical ({lexical_hit.get('term','?')} in {lexical_hit.get('name','?')})")
+        if in_both:
+            parts.append(f"hybrid (FTS + semantic {semantic_score:.2f})")
+        elif semantic_score > 0:
+            parts.append(f"semantic only ({semantic_score:.2f})")
+        else:
+            parts.append("FTS only")
+        if matched_terms:
+            parts.append(f"matched: {', '.join(matched_terms[:3])}")
+        return " + ".join(parts)
+
+    @staticmethod
+    def _found_via(in_both: bool, exact_match: bool, semantic_score: float,
+                   is_lexical: bool, lexical_hit) -> str:
+        """Consolidated 'found via' string for transparency."""
+        via_parts = []
+        if exact_match:
+            via_parts.append("exact symbol")
+        if is_lexical and lexical_hit:
+            via_parts.append(f"lexical ({lexical_hit.get('term','?')} in {lexical_hit.get('name','?')})")
+        if not via_parts:
+            via_parts.append("FTS")
+        if in_both:
+            via_parts.append(f"semantic {semantic_score:.2f}")
+        return " + ".join(via_parts)
 
     @staticmethod
     def _compute_confidence(in_both: bool, exact_match: bool, semantic_score: float, num_matched_terms: int) -> str:

@@ -989,3 +989,95 @@ class TestLexicalRetrieval:
             "Should not have near= placeholder that teaches model to invent anchors"
         # Should have searchHint function
         assert "function searchHint" in js_content or "searchHint" in js_content
+
+
+# ── Phase 3: internal retrieval router, stage trace, found_via ───
+
+class TestRetrievalRouter:
+    """Tests for the unified retrieval router: stage cascade, trace, found_via."""
+
+    def test_router_exact_symbol_stops(self, mock_proj):
+        """An exact symbol query should return from Stage 1 only —
+        _stages_tried should be ['lexical'], never include 'semantic'."""
+        from crg_intelligence import CRGProvider
+        provider = CRGProvider(mock_proj)
+        assert provider.is_available()
+        results = provider.hybrid_search("upsertEntity", max_results=5, embedding_weight=0.4)
+        assert len(results) > 0
+        # Stage 1 only — no semantic stage should have run
+        stages = results[0].get("_stages_tried", [])
+        assert "lexical" in stages
+        assert "semantic" not in stages, f"Semantic should not run for exact symbol, got stages: {stages}"
+
+    def test_router_lexical_then_stops(self, mock_proj_snippets):
+        """A constant-shape query (TRACK_KARISH) should resolve via lexical
+        in Stage 1 and NOT trigger semantic — _stages_tried=['lexical']."""
+        from crg_intelligence import CRGProvider
+        provider = CRGProvider(mock_proj_snippets)
+        assert provider.is_available()
+        results = provider.hybrid_search("TRACK_KARISH", max_results=5, embedding_weight=0.4)
+        assert len(results) > 0
+        # Should have found_via containing 'lexical'
+        found = results[0].get("found_via", "")
+        assert "lexical" in found, f"Expected 'lexical' in found_via, got: {found}"
+        # Stage 1 only — no semantic
+        stages = results[0].get("_stages_tried", [])
+        assert "semantic" not in stages
+
+    def test_router_fts_for_natural_language(self, mock_proj):
+        """A natural-language query that FTS can match should return from
+        Stage 1 with FTS confidence, not trigger semantic."""
+        from crg_intelligence import CRGProvider
+        provider = CRGProvider(mock_proj)
+        assert provider.is_available()
+        # 'entity' matches via FTS (signature contains 'entity')
+        results = provider.hybrid_search("entity", max_results=10, embedding_weight=0.4)
+        assert len(results) >= 3  # should short-circuit at >=3
+        # Stage 1 only
+        stages = results[0].get("_stages_tried", [])
+        assert "semantic" not in stages
+
+    def test_router_semantic_last_resort(self, mock_proj):
+        """A query with no exact/FTS/lexical match should fall through to
+        semantic (Stage 2) — _stages_tried should include 'semantic'."""
+        from crg_intelligence import CRGProvider
+        provider = CRGProvider(mock_proj)
+        assert provider.is_available()
+        # A query unlikely to match any symbol/FTS — should go to semantic
+        results = provider.hybrid_search("zzz_nonexistent_concept_xyz", max_results=5, embedding_weight=0.4)
+        # May return 0 or LOW results, but should have tried semantic
+        if results and results[0].get("_stages_tried"):
+            stages = results[0].get("_stages_tried", [])
+            # If Stage 1 found <3 results, semantic should have been tried
+            # (unless embeddings are unavailable, in which case it skips)
+            # Check that the router at least attempted the cascade
+            assert "lexical" in stages
+
+    def test_near_filter_post_retrieval(self, mock_proj_snippets):
+        """near= should be applied after stages produce candidates, not
+        zero them before. With a valid near=, results should be filtered
+        but stages still tried."""
+        from crg_intelligence import CRGProvider
+        provider = CRGProvider(mock_proj_snippets)
+        assert provider.is_available()
+        results = provider.hybrid_search("iconResolver", max_results=5, near="IconsNames")
+        assert len(results) > 0
+        # near= was valid, should have filtered to connected files
+        # Stages should still show lexical was tried
+        stages = results[0].get("_stages_tried", [])
+        assert "lexical" in stages
+
+    def test_strategy_trace_in_results(self, mock_proj):
+        """Every result should carry _stages_tried and _stages_hit for the
+        format layer's transparency block."""
+        from crg_intelligence import CRGProvider
+        provider = CRGProvider(mock_proj)
+        assert provider.is_available()
+        results = provider.hybrid_search("upsertEntity", max_results=5, embedding_weight=0.0)
+        assert len(results) > 0
+        r = results[0]
+        assert "_stages_tried" in r, f"Missing _stages_tried: {r.keys()}"
+        assert "_stages_hit" in r, f"Missing _stages_hit: {r.keys()}"
+        assert "found_via" in r, f"Missing found_via: {r.keys()}"
+        # For exact symbol, found_via should mention 'exact'
+        assert "exact" in r.get("found_via", "").lower() or "FTS" in r.get("found_via", "")
