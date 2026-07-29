@@ -573,3 +573,160 @@ class TestImpactChangeFiltering:
         default_fps = {r["file_path"] for r in results_default}
         explicit_fps = {r["file_path"] for r in results_explicit}
         assert default_fps == explicit_fps
+
+
+# ── 3472-file blast radius: token cap verification ─────────────────
+
+@pytest.fixture
+def mock_crg_db_huge(tmp_path):
+    """Simulate the feedback scenario: an enum imported by 3472 files.
+    6 files have Record</switch patterns (breaks), 3466 are plain imports (safe).
+    """
+    db_path = str(tmp_path / "graph.db")
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE nodes (id INTEGER PRIMARY KEY, name TEXT, kind TEXT, qualified_name TEXT, file_path TEXT, signature TEXT, community_id INTEGER, line_start INTEGER, line_end INTEGER, is_test INTEGER)")
+    conn.execute("CREATE VIRTUAL TABLE nodes_fts USING fts5(name, signature, file_path, content='nodes', content_rowid='id')")
+    conn.execute("CREATE TABLE edges (source_qualified TEXT, target_qualified TEXT, kind TEXT)")
+    conn.execute("CREATE TABLE node_snippets (node_name TEXT PRIMARY KEY, snippet TEXT)")
+
+    # Target enum
+    conn.execute("INSERT INTO nodes VALUES(1, 'PlaneCategories', 'Enum', 'types.PlaneCategories', 'src/types/categories.ts', 'enum PlaneCategories', 1, 1, 20, 0)")
+    conn.execute("INSERT INTO nodes_fts(rowid, name, signature, file_path) VALUES(1, 'PlaneCategories', 'enum PlaneCategories', 'src/types/categories.ts')")
+
+    # 6 files with exhaustive patterns (breaks)
+    breaks_snippets = [
+        ("iconResolver", "const iconResolver = (cat: PlaneCategory): string => {\n  const map: Record<PlaneCategory, string> = {\n    ZIK: '/zik.svg',\n  };\n  return map[cat];\n};"),
+        ("displayLabel", "function displayLabel(cat: PlaneCategory) {\n  switch (cat) {\n    case ZIK: return 'Zik';\n  }\n}"),
+        ("categoryMap", "const categoryMap: Record<PlaneCategory, Icon> = {\n  ZIK: 'icon-zik',\n};"),
+        ("planeReducer", "function planeReducer(state, action) {\n  return Object.keys(PlaneCategories).map(k => k);\n}"),
+        ("typeGuard", "function isPlane(cat: any): cat is PlaneCategory {\n  return Object.keys(PlaneCategories).includes(cat);\n}"),
+        ("enumValues", "const enumValues = Object.keys(PlaneCategories).reduce((acc, k) => { acc[k] = true; return acc; }, {});"),
+    ]
+    for i, (sym_name, snip) in enumerate(breaks_snippets, start=2):
+        qname = f"app.file_{i}.{sym_name}"
+        fp = f"src/file_{i}.ts"
+        conn.execute("INSERT INTO nodes VALUES(?, ?, 'Function', ?, ?, ?, 2, 1, 30, 0)", (i, sym_name, qname, fp, f"def {sym_name}()"))
+        conn.execute("INSERT INTO nodes_fts(rowid, name, signature, file_path) VALUES(?, ?, ?, ?)", (i, sym_name, f"def {sym_name}()", fp))
+        conn.execute("INSERT INTO edges VALUES(?, 'types.PlaneCategories', 'IMPORTS_FROM')", (qname,))
+        conn.execute("INSERT INTO node_snippets VALUES(?, ?)", (sym_name, snip))
+
+    # 3466 files with plain imports (safe — no exhaustive pattern)
+    for i in range(8, 3474):
+        sym_name = f"consumer_{i}"
+        qname = f"app.file_{i}.{sym_name}"
+        fp = f"src/consumer_{i}.ts"
+        conn.execute("INSERT INTO nodes VALUES(?, ?, 'Function', ?, ?, ?, 3, 1, 10, 0)", (i, sym_name, qname, fp, f"def {sym_name}()"))
+        conn.execute("INSERT INTO nodes_fts(rowid, name, signature, file_path) VALUES(?, ?, ?, ?)", (i, sym_name, f"def {sym_name}()", fp))
+        conn.execute("INSERT INTO edges VALUES(?, 'types.PlaneCategories', 'IMPORTS_FROM')", (qname,))
+
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+@pytest.fixture
+def mock_proj_huge(mock_crg_db_huge):
+    return {"id": 1, "crg_db_path": mock_crg_db_huge, "graphify_data": {}, "nodes": 3473, "edges": 3472, "crg_nodes": 3473}
+
+
+class TestImpact3472FileBlastRadius:
+    """Verify that impact() on a 3472-file blast radius stays under 1500 tokens."""
+
+    def test_provider_returns_all_files(self, mock_proj_huge):
+        """impact() must return all 3472 files — data is never truncated."""
+        from crg_intelligence import CRGProvider
+        provider = CRGProvider(mock_proj_huge)
+        provider.is_available()
+        results = provider.impact("PlaneCategories", change="add-value")
+        # 3472 dependents + 1 definition = 3473
+        assert len(results) == 3473
+        assert results[0]["total_count"] == 3473
+
+    def test_breaks_files_sorted_first(self, mock_proj_huge):
+        """The 6 [breaks] files must appear before the 3466 [safe] files."""
+        from crg_intelligence import CRGProvider
+        provider = CRGProvider(mock_proj_huge)
+        provider.is_available()
+        results = provider.impact("PlaneCategories", change="add-value")
+        # Depth 0 (definition) is first
+        assert results[0]["depth"] == 0
+        # Next results should be breaks=True
+        breaks_results = [r for r in results if r.get("breaks") is True]
+        safe_results = [r for r in results if r.get("breaks") is False]
+        assert len(breaks_results) == 6
+        assert len(safe_results) == 3466
+        # First non-definition result should be a breaks file
+        first_dep = results[1]
+        assert first_dep["breaks"] is True
+        # The last breaks file should come before the first safe file
+        last_breaks_idx = max(i for i, r in enumerate(results) if r.get("breaks") is True)
+        first_safe_idx = min(i for i, r in enumerate(results) if r.get("breaks") is False)
+        assert last_breaks_idx < first_safe_idx
+
+    def test_dispatch_output_under_1500_tokens(self, mock_proj_huge, tmp_path):
+        """The actual _dispatch output (what the MCP client sees) must be
+        under 1500 tokens. This is the real token-savings test."""
+        import intelligraph_mcp
+        intelligraph_mcp.REPO_DIR = str(tmp_path)
+        intelligraph_mcp._ORIGINAL_REPO_DIR = ""
+        from crg_intelligence import CRGProvider
+        provider = CRGProvider(mock_proj_huge)
+        provider.is_available()
+        output = intelligraph_mcp._dispatch("impact", {"name": "PlaneCategories"}, provider)
+        est_tokens = len(output) // 4
+        # Must be under 1500 tokens (the default max_tokens budget)
+        assert est_tokens <= 1500, f"Output was {est_tokens} tokens (expected <=1500). Output length: {len(output)} chars"
+        # Must contain pagination hint
+        assert "more files exist" in output or "offset=" in output
+        # Must show the header with total count
+        assert "3473" in output or "3472" in output
+
+    def test_full_mode_under_4000_tokens(self, mock_proj_huge, tmp_path):
+        """change=full should still be capped at 4000 tokens (not 50k)."""
+        import intelligraph_mcp
+        intelligraph_mcp.REPO_DIR = str(tmp_path)
+        intelligraph_mcp._ORIGINAL_REPO_DIR = ""
+        from crg_intelligence import CRGProvider
+        provider = CRGProvider(mock_proj_huge)
+        provider.is_available()
+        output = intelligraph_mcp._dispatch("impact", {"name": "PlaneCategories", "change": "full"}, provider)
+        est_tokens = len(output) // 4
+        # Full mode max_tokens=4000 — must stay under that
+        assert est_tokens <= 4000, f"Full output was {est_tokens} tokens (expected <=4000)"
+        assert "more files exist" in output or "offset=" in output
+
+    def test_breaks_pattern_in_output(self, mock_proj_huge, tmp_path):
+        """The dispatch output should include the breaks pattern (e.g. Record<)."""
+        import intelligraph_mcp
+        intelligraph_mcp.REPO_DIR = str(tmp_path)
+        intelligraph_mcp._ORIGINAL_REPO_DIR = ""
+        from crg_intelligence import CRGProvider
+        provider = CRGProvider(mock_proj_huge)
+        provider.is_available()
+        output = intelligraph_mcp._dispatch("impact", {"name": "PlaneCategories"}, provider)
+        # At least one [breaks] tag should appear
+        assert "[breaks]" in output
+        # At least one pattern should be shown
+        assert "pattern:" in output or "Record<" in output
+
+    def test_safe_files_not_shown_on_first_page(self, mock_proj_huge, tmp_path):
+        """Safe files should NOT appear on the first page — they're after breaks."""
+        import intelligraph_mcp
+        intelligraph_mcp.REPO_DIR = str(tmp_path)
+        intelligraph_mcp._ORIGINAL_REPO_DIR = ""
+        from crg_intelligence import CRGProvider
+        provider = CRGProvider(mock_proj_huge)
+        provider.is_available()
+        output = intelligraph_mcp._dispatch("impact", {"name": "PlaneCategories"}, provider)
+        # The first page should show breaks files, not safe ones
+        # If [safe] appears, it should be near the end of the page (if at all)
+        lines = output.split("\n")
+        breaks_lines = [l for l in lines if "[breaks]" in l]
+        safe_lines = [l for l in lines if "[safe]" in l]
+        # Should have breaks lines
+        assert len(breaks_lines) > 0
+        # Safe files should not appear before breaks files
+        if safe_lines:
+            first_breaks_idx = min(i for i, l in enumerate(lines) if "[breaks]" in l)
+            first_safe_idx = min(i for i, l in enumerate(lines) if "[safe]" in l)
+            assert first_breaks_idx < first_safe_idx

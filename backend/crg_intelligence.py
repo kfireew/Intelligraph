@@ -1831,16 +1831,22 @@ class CRGProvider(IntelligenceProvider):
             snippet_map = {}
             if depth1_symbols:
                 try:
-                    placeholders = ",".join("?" * len(depth1_symbols))
-                    snip_rows = conn.execute(
-                        f"SELECT node_name, snippet FROM node_snippets "
-                        f"WHERE node_name IN ({placeholders})",
-                        tuple(depth1_symbols)
-                    ).fetchall()
-                    for sr in snip_rows:
-                        snippet_map[sr["node_name"]] = sr["snippet"] or ""
-                except Exception:
-                    pass  # node_snippets table may not exist
+                    # Batch in chunks of 500 to avoid SQLite MAX_VARIABLE_NUMBER
+                    # limit (999 on older SQLite, 32766 on newer). Silent failure
+                    # here means breaks/safe tagging is lost — not acceptable.
+                    sym_list = sorted(depth1_symbols)
+                    for i in range(0, len(sym_list), 500):
+                        batch = sym_list[i:i + 500]
+                        placeholders = ",".join("?" * len(batch))
+                        snip_rows = conn.execute(
+                            f"SELECT node_name, snippet FROM node_snippets "
+                            f"WHERE node_name IN ({placeholders})",
+                            tuple(batch)
+                        ).fetchall()
+                        for sr in snip_rows:
+                            snippet_map[sr["node_name"]] = sr["snippet"] or ""
+                except Exception as e:
+                    log.warning("CRG impact snippet batch query failed: %s", e)
 
             for fp in depth1_files:
                 entry = file_data[fp]

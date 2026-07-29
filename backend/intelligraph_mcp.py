@@ -432,6 +432,8 @@ def _dispatch(name, args, provider):
         lines = []
         est_tokens = 0
         shown = 0
+        # Reserve tokens for header + pagination footer (~200 tokens)
+        budget = max_tokens - 200
         for r in page:
             fp = _rewrite_path(r.get("file_path", "?"))
             depth = r.get("depth", 0)
@@ -448,17 +450,21 @@ def _dispatch(name, args, provider):
                 tag = " [safe]"
             if is_test:
                 tag += " (test)"
-            lines.append(f"- `{fp}` ({depth_label}){tag}")
+            # Build this file's lines BEFORE appending — check budget first
+            file_lines = [f"- `{fp}` ({depth_label}){tag}"]
             if symbols:
-                lines.append(f"  symbols: {', '.join(symbols[:5])}")
+                file_lines.append(f"  symbols: {', '.join(symbols[:5])}")
             if edge_types:
-                lines.append(f"  edges: {', '.join(edge_types[:5])}")
+                file_lines.append(f"  edges: {', '.join(edge_types[:5])}")
             if pattern:
-                lines.append(f"  pattern: {pattern}")
-            est_tokens += sum(len(l) for l in lines[-4:]) // 4
-            shown += 1
-            if est_tokens >= max_tokens and shown < len(page):
+                file_lines.append(f"  pattern: {pattern}")
+            file_tokens = sum(len(l) for l in file_lines) // 4
+            # Stop BEFORE adding if it would exceed budget (prevents overshoot)
+            if est_tokens + file_tokens > budget and shown > 0:
                 break
+            lines.extend(file_lines)
+            est_tokens += file_tokens
+            shown += 1
 
         has_more = (offset + shown) < total
         header = f"## Impact: '{target}' (change={change}) — {shown} of {total} files"
