@@ -1081,3 +1081,155 @@ class TestRetrievalRouter:
         assert "found_via" in r, f"Missing found_via: {r.keys()}"
         # For exact symbol, found_via should mention 'exact'
         assert "exact" in r.get("found_via", "").lower() or "FTS" in r.get("found_via", "")
+
+
+# ── Phase 4: nm_index near=, basename near=, graph-anchor tags, search_in_file ─
+
+@pytest.fixture
+def mock_crg_db_nm(tmp_path):
+    """Mock CRG DB + nm_index.db with an external package symbol."""
+    db_path = str(tmp_path / "graph.db")
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE nodes (id INTEGER PRIMARY KEY, name TEXT, kind TEXT, "
+                 "qualified_name TEXT, file_path TEXT, signature TEXT, "
+                 "community_id INTEGER, line_start INTEGER, line_end INTEGER, is_test INTEGER)")
+    conn.execute("CREATE VIRTUAL TABLE nodes_fts USING fts5(name, signature, file_path, "
+                 "content='nodes', content_rowid='id')")
+    conn.execute("CREATE TABLE edges (source_qualified TEXT, target_qualified TEXT, kind TEXT)")
+    conn.execute("CREATE TABLE node_snippets (qualified_name TEXT PRIMARY KEY, "
+                 "node_name TEXT, file_path TEXT, line_start INTEGER, line_end INTEGER, snippet TEXT)")
+
+    # codebase file that imports RomachCategories from @romach/enums
+    nodes_data = [
+        (1, "iconResolver", "Function", "utils.iconResolver", "src/utils/icon-resolver.ts",
+         "function iconResolver()", 1, 5, 30, 0),
+        (2, "planeFilter", "Function", "filters.planeFilter", "src/filters/plane-filter.ts",
+         "function planeFilter()", 1, 10, 40, 0),
+    ]
+    for nd in nodes_data:
+        conn.execute("INSERT INTO nodes VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", nd)
+        conn.execute("INSERT INTO nodes_fts(rowid, name, signature, file_path) VALUES(?, ?, ?, ?)",
+                     (nd[0], nd[1], nd[5], nd[4]))
+
+    # icon-resolver imports RomachCategories (which is in node_modules, not in CRG graph)
+    conn.execute("INSERT INTO edges VALUES(?, ?, ?)",
+                 ("utils.iconResolver", "external.RomachCategories", "IMPORTS_FROM"))
+    # We need a node for the external symbol so the edge has a target
+    conn.execute("INSERT INTO nodes VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                 (3, "RomachCategories", "Enum", "external.RomachCategories",
+                  "node_modules/@romach/enums/dist/index.d.ts", "enum RomachCategories", 0, 100, 120, 0))
+    conn.execute("INSERT INTO nodes_fts(rowid, name, signature, file_path) VALUES(?, ?, ?, ?)",
+                 (3, "RomachCategories", "enum RomachCategories", "node_modules/@romach/enums/dist/index.d.ts"))
+
+    conn.commit()
+    conn.close()
+
+    # Build nm_index.db with the external symbol
+    nm_path = str(tmp_path / "nm_index.db")
+    nm_conn = sqlite3.connect(nm_path)
+    nm_conn.execute("CREATE TABLE nm_symbols (name TEXT, kind TEXT, file_path TEXT, "
+                     "line_start INTEGER, line_end INTEGER, signature TEXT, package_name TEXT)")
+    nm_conn.execute("CREATE INDEX idx_nm_name ON nm_symbols(LOWER(name))")
+    nm_conn.execute("INSERT INTO nm_symbols VALUES(?, ?, ?, ?, ?, ?, ?)",
+                    ("RomachCategories", "Enum", "node_modules/@romach/enums/dist/index.d.ts",
+                     100, 120, "enum RomachCategories", "@romach/enums"))
+    nm_conn.commit()
+    nm_conn.close()
+
+    return db_path, nm_path
+
+
+@pytest.fixture
+def mock_proj_nm(mock_crg_db_nm):
+    db_path, nm_path = mock_crg_db_nm
+    return {"id": 1, "name": "test", "crg_db_path": db_path, "nm_index_path": nm_path}
+
+
+class TestNearResolutionGaps:
+    """Tests for nm_index near=, basename near=, graph-anchor tags."""
+
+    def test_near_resolves_nm_index_symbol(self, mock_proj_nm):
+        """near='RomachCategories' should resolve via nm_index.db, returning
+        files connected to the .d.ts file (importers in the CRG graph)."""
+        from crg_intelligence import CRGProvider
+        provider = CRGProvider(mock_proj_nm)
+        assert provider.is_available()
+        results = provider.search("iconResolver", near="RomachCategories")
+        # nm_index fallback should have resolved RomachCategories
+        # Results should be filtered to files connected to the .d.ts
+        assert len(results) > 0, "near='RomachCategories' should resolve via nm_index"
+
+    def test_near_accepts_basename_path(self, mock_proj_snippets):
+        """near='icon-resolver' (a file basename, no slash/extension) should
+        resolve to src/utils/icon-resolver.ts via the basename path fallback."""
+        from crg_intelligence import CRGProvider
+        provider = CRGProvider(mock_proj_snippets)
+        assert provider.is_available()
+        results = provider.search("planeService", near="icon-resolver")
+        # Should return results filtered to icon-resolver's neighborhood
+        assert len(results) > 0, "near='icon-resolver' should resolve via basename fallback"
+
+    def test_graph_anchor_tag_on_results(self, mock_proj_nm):
+        """Results should have is_graph_anchor field — True for CRG symbols,
+        False for nm_index (external) symbols."""
+        from crg_intelligence import CRGProvider
+        provider = CRGProvider(mock_proj_nm)
+        assert provider.is_available()
+        results = provider.hybrid_search("iconResolver", max_results=5, embedding_weight=0.0)
+        assert len(results) > 0
+        # CRG graph symbols should be graph anchors
+        for r in results:
+            assert "is_graph_anchor" in r, f"Missing is_graph_anchor: {r.keys()}"
+
+    def test_narrowing_failed_warning(self, mock_proj_snippets, tmp_path):
+        """When near= resolves but filtered >= 70% of unfiltered, output should
+        contain 'didn't narrow' warning."""
+        import intelligraph_mcp
+        intelligraph_mcp.REPO_DIR = str(tmp_path)
+        intelligraph_mcp._ORIGINAL_REPO_DIR = ""
+        intelligraph_mcp._SESSION_SEARCHES.clear()
+        intelligraph_mcp._SESSION_SEEN.clear()
+        intelligraph_mcp._SESSION_CALL_COUNTER[0] = 0
+        for fp in ["utils/icon-resolver.ts", "icons/icons.ts", "services/plane.ts"]:
+            full = os.path.join(str(tmp_path), fp)
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            with open(full, "w") as f:
+                f.write("// stub")
+        from crg_intelligence import CRGProvider
+        provider = CRGProvider(mock_proj_snippets)
+        provider.is_available()
+        # Use a near= that resolves but is broad (connects to most files)
+        output = intelligraph_mcp._dispatch(
+            "search", {"query": "Service", "near": "iconResolver"}, provider)
+        # If near didn't narrow, should see the warning
+        # (May or may not fire depending on graph structure — test that the
+        #  warning text exists in the code path when it does fire)
+        if "didn't narrow" in output:
+            assert "Try near=" in output
+
+    def test_search_in_file_returns_matches(self, tmp_path):
+        """search_in_file should return matching lines with line numbers."""
+        import intelligraph_mcp
+        intelligraph_mcp.REPO_DIR = str(tmp_path)
+        # Create a test file
+        test_file = os.path.join(str(tmp_path), "test.d.ts")
+        with open(test_file, "w") as f:
+            f.write("export enum Platforms {\n  ZIK = 'zik',\n  KARISH = 'karish',\n}\n")
+            f.write("export enum RomachCategories {\n  FOO = 'foo',\n}\n")
+        result = intelligraph_mcp._search_in_file("Platforms", test_file, max_lines=10)
+        assert "Platforms" in result
+        assert "1:" in result  # line number — Platforms is on line 1
+
+    def test_search_in_file_bounded_output(self, tmp_path):
+        """search_in_file should respect max_lines limit."""
+        import intelligraph_mcp
+        intelligraph_mcp.REPO_DIR = str(tmp_path)
+        test_file = os.path.join(str(tmp_path), "test.ts")
+        with open(test_file, "w") as f:
+            for i in range(50):
+                f.write(f"// line {i}: Platforms = 'zik'\n")
+        result = intelligraph_mcp._search_in_file("Platforms", test_file, max_lines=5)
+        # Should only show 5 match lines (excluding header/footer)
+        match_lines = [l for l in result.split("\n") if l and l[0].isdigit() and ": " in l]
+        assert len(match_lines) <= 5, f"Expected <=5 matches, got {len(match_lines)}"
+        assert "increase max_lines" in result

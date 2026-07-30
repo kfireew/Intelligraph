@@ -750,6 +750,24 @@ class CRGProvider(IntelligenceProvider):
                 except Exception:
                     pass
 
+        if not start_nodes and not is_path:
+            # Fix H: Basename path fallback — catch near="icon-resolver" (a file
+            # basename from a search result, no slash/extension) by matching
+            # against file_path LIKE '%/basename%'. Must run BEFORE snippet
+            # fallback so file matches take priority over snippet coincidence.
+            try:
+                start_nodes = conn.execute(
+                    "SELECT qualified_name, file_path FROM nodes "
+                    "WHERE file_path IS NOT NULL "
+                    "AND REPLACE(LOWER(file_path), '\\', '/') LIKE ? LIMIT 10",
+                    (f"%/{sym_lower}%",)
+                ).fetchall()
+                if start_nodes:
+                    _vmsg("CRG BFS near '%s': basename path fallback -> %d files",
+                          symbol[:40], len(start_nodes))
+            except Exception:
+                pass
+
         if not start_nodes:
             # Snippet fallback: scan node_snippets for the symbol string.
             # Catches object property values (TRACK_ZIK), string literals,
@@ -782,6 +800,32 @@ class CRGProvider(IntelligenceProvider):
                         return result_files
             except Exception as e:
                 log.warning("CRG BFS snippet fallback failed: %s", e)
+
+            # Fix G: nm_index fallback — catch external package symbols
+            # (RomachCategories, Platforms, IconsNames) that live in .d.ts
+            # files indexed by nm_index.db, not in the CRG graph. Returns
+            # the .d.ts file_path(s) as the near_files set. Results then
+            # filter to CRG files that import it (via IMPORTS_FROM edges).
+            try:
+                nm_path = self.proj.get("nm_index_path")
+                if nm_path and os.path.isfile(nm_path):
+                    import sqlite3 as _nm_sqlite
+                    nm_conn = _nm_sqlite.connect(f"file:{nm_path}?mode=ro", uri=True)
+                    nm_conn.row_factory = _nm_sqlite.Row
+                    nm_rows = nm_conn.execute(
+                        "SELECT DISTINCT file_path FROM nm_symbols "
+                        "WHERE LOWER(name) = ? LIMIT 5",
+                        (sym_lower,)
+                    ).fetchall()
+                    nm_conn.close()
+                    if nm_rows:
+                        result_files = {r["file_path"] for r in nm_rows}
+                        _vmsg("CRG BFS near '%s': nm_index fallback -> %d files",
+                              symbol[:40], len(result_files))
+                        return result_files
+            except Exception as e:
+                log.warning("CRG BFS nm_index fallback failed: %s", e)
+
             return set()
 
         frontier = set()
@@ -1036,8 +1080,17 @@ class CRGProvider(IntelligenceProvider):
         # If near is provided, filter ALL results to only files in the near subgraph.
         # If near was unresolved (near_files is None + near_unresolved), skip
         # filtering and tag all results so the format layer can emit guidance.
+        # Fix I: if near resolved but filtered >= 70% of unfiltered, tag
+        # "near_didnt_narrow" so the format layer warns the agent.
+        pre_filter_count = len(results)
         if near_files is not None:
             results = [r for r in results if r.get("file_path") in near_files]
+            if pre_filter_count > 0 and len(results) >= 0.7 * pre_filter_count and len(results) > 3:
+                for r in results:
+                    reasons = r.get("reason", [])
+                    if "near_didnt_narrow" not in reasons:
+                        reasons.append("near_didnt_narrow")
+                        r["reason"] = reasons
         elif near_unresolved:
             for r in results:
                 reasons = r.get("reason", [])
@@ -1354,6 +1407,7 @@ class CRGProvider(IntelligenceProvider):
             entry["confidence"] = self._compute_confidence_v2(in_both, exact, sem_score, len(matched), is_lex)
             entry["confidence_reason"] = self._confidence_reason_v2(in_both, exact, sem_score, matched, is_lex, base.get("lexical_hit"))
             entry["found_via"] = self._found_via(in_both, exact, sem_score, is_lex, base.get("lexical_hit"))
+            entry["is_graph_anchor"] = True  # RRF-merged results are all from CRG graph
             entry["_stages_tried"] = list(stages_tried)
             stages_hit = []
             if fp in fts_rank:
@@ -1395,6 +1449,9 @@ class CRGProvider(IntelligenceProvider):
         is_near_unresolved = "near_unresolved" in r.get("reason", [])
         is_lexical = "lexical" in r.get("reason", [])
         lex = r.get("lexical_hit") or {}
+        # Fix I: graph-anchor visibility — nm_index results are NOT graph anchors.
+        is_nm = r.get("source") == "node_modules"
+        r["is_graph_anchor"] = not is_nm
         if is_near_unresolved:
             r["confidence"] = "LOW"
             r["confidence_reason"] = "near= not resolved; showing unfiltered results"

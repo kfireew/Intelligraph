@@ -362,6 +362,7 @@ def _format_search(results, query, near="", provider=None):
     # Track whether any fallback occurred (for transparency block)
     any_lexical = False
     any_near_unresolved = False
+    any_near_didnt_narrow = False
     any_snippet_fallback = False
 
     for i, r in enumerate(real_results, 1):
@@ -374,17 +375,24 @@ def _format_search(results, query, near="", provider=None):
         stale_tag = " [stale]" if is_stale else ""
         is_lexical = "lexical" in reasons
         is_near_unr = "near_unresolved" in reasons
+        is_near_narrow = "near_didnt_narrow" in reasons
         is_snip_fb = "snippet_fallback" in reasons
+        is_graph_anchor = r.get("is_graph_anchor", True)
+        # Fix I: graph-anchor visibility — [anchor] for graph symbols, [external] for nm_index
+        anchor_vis = " [anchor]" if is_graph_anchor else " [external]"
         if is_lexical:
             any_lexical = True
         if is_near_unr:
             any_near_unresolved = True
+        if is_near_narrow:
+            any_near_didnt_narrow = True
         if is_snip_fb:
             any_snippet_fallback = True
 
         # Focus anchor: best symbol for near= anchoring (top 3 results only)
+        # Only emit anchor= for graph-anchor results (external symbols won't resolve in near=)
         anchor_tag = ""
-        if i <= 3 and not is_stale and r_tag != "L":
+        if i <= 3 and not is_stale and r_tag != "L" and is_graph_anchor:
             anchor_name = r.get("name", "")
             if anchor_name and anchor_name != "?":
                 anchor_tag = f' anchor="{anchor_name}"'
@@ -410,9 +418,9 @@ def _format_search(results, query, near="", provider=None):
                 except Exception:
                     pass
             if connections:
-                lines.append(f"{i}. {fp} connected to: {', '.join(connections)} [{r_tag}]{stale_tag}{anchor_tag}")
+                lines.append(f"{i}. {fp} connected to: {', '.join(connections)} [{r_tag}]{stale_tag}{anchor_tag}{anchor_vis}")
             else:
-                lines.append(f"{i}. {fp} [{r_tag}]{stale_tag}{anchor_tag}")
+                lines.append(f"{i}. {fp} [{r_tag}]{stale_tag}{anchor_tag}{anchor_vis}")
             if siblings:
                 lines.append(f"   nearby: {', '.join(siblings)}")
             _track_seen(fp, "search", call_id)
@@ -428,7 +436,7 @@ def _format_search(results, query, near="", provider=None):
             else:
                 loc = fp
             files_list.append(loc)
-            lines.append(f"{i}. {name} ({kind}) {loc} [{r_tag}]{stale_tag}{anchor_tag}")
+            lines.append(f"{i}. {name} ({kind}) {loc} [{r_tag}]{stale_tag}{anchor_tag}{anchor_vis}")
             _track_seen(fp, "search", call_id, had_signature=bool(r.get("signature")))
 
     for g in guidance:
@@ -460,6 +468,17 @@ def _format_search(results, query, near="", provider=None):
         else:
             lines.append(f'\n-> near="{near}" not found in graph. '
                          f'Drop near= for this search, then use a symbol from the results as near= next.')
+
+    # Branch 2b: near used, resolved but didn't narrow → warn + suggest specific anchor
+    elif near and any_near_didnt_narrow:
+        candidates = []
+        for r in real_results[:3]:
+            n = r.get("name", "")
+            if n and n != "?" and r.get("is_graph_anchor", True) and len(n) <= 40:
+                candidates.append(n)
+        if candidates:
+            lines.append(f'\n-> near="{near}" resolved but didn\'t narrow results '
+                         f'(subsystem too broad). Try near="{candidates[0]}" for a more specific focus.')
 
     # Branch 3: near used, focused (1-4 HIGH-confidence) → no suggestion, recommend node()
     elif near and 1 <= len(real_results) <= 4 and top_conf == "HIGH":
@@ -657,6 +676,10 @@ def _dispatch(name, args, provider):
     if name == "package":
         return _resolve_package(args.get("name", ""))
 
+    if name == "search_in_file":
+        return _search_in_file(args.get("query", ""), args.get("path", ""),
+                               args.get("max_lines", 20))
+
     return f"Unknown tool: {name}"
 
 
@@ -759,6 +782,65 @@ _NODE_COUNT = 0
 _EDGE_COUNT = 0
 _LAST_MTIME = 0.0
 _PROVIDER = None
+
+
+def _search_in_file(query: str, path: str, max_lines: int = 20) -> str:
+    """Search within a local file for lines matching a query (grep replacement).
+
+    Returns matching lines with line numbers, bounded to max_lines.
+    Works on any local file — especially useful for .d.ts files from package().
+    ~100 tokens vs ~4000 for chunked reads.
+
+    Args:
+        query: regex or plain text to search for
+        path: absolute or repo-relative file path
+        max_lines: max matching lines to return (default 20)
+    """
+    if not query:
+        return "ERROR: query is required."
+    if not path:
+        return "ERROR: path is required."
+
+    # Resolve path relative to REPO_DIR if not absolute
+    p = path
+    if not os.path.isabs(p) and REPO_DIR:
+        p = os.path.join(REPO_DIR, p)
+    p = p.replace("\\", "/")
+
+    if not os.path.isfile(p):
+        return f"ERROR: file not found: {p}"
+
+    try:
+        import re as _re
+        pattern = _re.compile(_re.escape(query), _re.IGNORECASE)
+    except Exception as e:
+        return f"ERROR: invalid query pattern: {e}"
+
+    matches = []
+    try:
+        with open(p, "r", encoding="utf-8", errors="replace") as f:
+            for line_num, line in enumerate(f, 1):
+                if len(matches) >= max_lines:
+                    break
+                if pattern.search(line):
+                    # Truncate long lines to keep output bounded
+                    stripped = line.rstrip("\n\r")
+                    if len(stripped) > 200:
+                        stripped = stripped[:197] + "..."
+                    matches.append(f"{line_num}: {stripped}")
+    except Exception as e:
+        return f"ERROR reading file: {e}"
+
+    if not matches:
+        _log_call("search_in_file", 0, 20)
+        return f"No matches for '{query}' in {path}."
+
+    lines = [f"## search_in_file: '{query}' in {path} ({len(matches)} matches)"]
+    lines.extend(matches)
+    if len(matches) >= max_lines:
+        lines.append(f"(showing first {max_lines} matches — increase max_lines for more)")
+    _log_call("search_in_file", len(matches), sum(len(l) for l in lines) // 4)
+    return "\n".join(lines)
 
 
 def _get_or_reload_provider():
@@ -937,6 +1019,21 @@ def main():
                 inputSchema={"type": "object", "properties": {
                     "name": {"type": "string", "description": "npm package name (e.g. @romach/enums, lodash)"}
                 }, "required": ["name"]},
+            ),
+            types.Tool(
+                name="search_in_file",
+                description=(
+                    "Search within a local file for lines matching a query. "
+                    "Returns matching lines with line numbers (like grep -n but bounded). "
+                    "Use this instead of reading a large file in chunks — ~100 tokens vs ~4000 for chunked reads. "
+                    "Works on any local file, especially .d.ts files from package(). "
+                    "Use Read with the returned line numbers for full context."
+                ),
+                inputSchema={"type": "object", "properties": {
+                    "query": {"type": "string", "description": "Text to search for in the file"},
+                    "path": {"type": "string", "description": "File path (absolute or repo-relative)"},
+                    "max_lines": {"type": "integer", "description": "Max matching lines to return (default 20)", "default": 20}
+                }, "required": ["query", "path"]},
             ),
         ]
 
