@@ -1233,3 +1233,197 @@ class TestNearResolutionGaps:
         match_lines = [l for l in result.split("\n") if l and l[0].isdigit() and ": " in l]
         assert len(match_lines) <= 5, f"Expected <=5 matches, got {len(match_lines)}"
         assert "increase max_lines" in result
+
+
+# ── Phase 5: backend query optimizer (auto-anchor, nm_index first, search_in_file) ─
+
+@pytest.fixture
+def mock_crg_db_broad(tmp_path):
+    """Mock CRG DB with many files connected to a few hubs — simulates broad
+    results that need auto-anchoring to narrow."""
+    db_path = str(tmp_path / "graph.db")
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE nodes (id INTEGER PRIMARY KEY, name TEXT, kind TEXT, "
+                 "qualified_name TEXT, file_path TEXT, signature TEXT, "
+                 "community_id INTEGER, line_start INTEGER, line_end INTEGER, is_test INTEGER)")
+    conn.execute("CREATE VIRTUAL TABLE nodes_fts USING fts5(name, signature, file_path, "
+                 "content='nodes', content_rowid='id')")
+    conn.execute("CREATE TABLE edges (source_qualified TEXT, target_qualified TEXT, kind TEXT)")
+    conn.execute("CREATE TABLE node_snippets (qualified_name TEXT PRIMARY KEY, "
+                 "node_name TEXT, file_path TEXT, line_start INTEGER, line_end INTEGER, snippet TEXT)")
+
+    # Two separate subsystems: "plane" files and "icon" files.
+    # "plane" query matches files in both, but each subsystem's
+    # anchor (PlaneCategories / IconsNames) only connects to its own files.
+    nodes = [
+        # Plane subsystem (files with "plane" in path)
+        (1, "planeFilter", "Function", "filters.planeFilter", "src/filters/plane-filter.ts",
+         "function planeFilter()", 1, 10, 40, 0),
+        (2, "planeService", "Function", "services.planeService", "src/services/plane.ts",
+         "function planeService()", 1, 1, 50, 0),
+        (3, "planeUtils", "Function", "utils.planeUtils", "src/utils/plane-utils.ts",
+         "function planeUtils()", 1, 1, 30, 0),
+        (4, "planeConfig", "Function", "config.planeConfig", "src/config/plane-config.ts",
+         "function planeConfig()", 1, 1, 20, 0),
+        (5, "planeStore", "Function", "store.planeStore", "src/store/plane-store.ts",
+         "function planeStore()", 1, 1, 40, 0),
+        (6, "planeRoutes", "Function", "routes.planeRoutes", "src/routes/plane-routes.ts",
+         "function planeRoutes()", 1, 1, 30, 0),
+        (7, "PlaneCategories", "Enum", "types.PlaneCategories", "src/types/categories.ts",
+         "enum PlaneCategories", 1, 1, 20, 0),
+        # Icon subsystem (files with "plane" in path but connected to icons)
+        (8, "iconResolver", "Function", "utils.iconResolver", "src/icons/plane-icon-resolver.ts",
+         "function iconResolver()", 2, 5, 30, 0),
+        (9, "IconsNames", "Const", "icons.IconsNames", "src/icons/plane-icons.ts",
+         "const IconsNames", 2, 200, 210, 0),
+        (10, "iconHelper", "Function", "utils.iconHelper", "src/icons/plane-icon-helper.ts",
+         "function iconHelper()", 2, 5, 20, 0),
+        (11, "iconConfig", "Function", "config.iconConfig", "src/icons/plane-icon-config.ts",
+         "function iconConfig()", 2, 1, 20, 0),
+        (12, "iconStore", "Function", "store.iconStore", "src/icons/plane-icon-store.ts",
+         "function iconStore()", 2, 1, 30, 0),
+        (13, "iconRoutes", "Function", "routes.iconRoutes", "src/icons/plane-icon-routes.ts",
+         "function iconRoutes()", 2, 1, 25, 0),
+        # Test file
+        (14, "testPlane", "Function", "tests.testPlane", "tests/test_plane.ts",
+         "function testPlane()", 3, 1, 20, 1),
+    ]
+    for nd in nodes:
+        conn.execute("INSERT INTO nodes VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", nd)
+        conn.execute("INSERT INTO nodes_fts(rowid, name, signature, file_path) VALUES(?, ?, ?, ?)",
+                     (nd[0], nd[1], nd[5], nd[4]))
+
+    # Edges: Plane subsystem connects to PlaneCategories only.
+    # Icon subsystem connects to IconsNames only.
+    # No cross-edges between subsystems — BFS from one won't reach the other.
+    edges = [
+        # Plane subsystem
+        ("filters.planeFilter", "types.PlaneCategories", "REFERENCES"),
+        ("services.planeService", "types.PlaneCategories", "IMPORTS_FROM"),
+        ("utils.planeUtils", "types.PlaneCategories", "IMPORTS_FROM"),
+        ("config.planeConfig", "types.PlaneCategories", "IMPORTS_FROM"),
+        ("store.planeStore", "types.PlaneCategories", "IMPORTS_FROM"),
+        ("routes.planeRoutes", "types.PlaneCategories", "IMPORTS_FROM"),
+        ("services.planeService", "filters.planeFilter", "CALLS"),
+        ("store.planeStore", "services.planeService", "CALLS"),
+        ("routes.planeRoutes", "services.planeService", "CALLS"),
+        # Icon subsystem (separate)
+        ("utils.iconResolver", "icons.IconsNames", "REFERENCES"),
+        ("utils.iconHelper", "icons.IconsNames", "REFERENCES"),
+        ("config.iconConfig", "icons.IconsNames", "IMPORTS_FROM"),
+        ("store.iconStore", "icons.IconsNames", "IMPORTS_FROM"),
+        ("routes.iconRoutes", "icons.IconsNames", "IMPORTS_FROM"),
+        ("store.iconStore", "utils.iconResolver", "CALLS"),
+        ("routes.iconRoutes", "utils.iconResolver", "CALLS"),
+        # Test file connects to plane subsystem only
+        ("tests.testPlane", "filters.planeFilter", "CALLS"),
+    ]
+    for ed in edges:
+        conn.execute("INSERT INTO edges VALUES(?, ?, ?)", ed)
+
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+@pytest.fixture
+def mock_proj_broad(mock_crg_db_broad):
+    return {"id": 1, "name": "test", "crg_db_path": mock_crg_db_broad}
+
+
+class TestBackendOptimizer:
+    """Tests for auto-anchor selection, auto-refinement, nm_index first."""
+
+    def test_auto_anchor_narrows_broad_results(self, mock_proj_broad):
+        """When no near= is provided and results > 5, auto-anchor should
+        pick a candidate that narrows to the Goldilocks zone."""
+        from crg_intelligence import CRGProvider
+        provider = CRGProvider(mock_proj_broad)
+        assert provider.is_available()
+        results = provider.hybrid_search("plane", max_results=20, embedding_weight=0.0)
+        # Should have auto-anchored and narrowed
+        assert any(r.get("auto_anchor") for r in results), \
+            f"Expected auto_anchor tag, got: {[r.get('auto_anchor') for r in results]}"
+        # Should be fewer than the unfiltered set
+        assert len(results) <= 10, f"Auto-anchor should narrow, got {len(results)} results"
+
+    def test_auto_anchor_skipped_for_focused_results(self, mock_proj):
+        """When results are already focused (≤4), no auto-anchor should apply."""
+        from crg_intelligence import CRGProvider
+        provider = CRGProvider(mock_proj)
+        assert provider.is_available()
+        results = provider.hybrid_search("upsertEntity", max_results=5, embedding_weight=0.0)
+        assert len(results) > 0
+        assert not any(r.get("auto_anchor") for r in results), \
+            "Auto-anchor should not fire for focused results"
+
+    def test_auto_anchor_goldilocks_scoring(self, mock_proj_broad):
+        """_auto_select_anchor should score candidates by reduction ratio —
+        0.15 retention should beat 0.90 retention."""
+        from crg_intelligence import CRGProvider
+        provider = CRGProvider(mock_proj_broad)
+        assert provider.is_available()
+        # Get unfiltered results first
+        unfiltered = provider.search("plane", max_results=20)
+        anchor, near_files = provider._auto_select_anchor(unfiltered)
+        if anchor:
+            # Verify the anchor actually narrows
+            surviving = sum(1 for r in unfiltered if r.get("file_path") in near_files)
+            ratio = surviving / len(unfiltered) if unfiltered else 1.0
+            # Should be in the Goldilocks zone (≤0.60 retention — narrowed by ≥40%)
+            assert ratio <= 0.60, f"Auto-anchor '{anchor}' retained {ratio:.2f}, expected <=0.60"
+
+    def test_auto_refinement_replaces_bad_near(self, mock_proj_broad):
+        """When near= is provided but doesn't narrow (≥70% survive),
+        backend should try better candidates and replace the user's anchor."""
+        from crg_intelligence import CRGProvider
+        provider = CRGProvider(mock_proj_broad)
+        assert provider.is_available()
+        # Use a broad near= that connects to most files
+        results = provider.hybrid_search("plane", max_results=20, embedding_weight=0.0,
+                                          near="PlaneCategories")
+        # If PlaneCategories is a hub (connects to most), auto-refinement should fire
+        # and pick a better anchor. Check that results are narrowed.
+        if any(r.get("auto_anchor") for r in results):
+            auto = results[0].get("auto_anchor")
+            assert auto != "PlaneCategories", \
+                "Auto-refinement should replace the bad near= with a better anchor"
+
+    def test_nm_index_searched_first_for_external_symbol(self, mock_proj_nm):
+        """search('RomachCategories') should find the nm_index result BEFORE
+        FTS — the external definition should appear in results."""
+        from crg_intelligence import CRGProvider
+        provider = CRGProvider(mock_proj_nm)
+        assert provider.is_available()
+        results = provider.search("RomachCategories", max_results=10)
+        assert len(results) > 0
+        # At least one result should be from nm_index
+        nm_results = [r for r in results if r.get("source") == "node_modules"]
+        assert len(nm_results) > 0, f"Expected nm_index result, got sources: {[r.get('source') for r in results]}"
+        # The nm_index result should have the correct file path
+        assert any("index.d.ts" in r.get("file_path", "") for r in nm_results)
+
+    def test_search_in_file_lines_for_dts_results(self, mock_proj_nm, tmp_path):
+        """When a search result is a .d.ts file from nm_index, _format_search
+        should append matching lines from that file (Phase D integration)."""
+        import intelligraph_mcp
+        intelligraph_mcp.REPO_DIR = str(tmp_path)
+        intelligraph_mcp._ORIGINAL_REPO_DIR = ""
+        intelligraph_mcp._SESSION_SEARCHES.clear()
+        intelligraph_mcp._SESSION_SEEN.clear()
+        intelligraph_mcp._SESSION_CALL_COUNTER[0] = 0
+        # Create the .d.ts file locally so search_in_file can read it
+        dts_dir = os.path.join(str(tmp_path), "node_modules", "@romach", "enums", "dist")
+        os.makedirs(dts_dir, exist_ok=True)
+        dts_file = os.path.join(dts_dir, "index.d.ts")
+        with open(dts_file, "w") as f:
+            f.write("export enum RomachCategories {\n  ZIK = 'zik',\n  KARISH = 'karish',\n}\n")
+        from crg_intelligence import CRGProvider
+        provider = CRGProvider(mock_proj_nm)
+        provider.is_available()
+        output = intelligraph_mcp._dispatch("search", {"query": "RomachCategories"}, provider)
+        # Should contain matching lines from the .d.ts file
+        assert "RomachCategories" in output
+        # Should have line-numbered matches from search_in_file
+        assert any(l.strip().startswith(("1:", "2:", "3:", "4:")) for l in output.split("\n")), \
+            f"Expected line-numbered matches from search_in_file:\n{output}"

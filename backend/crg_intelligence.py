@@ -924,6 +924,47 @@ class CRGProvider(IntelligenceProvider):
                                            "exact_match": False,
                                            "line_start": 0, "line_end": 0})
 
+        # Phase C: nm_index first — when a term exactly matches an external
+        # package symbol (RomachCategories, Platforms), include it BEFORE FTS.
+        # This makes search("RomachCategories") find the .d.ts definition
+        # immediately, without the LLM calling package() for discovery.
+        nm_early_results = []
+        try:
+            nm_path = self.proj.get("nm_index_path")
+            if nm_path and os.path.isfile(nm_path):
+                import sqlite3 as _nm_sqlite
+                nm_conn = _nm_sqlite.connect(f"file:{nm_path}?mode=ro", uri=True)
+                nm_conn.row_factory = _nm_sqlite.Row
+                for term in terms:
+                    nm_rows = nm_conn.execute(
+                        "SELECT name, kind, file_path, line_start, line_end, signature, package_name "
+                        "FROM nm_symbols WHERE LOWER(name) = ? LIMIT 5",
+                        (term.lower(),)
+                    ).fetchall()
+                    for r in nm_rows:
+                        fp = self._normalize_path(r["file_path"]) if r["file_path"] else r["file_path"]
+                        if near_files and fp not in near_files:
+                            continue
+                        nm_early_results.append({
+                            "file_path": fp or r["file_path"],
+                            "name": r["name"],
+                            "kind": r["kind"] or "External",
+                            "signature": r["signature"] or "",
+                            "line_start": r["line_start"] or 0,
+                            "line_end": r["line_end"] or 0,
+                            "score": 15.0,
+                            "exact_match": True,
+                            "matched_terms": [term],
+                            "reason": ["nm_exact"],
+                            "source": "node_modules",
+                            "mode": "search",
+                            "package": r["package_name"] or "",
+                            "is_graph_anchor": False,
+                        })
+                nm_conn.close()
+        except Exception:
+            pass
+
         # Pass 0b: Symbol name LIKE — catches camelCase / concatenated / underscore names.
         # No kind filter — File, Enum, Interface, Test all match.
         for term in terms:
@@ -1055,8 +1096,8 @@ class CRGProvider(IntelligenceProvider):
             if len(data["matched_terms"]) >= 2:
                 data["score"] *= 1.5
 
-        # Merge: path results (per-symbol) first, then FTS/symbol results (per-file)
-        results = list(path_results)
+        # Merge: nm_index early results first, then path results, then FTS/symbol results
+        results = list(nm_early_results) + list(path_results)
         for fp, data in sorted(file_scores.items(), key=lambda x: -x[1]["score"])[:max_results]:
             reasons = ["crg_fts_match"]
             if fp in lexical_hits:
@@ -1275,6 +1316,31 @@ class CRGProvider(IntelligenceProvider):
         exact_count = sum(1 for r in det_results if r.get("exact_match"))
         has_lexical = any("lexical" in r.get("reason", []) for r in det_results)
 
+        # ── Auto-anchor / auto-refinement (Phase A+B) ──
+        # The backend acts as query optimizer: when results are broad, it
+        # evaluates candidate anchors and picks the one that best narrows.
+        # Phase A: no near= provided, results > 5 → auto-select anchor.
+        # Phase B: near= provided but didn't narrow → try better candidates.
+        # The LLM never decides which anchor — the backend optimizes silently.
+        auto_anchor = None
+        auto_near_files = None
+        if not near and len(det_results) > 5:
+            auto_anchor, auto_near_files = self._auto_select_anchor(det_results)
+        elif near and len(det_results) > 5:
+            is_narrow = any("near_didnt_narrow" in r.get("reason", []) for r in det_results)
+            is_unresolved = any("near_unresolved" in r.get("reason", []) for r in det_results)
+            if is_narrow or is_unresolved:
+                auto_anchor, auto_near_files = self._auto_select_anchor(det_results)
+
+        if auto_near_files:
+            filtered = [r for r in det_results if r.get("file_path") in auto_near_files]
+            if filtered and len(filtered) < len(det_results):
+                det_results = filtered
+                for r in det_results:
+                    r["auto_anchor"] = auto_anchor
+                _vmsg("CRG AUTO-ANCHOR applied: '%s' narrowed %d -> %d results",
+                      auto_anchor, len(det_results) + len(filtered), len(det_results))
+
         # Short-circuit: Stage 1 found enough OR embeddings disabled.
         # `len(det_results) >= 3` is the key threshold: if FTS/LIKE/path/lexical
         # found 3+ results, semantic adds latency (~50s first call for encoder
@@ -1441,6 +1507,76 @@ class CRGProvider(IntelligenceProvider):
         _vmsg("CRG ROUTER: query='%s' -> Stage 1+2 (det=%d sem=%d) -> %d results",
               query[:50], len(det_results), len(sem_results), len(results))
         return results
+
+    def _auto_select_anchor(self, results: list, max_candidates: int = 8) -> tuple:
+        """Evaluate candidate anchors and pick the one that best narrows results.
+
+        Generates candidates from top result names + file basenames, runs BFS
+        for each (~5ms), counts surviving results, and scores by Goldilocks
+        reduction (peak at 25% retention).
+
+        Returns: (anchor_name, near_files set) or (None, None) if no good candidate.
+        """
+        if not results or len(results) <= 4:
+            return None, None
+
+        # Generate candidates from top results
+        candidates = []
+        seen = set()
+        for r in results[:5]:
+            name = r.get("name", "")
+            if name and name != "?" and name not in seen and len(name) <= 40:
+                candidates.append(name)
+                seen.add(name)
+            # File basename as candidate
+            fp = r.get("file_path", "")
+            if fp:
+                base = fp.replace("\\", "/").split("/")[-1]
+                # Strip extension
+                if "." in base:
+                    base = base.rsplit(".", 1)[0]
+                if base and base not in seen and len(base) >= 3:
+                    candidates.append(base)
+                    seen.add(base)
+            if len(candidates) >= max_candidates:
+                break
+
+        if not candidates:
+            return None, None
+
+        result_files = {r.get("file_path", "") for r in results}
+        total = len(results)
+
+        best_anchor = None
+        best_near_files = None
+        best_score = 0.0
+
+        for candidate in candidates:
+            try:
+                near_files = self._bfs_files_for_symbol(candidate, self._NEAR_HOPS)
+            except Exception:
+                continue
+            if not near_files:
+                continue
+            # Count how many results survive the filter
+            surviving = sum(1 for r in results if r.get("file_path") in near_files)
+            if surviving == 0 or surviving == total:
+                continue  # too narrow or no effect
+            reduction = surviving / total
+            # Goldilocks scoring: peak at 0.25 retention (75% reduction)
+            # 0.10-0.40 is the good zone; >0.70 is too broad
+            score = max(0.0, 1.0 - abs(reduction - 0.25) * 2.5)
+            if score > best_score:
+                best_score = score
+                best_anchor = candidate
+                best_near_files = near_files
+
+        if best_score > 0.1 and best_near_files:
+            _vmsg("CRG AUTO-ANCHOR: '%s' (score=%.2f, %d/%d survive)",
+                  best_anchor, best_score,
+                  sum(1 for r in results if r.get("file_path") in best_near_files), total)
+            return best_anchor, best_near_files
+        return None, None
 
     def _annotate_result(self, r: dict, stages_tried: list, det_results: list, near: str):
         """Annotate a Stage-1-only result with confidence, found_via, stage trace."""

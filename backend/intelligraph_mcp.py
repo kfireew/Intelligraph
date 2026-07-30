@@ -442,6 +442,35 @@ def _format_search(results, query, near="", provider=None):
     for g in guidance:
         lines.append(f"\n{g.get('confidence_reason', '')}")
 
+    # ── Phase D: search_in_file integration for .d.ts results ──
+    # When a result is from nm_index (external package) and the file is a
+    # .d.ts, append matching lines from that file so the LLM sees the actual
+    # declarations without calling search_in_file or reading chunks.
+    for r in real_results:
+        if r.get("source") != "node_modules":
+            continue
+        fp = _rewrite_path(r.get("file_path", "?"))
+        if not fp or not fp.endswith(".d.ts"):
+            continue
+        try:
+            in_file = _search_in_file(query, fp, max_lines=8)
+            if "ERROR" not in in_file and "No matches" not in in_file:
+                # Extract just the matching lines (skip the header)
+                for ml in in_file.split("\n"):
+                    if ml and ml[0].isdigit() and ": " in ml:
+                        lines.append(f"   {ml}")
+        except Exception:
+            pass
+
+    # ── Auto-anchor transparency ──
+    auto_anchor_name = None
+    for r in real_results:
+        if r.get("auto_anchor"):
+            auto_anchor_name = r["auto_anchor"]
+            break
+    if auto_anchor_name:
+        lines.append(f'\n(auto-focused to "{auto_anchor_name}" — {len(real_results)} of broader results)')
+
     # ── Smarter guidance: three branches, no stepping-stone loop ──
     # Branch 1: no near, broad results → list candidate anchors from results
     if not near and len(real_results) > 5:
