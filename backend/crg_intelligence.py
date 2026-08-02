@@ -21,6 +21,7 @@ import os
 import re
 import sqlite3
 import sys
+import time
 from collections import defaultdict, deque
 
 log = logging.getLogger(__name__)
@@ -311,6 +312,15 @@ class CRGProvider(IntelligenceProvider):
         p = abs_path.replace("\\", "/")
         if self._repo_prefix and p.lower().startswith(self._repo_prefix.lower()):
             return p[len(self._repo_prefix):]
+        # Fix K: Fallback to original_repo_dir (Docker path saved before deletion).
+        # When the MCP runs locally, repo_dir is the LOCAL path but the graph DB
+        # stores Docker-absolute paths. Without this fallback, _normalize_path
+        # returns full Docker paths, breaking _is_stale_path and _rewrite_path.
+        original = self.proj.get("original_repo_dir", "")
+        if original:
+            orig_prefix = original.replace("\\", "/").rstrip("/") + "/"
+            if p.lower().startswith(orig_prefix.lower()):
+                return p[len(orig_prefix):]
         return p
 
     def build_valid_paths(self):
@@ -1324,9 +1334,16 @@ class CRGProvider(IntelligenceProvider):
         # The LLM never decides which anchor — the backend optimizes silently.
         auto_anchor = None
         auto_near_files = None
-        if not near and len(det_results) > 5:
+        # Fix N: Skip auto-anchor for large graphs (BFS is too slow).
+        # Auto-anchor does 3-8 BFS calls, each ~5-50ms on a small graph but
+        # 100-500ms on a 28k-node graph. Only run when the graph is small.
+        _node_count = self.proj.get("nodes", 0) or 0
+        _auto_anchor_ok = _node_count < 5000 or _node_count == 0
+        if not _auto_anchor_ok:
+            _vmsg("CRG AUTO-ANCHOR: skipped (graph has %d nodes, >5000 threshold)", _node_count)
+        if not near and len(det_results) > 5 and _auto_anchor_ok:
             auto_anchor, auto_near_files = self._auto_select_anchor(det_results)
-        elif near and len(det_results) > 5:
+        elif near and len(det_results) > 5 and _auto_anchor_ok:
             is_narrow = any("near_didnt_narrow" in r.get("reason", []) for r in det_results)
             is_unresolved = any("near_unresolved" in r.get("reason", []) for r in det_results)
             if is_narrow or is_unresolved:
@@ -1810,8 +1827,13 @@ class CRGProvider(IntelligenceProvider):
 
         est_tokens = len(nodes_result) * 15
         current_hop = 0
+        _trav_start = time.monotonic()
+        _MAX_TRAVERSE_TIME = 5.0  # seconds
 
         while queue and len(nodes_result) < max_nodes and est_tokens < max_tokens:
+            if time.monotonic() - _trav_start > _MAX_TRAVERSE_TIME:
+                _vmsg("CRG TRAVERSE: timeout after %.1fs, returning partial results", time.monotonic() - _trav_start)
+                break
             current, depth = queue.popleft()
             if depth >= max_hops:
                 continue
@@ -2157,7 +2179,16 @@ class CRGProvider(IntelligenceProvider):
         frontier = set(target_qnames)
         depth = 0
 
+        import time as _time
+        _impact_start = _time.monotonic()
+        _MAX_IMPACT_TIME = 8.0  # seconds — prevent opencode tool timeout
+        _impact_timed_out = False
+
         while frontier and (depth_max == 0 or depth < depth_max):
+            if _time.monotonic() - _impact_start > _MAX_IMPACT_TIME:
+                _vmsg("CRG IMPACT: timeout after %.1fs, returning partial results", _time.monotonic() - _impact_start)
+                _impact_timed_out = True
+                break
             depth += 1
             next_frontier = set()
             for qname in frontier:
@@ -2397,9 +2428,11 @@ class CRGProvider(IntelligenceProvider):
         for r in all_results:
             r["total_count"] = total
             r["has_more"] = True  # dispatch sets False for last page
+            r["timed_out"] = _impact_timed_out
 
-        _vmsg("CRG IMPACT: target='%s' change=%s -> %d files (depth_max=%d, %d hops)",
-              target[:40], change, total, depth_max, depth)
+        _vmsg("CRG IMPACT: target='%s' change=%s -> %d files (depth_max=%d, %d hops%s)",
+              target[:40], change, total, depth_max, depth,
+              " [TIMED OUT]" if _impact_timed_out else "")
         return all_results
 
     # ── Mode 4: Execution flows ────────────────────────────────────

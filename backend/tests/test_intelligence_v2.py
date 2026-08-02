@@ -853,10 +853,13 @@ class TestNearResilience:
         from crg_intelligence import CRGProvider
         provider = CRGProvider(mock_proj_snippets)
         provider.is_available()
-        # Don't create any files in tmp_path — all results will be stale
+        # Don't create any files in tmp_path — all results will be stale.
+        # Fix L: when >50% are stale, tags are skipped (systemic path issue).
+        # So [stale] should NOT appear — instead the warning is logged to stderr.
         output = intelligraph_mcp._dispatch("search", {"query": "iconResolver"}, provider)
-        # Output should contain [stale] tag since no files exist on disk
-        assert "[stale]" in output, f"Expected [stale] tag, got:\n{output}"
+        # Stale tags should be skipped since >50% are stale
+        assert "[stale]" not in output, \
+            f"Stale tags should be skipped when >50% stale (Fix L), got:\n{output}"
 
     def test_snippet_schema_v2_join_on_qualified_name(self, mock_proj_snippets):
         """get_snippets should find snippets using qualified_name (v2 schema),
@@ -1427,3 +1430,131 @@ class TestBackendOptimizer:
         # Should have line-numbered matches from search_in_file
         assert any(l.strip().startswith(("1:", "2:", "3:", "4:")) for l in output.split("\n")), \
             f"Expected line-numbered matches from search_in_file:\n{output}"
+
+
+# ── Phase 6: stale path fix, package fallback, timeout, auto-anchor skip ─
+
+class TestReliabilityFixes:
+    """Tests for stale path normalization, package fallback, timeouts."""
+
+    def test_normalize_path_fallback_to_original_repo_dir(self, tmp_path):
+        """_normalize_path should strip original_repo_dir (Docker path) when
+        repo_dir (local path) doesn't match the DB paths."""
+        from crg_intelligence import CRGProvider
+        # DB paths are Docker-absolute, but repo_dir is local Windows path
+        proj = {
+            "id": 1, "name": "test",
+            "crg_db_path": "",  # will be set by fixture
+            "repo_dir": "C:/Users/test/repo",
+            "original_repo_dir": "/app/backend/data/repos/uuid",
+        }
+        db_path = str(tmp_path / "graph.db")
+        conn = sqlite3.connect(db_path)
+        conn.execute("CREATE TABLE nodes (id INTEGER PRIMARY KEY, name TEXT, kind TEXT, "
+                     "qualified_name TEXT, file_path TEXT, signature TEXT, "
+                     "community_id INTEGER, line_start INTEGER, line_end INTEGER, is_test INTEGER)")
+        conn.execute("CREATE VIRTUAL TABLE nodes_fts USING fts5(name, signature, file_path, "
+                     "content='nodes', content_rowid='id')")
+        conn.execute("CREATE TABLE edges (source_qualified TEXT, target_qualified TEXT, kind TEXT)")
+        conn.execute("CREATE TABLE node_snippets (qualified_name TEXT PRIMARY KEY, "
+                     "node_name TEXT, file_path TEXT, line_start INTEGER, line_end INTEGER, snippet TEXT)")
+        # Store a Docker-absolute path
+        conn.execute("INSERT INTO nodes VALUES(1, 'foo', 'Function', 'app.foo', "
+                     "'/app/backend/data/repos/uuid/src/app.ts', '', 1, 1, 10, 0)")
+        conn.execute("INSERT INTO nodes_fts(rowid, name, signature, file_path) VALUES(1, 'foo', '', "
+                     "'/app/backend/data/repos/uuid/src/app.ts')")
+        conn.commit()
+        conn.close()
+        proj["crg_db_path"] = db_path
+        provider = CRGProvider(proj)
+        assert provider.is_available()
+        provider._get_conn()
+        # _normalize_path should strip the Docker prefix via original_repo_dir
+        result = provider._normalize_path("/app/backend/data/repos/uuid/src/app.ts")
+        assert result == "src/app.ts", f"Expected 'src/app.ts', got '{result}'"
+
+    def test_stale_path_degrades_gracefully(self, mock_proj_snippets, tmp_path):
+        """When >50% of results are stale, stale tags should be skipped."""
+        import intelligraph_mcp
+        intelligraph_mcp.REPO_DIR = str(tmp_path)
+        intelligraph_mcp._ORIGINAL_REPO_DIR = ""
+        intelligraph_mcp._SESSION_SEARCHES.clear()
+        intelligraph_mcp._SESSION_SEEN.clear()
+        intelligraph_mcp._SESSION_CALL_COUNTER[0] = 0
+        mock_proj_snippets["repo_dir"] = str(tmp_path)
+        from crg_intelligence import CRGProvider
+        provider = CRGProvider(mock_proj_snippets)
+        provider.is_available()
+        # No files created in tmp_path — all results will be stale
+        output = intelligraph_mcp._dispatch("search", {"query": "iconResolver"}, provider)
+        # Since >50% are stale, stale tags should NOT appear
+        assert "[stale]" not in output, \
+            f"Stale tags should be skipped when >50% stale, got:\n{output}"
+
+    def test_package_strips_dot_slash_from_types(self, tmp_path):
+        """package() should strip ./ from types field before querying nm_index."""
+        import intelligraph_mcp
+        intelligraph_mcp.REPO_DIR = str(tmp_path)
+        intelligraph_mcp._ORIGINAL_REPO_DIR = ""
+        intelligraph_mcp._NM_INDEX_PATH = None  # no nm_index — force file scan fallback
+        # Create a fake package with ./ in types
+        pkg_dir = os.path.join(str(tmp_path), "node_modules", "@test", "pkg", "dist")
+        os.makedirs(pkg_dir, exist_ok=True)
+        with open(os.path.join(pkg_dir, "index.d.ts"), "w") as f:
+            f.write("export enum PlaneCategories {\n  ZIK = 'zik',\n}\n")
+            f.write("export const IconsNames = {};\n")
+        pkg_json_path = os.path.join(str(tmp_path), "node_modules", "@test", "pkg", "package.json")
+        with open(pkg_json_path, "w") as f:
+            json.dump({"name": "@test/pkg", "version": "1.0.0", "types": "./dist/index.d.ts"}, f)
+        result = intelligraph_mcp._resolve_package("@test/pkg")
+        # Should find symbols via file scan (fallback)
+        assert "symbols" in result.lower(), f"Expected symbols in output:\n{result}"
+        assert "PlaneCategories" in result
+        assert "IconsNames" in result
+
+    def test_package_fallback_to_search_in_file(self, tmp_path):
+        """When nm_index.db is unavailable, package() should fall back to
+        scanning the .d.ts file for export declarations."""
+        import intelligraph_mcp
+        intelligraph_mcp.REPO_DIR = str(tmp_path)
+        intelligraph_mcp._NM_INDEX_PATH = None
+        pkg_dir = os.path.join(str(tmp_path), "node_modules", "mylib", "dist")
+        os.makedirs(pkg_dir, exist_ok=True)
+        with open(os.path.join(pkg_dir, "types.d.ts"), "w") as f:
+            f.write("export interface MyType {\n  foo: string;\n}\n")
+            f.write("export class MyClass {\n  bar(): void {}\n}\n")
+        pkg_json_path = os.path.join(str(tmp_path), "node_modules", "mylib", "package.json")
+        with open(pkg_json_path, "w") as f:
+            json.dump({"name": "mylib", "version": "1.0.0", "types": "dist/types.d.ts"}, f)
+        result = intelligraph_mcp._resolve_package("mylib")
+        assert "symbols" in result.lower(), f"Expected symbols from file scan:\n{result}"
+        assert "MyType" in result
+        assert "MyClass" in result
+
+    def test_impact_timeout_returns_partial(self, mock_proj):
+        """impact() should return partial results within the timeout window,
+        not hang indefinitely."""
+        from crg_intelligence import CRGProvider
+        provider = CRGProvider(mock_proj)
+        assert provider.is_available()
+        # Small mock DB — should complete well within timeout
+        results = provider.impact("EntityController", change="add-value")
+        assert isinstance(results, list)
+        # Should have some results (target_files + callers)
+        assert len(results) > 0
+        # Should have timed_out flag (False for small graphs that complete fast)
+        assert "timed_out" in results[0]
+        assert results[0]["timed_out"] is False
+
+    def test_auto_anchor_skipped_for_large_graphs(self, mock_proj_broad):
+        """Auto-anchor should be skipped when the graph has >5000 nodes
+        (BFS is too slow on large graphs)."""
+        from crg_intelligence import CRGProvider
+        # Simulate a large graph by setting nodes > 5000
+        mock_proj_broad["nodes"] = 10000
+        provider = CRGProvider(mock_proj_broad)
+        assert provider.is_available()
+        results = provider.hybrid_search("plane", max_results=20, embedding_weight=0.0)
+        # Auto-anchor should NOT have fired (graph too large)
+        assert not any(r.get("auto_anchor") for r in results), \
+            "Auto-anchor should be skipped for large graphs (>5000 nodes)"

@@ -963,6 +963,7 @@ def project_sync(pid):
             "nodes": proj.get("nodes", 0),
             "edges": proj.get("edges", 0),
             "original_repo_dir": proj.get("original_repo_dir", ""),
+            "nm_index_available": bool(proj.get("nm_index_path") and os.path.isfile(proj.get("nm_index_path", ""))),
             "synced_at": datetime.now(timezone.utc).isoformat(),
         }
         zf.writestr("metadata.json", json.dumps(meta, indent=2))
@@ -970,6 +971,9 @@ def project_sync(pid):
         nm_path = proj.get("nm_index_path")
         if nm_path and os.path.isfile(nm_path):
             zf.write(nm_path, "nm_index.db")
+            _vmsg("SYNC pid=%d - nm_index.db included (%d bytes)", pid, os.path.getsize(nm_path))
+        else:
+            _vmsg("SYNC pid=%d - WARNING: nm_index.db not available (package() symbol offsets will use file scan fallback)", pid)
     buf.seek(0)
 
     _vmsg("SYNC pid=%d - sending zip (graph.db=%s, graph.json=%s)", pid,
@@ -1570,10 +1574,24 @@ def _build_graphs(pid, proj, repo_dir, user_key=None):
             nm_index_path = os.path.join(ARTIFACTS_DIR, str(pid), "nm_index.db")
             os.makedirs(os.path.dirname(nm_index_path), exist_ok=True)
             _build_nm_index(repo_dir, nm_index_path)
-            proj["nm_index_path"] = nm_index_path
-            _vmsg("NM INDEX pid=%d - built at %s", pid, nm_index_path)
+            # Verify it actually has symbols
+            if os.path.isfile(nm_index_path):
+                try:
+                    _verify = sqlite3.connect(nm_index_path)
+                    _cnt = _verify.execute("SELECT COUNT(*) FROM nm_symbols").fetchone()[0]
+                    _verify.close()
+                    if _cnt == 0:
+                        _vmsg("NM INDEX pid=%d - WARNING: 0 symbols found (node_modules may have no .d.ts files)", pid)
+                    else:
+                        proj["nm_index_path"] = nm_index_path
+                        _vmsg("NM INDEX pid=%d - built at %s (%d symbols)", pid, nm_index_path, _cnt)
+                except Exception:
+                    proj["nm_index_path"] = nm_index_path
+                    _vmsg("NM INDEX pid=%d - built at %s (count check failed)", pid, nm_index_path)
+            else:
+                _vmsg("NM INDEX pid=%d - WARNING: build did not create file", pid)
         except Exception as e:
-            _vmsg("NM INDEX pid=%d - failed: %s", pid, str(e)[:200])
+            _vmsg("NM INDEX pid=%d - FAILED: %s", pid, str(e)[:300])
 
     # ── Relocate artifacts + delete repo_dir (saves disk + RAM) ──
     _relocate_artifacts(pid, proj, repo_dir)

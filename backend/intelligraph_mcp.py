@@ -153,6 +153,7 @@ def _is_stale_path(local_path: str, provider=None) -> bool:
     - provider has no _valid_paths cache yet (will be built on first call)
     - the file exists in the cached valid path set
     Returns True (stale) only when the path cache is populated and the file is missing.
+    Case-insensitive on Windows.
     """
     if not local_path or not REPO_DIR:
         return False
@@ -168,7 +169,10 @@ def _is_stale_path(local_path: str, provider=None) -> bool:
             rel = p[len(prefix):]
         else:
             rel = p
-        return rel not in valid and rel.lstrip("/") not in valid
+        # Case-insensitive check (Windows)
+        rel_lower = rel.lower()
+        valid_lower = {v.lower() for v in valid}
+        return rel_lower not in valid_lower and rel_lower.lstrip("/") not in valid_lower
     except Exception:
         return False
 
@@ -345,6 +349,10 @@ def _format_search(results, query, near="", provider=None):
 
     # Partition stale paths to render last (phantom file suppression).
     # Only runs when provider + REPO_DIR are available; otherwise no-op.
+    # Fix L: if >50% of results are stale, skip tagging entirely — it's a
+    # systemic path normalization issue, not phantom files. Tagging everything
+    # as stale just confuses the agent and wastes tokens.
+    _stale_check_disabled = False
     if provider and REPO_DIR:
         fresh = []
         stale = []
@@ -354,7 +362,14 @@ def _format_search(results, query, near="", provider=None):
                 stale.append(r)
             else:
                 fresh.append(r)
-        real_results = fresh + stale
+        if stale and len(stale) > len(real_results) * 0.5:
+            # Systemic path issue — don't tag, just render as-is
+            print(f"[intelligraph-mcp] WARNING: {len(stale)}/{len(real_results)} results "
+                  f"tagged stale — likely path normalization issue, skipping stale tags",
+                  file=sys.stderr, flush=True)
+            _stale_check_disabled = True
+        else:
+            real_results = fresh + stale
 
     lines = [f'## "{query}" — {len(real_results)} results [{conf_tag}]']
     files_list = []
@@ -371,7 +386,7 @@ def _format_search(results, query, near="", provider=None):
         r_tag = {"HIGH": "H", "MEDIUM": "M", "LOW": "L"}.get(r_conf, "M")
         reasons = r.get("reason", [])
         is_path_match = "path_match" in reasons
-        is_stale = _is_stale_path(fp, provider)
+        is_stale = _is_stale_path(fp, provider) if not _stale_check_disabled else False
         stale_tag = " [stale]" if is_stale else ""
         is_lexical = "lexical" in reasons
         is_near_unr = "near_unresolved" in reasons
@@ -645,7 +660,10 @@ def _dispatch(name, args, provider):
             shown += 1
 
         has_more = (offset + shown) < total
+        timed_out = page[0].get("timed_out", False) if page else False
         header = f"## Impact: '{target}' (change={change}) — {shown} of {total} files"
+        if timed_out:
+            header += " [partial — traversal timed out, results may be incomplete]"
         lines = [header, ""] + lines
         if has_more:
             remaining = total - (offset + shown)
@@ -769,12 +787,16 @@ def _resolve_package(pkg_name: str) -> str:
 
     # Append symbol offsets from nm_index.db so the agent can Read surgically
     # instead of reading the entire .d.ts file (~6k tokens for 587 lines).
-    if types and _NM_INDEX_PATH:
+    # Fix O: strip ./ from types field (package.json often has "./dist/index.d.ts")
+    # and fall back to search_in_file on the .d.ts when nm_index is unavailable.
+    types_clean = types.lstrip("./") if types else ""
+    symbols_found = False
+    if types_clean and _NM_INDEX_PATH:
         try:
             import sqlite3 as _sqlite3
             nm_conn = _sqlite3.connect(f"file:{_NM_INDEX_PATH}?mode=ro", uri=True)
             nm_conn.row_factory = _sqlite3.Row
-            types_rel = f"{rel_base}/{types}".replace("\\", "/")
+            types_rel = f"{rel_base}/{types_clean}".replace("\\", "/")
             sym_rows = nm_conn.execute(
                 "SELECT name, kind, line_start, line_end, signature "
                 "FROM nm_symbols WHERE file_path = ? "
@@ -793,8 +815,36 @@ def _resolve_package(pkg_name: str) -> str:
                         lines.append(f"  {s_name} ({s_kind}): {s_ls}-{s_le}")
                     elif s_ls:
                         lines.append(f"  {s_name} ({s_kind}): {s_ls}")
+                symbols_found = True
         except Exception:
-            pass  # nm_index.db missing or query failed — silently skip
+            pass  # nm_index.db missing or query failed
+
+    # Fix O: Fallback — when nm_index is unavailable or returned nothing,
+    # scan the .d.ts file directly for export declarations (class/enum/etc).
+    # Returns line numbers so the agent can Read surgically.
+    if not symbols_found and types_clean and REPO_DIR:
+        dts_path = os.path.join(REPO_DIR, rel_base, types_clean)
+        if os.path.isfile(dts_path):
+            try:
+                import re as _re
+                _export_re = _re.compile(
+                    r'^\s*export\s+(?:default\s+)?(?:declare\s+)?(?:abstract\s+)?'
+                    r'(class|enum|interface|type|const|function)\s+(\w+)',
+                    _re.MULTILINE
+                )
+                with open(dts_path, "r", encoding="utf-8", errors="replace") as f:
+                    content = f.read()
+                matches = list(_export_re.finditer(content))
+                if matches:
+                    lines.append("symbols (from file scan):")
+                    for m in matches[:15]:
+                        kind = m.group(1) or "?"
+                        name = m.group(2) or "?"
+                        line_num = content[:m.start()].count("\n") + 1
+                        lines.append(f"  {name} ({kind}): {line_num}")
+                    symbols_found = True
+            except Exception:
+                pass
 
     _log_call("package", 1, 50)
     return "\n".join(lines)
