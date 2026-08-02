@@ -19,6 +19,7 @@ import argparse
 import io
 import json
 import os
+import re
 import sys
 import time
 import zipfile
@@ -341,7 +342,21 @@ def _format_search(results, query, near="", provider=None):
     cache_key = f"{query.lower().strip()}|{near.lower().strip()}"
     if cache_key in _SESSION_SEARCHES:
         prev = _SESSION_SEARCHES[cache_key]
-        return f"[CACHED] Same as search#{prev['call_id']}. Files: {', '.join(prev['files'])}"
+        # Fix S: include full result lines so the model can act on them
+        # without re-searching, plus positive-action alternatives.
+        prev_lines = prev.get("result_lines", [])
+        result_summary = "\n".join(prev_lines[:5]) if prev_lines else f"Files: {', '.join(prev.get('files', []))}"
+        alt_parts = []
+        if prev.get("files"):
+            first_file = prev["files"][0].split(":")[0] if prev["files"] else ""
+            top_name = prev.get("top_name", "")
+            if top_name:
+                alt_parts.append(f'Call node("{top_name}") or impact("{top_name}") for deeper info.')
+            if first_file:
+                alt_parts.append(f'Call search_in_file("{first_file}", "{query}") to scan this file.')
+        alt_parts.append("Refine your search query with a more specific or alternate term.")
+        alt_str = "\n".join(f"- {a}" for a in alt_parts)
+        return f"[CACHED] Same as search#{prev['call_id']}. Previous results:\n{result_summary}\n\nTo get fresh results, choose one of these actions:\n{alt_str}"
 
     call_id = _SESSION_CALL_COUNTER[0] + 1
     top_conf = real_results[0].get("confidence", "MEDIUM")
@@ -528,6 +543,43 @@ def _format_search(results, query, near="", provider=None):
     elif near and 1 <= len(real_results) <= 4 and top_conf == "HIGH":
         lines.append("\n-> Results are sufficiently focused; inspect the top symbol with node().")
 
+    # ── Fix T: External symbol detection — when ALL results are [M] and no
+    # exact match was found for a PascalCase/camelCase symbol name, the symbol
+    # likely lives in an external npm package. Auto-check nm_index and include
+    # the result inline so the model doesn't waste round-trips retrying.
+    _all_medium = all(r.get("confidence", "MEDIUM") == "MEDIUM" for r in real_results)
+    _no_exact = not any(r.get("exact_match") for r in real_results)
+    _looks_like_symbol = bool(re.match(r'^[A-Za-z][A-Za-z0-9_]+$', query.strip())) and " " not in query.strip()
+    if _all_medium and _no_exact and _looks_like_symbol and not any_near_unresolved:
+        # Check nm_index for this symbol
+        nm_hit = None
+        if _NM_INDEX_PATH and os.path.isfile(_NM_INDEX_PATH):
+            try:
+                import sqlite3 as _nm_sqlite
+                _nm_conn = _sqlite3.connect(f"file:{_NM_INDEX_PATH}?mode=ro", uri=True)
+                _nm_conn.row_factory = _sqlite3.Row
+                _nm_row = _nm_conn.execute(
+                    "SELECT name, kind, file_path, line_start, line_end, package_name "
+                    "FROM nm_symbols WHERE LOWER(name) = ? LIMIT 3",
+                    (query.lower().strip(),)
+                ).fetchall()
+                _nm_conn.close()
+                if _nm_row:
+                    nm_hit = _nm_row[0]
+            except Exception:
+                pass
+        if nm_hit:
+            nm_fp = _rewrite_path(nm_hit["file_path"] or "")
+            nm_loc = f"{nm_fp}:{nm_hit['line_start']}-{nm_hit['line_end']}" if nm_hit["line_start"] else nm_fp
+            lines.append(f"\n-> '{query}' has no exact declaration in the local codebase graph.")
+            lines.append(f"   Found in external package: {nm_hit['package_name'] or 'unknown'}")
+            lines.append(f"   {nm_hit['name']} ({nm_hit['kind']}): {nm_loc}")
+            lines.append(f"   Use Read(file, offset={nm_hit['line_start']}, limit={nm_hit['line_end'] - nm_hit['line_start']}) to see the definition.")
+        else:
+            lines.append(f"\n-> '{query}' has no exact declaration in the local codebase graph.")
+            lines.append(f"   This symbol likely originates from an external npm package.")
+            lines.append(f"   Action: Call package(\"@scope/name\") to retrieve its .d.ts entrypoint and exact line numbers.")
+
     # ── Transparency block: expose retrieval decisions when fallback occurred ──
     # Uses the consolidated `found_via` field from the router when available,
     # falls back to reconstructing from reasons.
@@ -555,7 +607,11 @@ def _format_search(results, query, near="", provider=None):
             if strat_parts:
                 lines.append(f"\nFound via: {' | '.join(strat_parts)}")
 
-    _SESSION_SEARCHES[cache_key] = {"call_id": call_id, "files": files_list}
+    # Store full result lines in cache for [CACHED] response (Fix S)
+    result_lines_cache = [l for l in lines if l.strip() and l[0].isdigit() and ". " in l[:5]]
+    top_name = real_results[0].get("name", "") if real_results else ""
+    _SESSION_SEARCHES[cache_key] = {"call_id": call_id, "files": files_list,
+                                    "result_lines": result_lines_cache, "top_name": top_name}
     est_tokens = sum(len(l) for l in lines) // 4
     _log_call("search", len(real_results), est_tokens)
     return "\n".join(lines)
@@ -606,6 +662,15 @@ def _dispatch(name, args, provider):
                 _track_seen(nname, "node", call_id, had_relationships=True)
 
         est_tokens = sum(len(l) for l in lines) // 4
+        # Fix R: timeout — positive-action message (what to do instead)
+        stats = trav.get("stats", {})
+        if stats.get("timed_out"):
+            lines.append("")
+            lines.append(f"[STATUS: TIMEOUT — traversal halted at 5s limit]")
+            lines.append(f"The symbol graph is large. Switch to file-level inspection:")
+            lines.append(f"1. Use the connections listed above to identify target files.")
+            lines.append(f'2. Call search_in_file("{node_file}", "{sym}") to scan the primary file.')
+            lines.append(f"3. Call Read on the connected files to inspect specific implementations.")
         _log_call("node", len(edges), est_tokens)
         return "\n".join(lines)
 
@@ -663,9 +728,17 @@ def _dispatch(name, args, provider):
         timed_out = page[0].get("timed_out", False) if page else False
         header = f"## Impact: '{target}' (change={change}) — {shown} of {total} files"
         if timed_out:
-            header += " [partial — traversal timed out, results may be incomplete]"
+            header += f" [STATUS: TIMEOUT — {shown} of ~{total} files found]"
         lines = [header, ""] + lines
-        if has_more:
+        if timed_out:
+            lines.append("")
+            lines.append(f"The symbol graph is large. The {shown} files above are the highest-priority results.")
+            lines.append(f"Proceed with planning using these results, or inspect primary target files with Read().")
+            if has_more:
+                lines.append(f"For more files, call impact(name=\"{target}\", "
+                             f"change=\"{change}\", offset={offset + shown}) "
+                             f"— this fetches the next page from already-traversed data.")
+        elif has_more:
             remaining = total - (offset + shown)
             lines.append("")
             lines.append(f"+{remaining} more files exist. Call impact(name=\"{target}\", "
@@ -1027,7 +1100,9 @@ def main():
                     "Use this FIRST - replaces grep and glob. "
                     "Pass near= with a symbol or file returned by a previous search or node() result. "
                     "Do not invent anchors from broad words (planes, filter, table) - they will not resolve. "
-                    "The first search may omit near= to discover the subsystem."
+                    "The first search may omit near= to discover the subsystem. "
+                    "If output yields only medium [M] confidence matches with no exact symbol, "
+                    "pivot to package('@scope/name') to locate external package definitions."
                 ),
                 inputSchema={"type": "object", "properties": {
                     "query": {"type": "string"},
@@ -1038,7 +1113,9 @@ def main():
                 name="node",
                 description=(
                     "Get a symbol's connections (callers, callees) with file:line ranges. "
-                    "Use AFTER search. Then use built-in Read with those line ranges to get implementation details."
+                    "Use AFTER search. Then use built-in Read with those line ranges to get implementation details. "
+                    "If traversal times out on large repos, inspect the returned top-level connections "
+                    "directly via search_in_file() or Read()."
                 ),
                 inputSchema={"type": "object", "properties": {
                     "name": {"type": "string"}, "depth": {"type": "integer", "default": 2}
@@ -1055,7 +1132,9 @@ def main():
                     "Output is paginated by token budget — call impact(name, offset=N) for more. "
                     "Pass change=full for exhaustive traversal (all depths, all edges, ~4k tokens) "
                     "when doing a repo-wide refactor. change=rename for callers+importers. "
-                    "change=remove for all dependents. Use BEFORE editing."
+                    "change=remove for all dependents. Use BEFORE editing. "
+                    "If response reaches timeout/partial status, proceed with planning using the "
+                    "partial results or inspect primary target files with Read()."
                 ),
                 inputSchema={"type": "object", "properties": {
                     "name": {"type": "string"},

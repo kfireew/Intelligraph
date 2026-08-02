@@ -1829,10 +1829,12 @@ class CRGProvider(IntelligenceProvider):
         current_hop = 0
         _trav_start = time.monotonic()
         _MAX_TRAVERSE_TIME = 5.0  # seconds
+        _trav_timed_out = False
 
         while queue and len(nodes_result) < max_nodes and est_tokens < max_tokens:
             if time.monotonic() - _trav_start > _MAX_TRAVERSE_TIME:
                 _vmsg("CRG TRAVERSE: timeout after %.1fs, returning partial results", time.monotonic() - _trav_start)
+                _trav_timed_out = True
                 break
             current, depth = queue.popleft()
             if depth >= max_hops:
@@ -1864,7 +1866,8 @@ class CRGProvider(IntelligenceProvider):
                 queue.append((neighbor_qname, depth + 1))
 
         stats = {"hops": max(n["depth"] for n in nodes_result) if nodes_result else 0,
-                 "nodes": len(nodes_result), "edges": len(edges_result), "est_tokens": est_tokens}
+                 "nodes": len(nodes_result), "edges": len(edges_result), "est_tokens": est_tokens,
+                 "timed_out": _trav_timed_out}
         _vmsg("CRG TRAVERSE: target='%s' hops=%d -> %d nodes, %d edges (%d est tokens)",
               target[:30], max_hops, len(nodes_result), len(edges_result), est_tokens)
         return {"nodes": nodes_result, "edges": edges_result, "stats": stats}

@@ -43,3 +43,14 @@ Skipping impact() means you WILL miss dependent files and break things.
 - **Search what the user mentioned, not your abstraction of it.** If the user says "add a new plane type next to zik", search "zik" — not "plane type enum". Anchor on concrete names the user gives you. If no concrete name exists, use ONE concept word, not a multi-word description.
 - **If search returns [L] (low confidence), do NOT retry with similar terms.** Use node() on a known symbol, Read a file you already found, or ask the user.
 - **For external npm packages (node_modules), use package("name")** to find entry points, then Read the `.d.ts` file.
+
+### Tool Result Decision Matrix
+
+When a tool returns a non-standard response, follow these positive pivot actions:
+
+| Signal / Event | Next Action |
+| :--- | :--- |
+| **`[STATUS: TIMEOUT]`** from impact() or node() | Use the partial results already returned. Switch to `search_in_file()` or `Read()` on the primary files involved. |
+| **`[CACHED]`** from search() | Change your search query to a different keyword, or pivot to `node()` / `impact()` on one of the cached file paths. |
+| **All `[M]` results, no exact symbol match** | The symbol likely lives in an external package. Call `package("@scope/name")` to locate its `.d.ts` definition with line numbers. |
+| **Looking for external package symbols** (PlaneCategories, IconsNames, Platforms) | Call `package("@scope/name")` FIRST to get `.d.ts` line ranges, then `Read` surgically. |
