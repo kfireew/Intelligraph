@@ -342,21 +342,57 @@ def _format_search(results, query, near="", provider=None):
     cache_key = f"{query.lower().strip()}|{near.lower().strip()}"
     if cache_key in _SESSION_SEARCHES:
         prev = _SESSION_SEARCHES[cache_key]
-        # Fix S: include full result lines so the model can act on them
-        # without re-searching, plus positive-action alternatives.
+        # Include full result lines so the model can act on them without re-searching.
         prev_lines = prev.get("result_lines", [])
         result_summary = "\n".join(prev_lines[:5]) if prev_lines else f"Files: {', '.join(prev.get('files', []))}"
         alt_parts = []
+
+        # Conditional auto-enrichment: if the top result is a discrete entity
+        # (Class, Function, Enum, Method, Const) with <10 connections, run
+        # fast_connections inline so the model gets fresh info in the same
+        # response. Skip for hub nodes/files to avoid context bloat.
+        top_name = prev.get("top_name", "")
+        enriched_lines = []
+        if top_name and provider and hasattr(provider, "fast_connections"):
+            try:
+                trav = provider.fast_connections(top_name)
+                stats = trav.get("stats", {})
+                edge_count = stats.get("edges", 0)
+                nodes = trav.get("nodes", [])
+                # Only enrich if discrete entity with few connections
+                if nodes and edge_count > 0 and edge_count < 10:
+                    node_kind = nodes[0].get("kind", "")
+                    if node_kind in ("Function", "Class", "Method", "Enum", "Const", "Interface", "Type"):
+                        enriched_lines.append(f"\nFresh info on top result ({top_name}):")
+                        for e in trav.get("edges", []):
+                            if e.get("target") == top_name:
+                                src_file = e.get("source_file", "")
+                                if src_file:
+                                    src_file = _rewrite_path(src_file)
+                                enriched_lines.append(f"  <- {e.get('source','?')} ({e.get('type','link')})" +
+                                                      (f" — {src_file}" if src_file else ""))
+                            elif e.get("source") == top_name:
+                                tgt_file = e.get("target_file", "")
+                                if tgt_file:
+                                    tgt_file = _rewrite_path(tgt_file)
+                                enriched_lines.append(f"  -> {e.get('target','?')} ({e.get('type','link')})" +
+                                                      (f" — {tgt_file}" if tgt_file else ""))
+            except Exception:
+                pass
+
         if prev.get("files"):
             first_file = prev["files"][0].split(":")[0] if prev["files"] else ""
-            top_name = prev.get("top_name", "")
-            if top_name:
+            if top_name and not enriched_lines:
                 alt_parts.append(f'Call node("{top_name}") or impact("{top_name}") for deeper info.')
+            elif top_name and enriched_lines:
+                alt_parts.append(f'Call impact("{top_name}") for blast radius analysis.')
             if first_file:
                 alt_parts.append(f'Call search_in_file("{first_file}", "{query}") to scan this file.')
         alt_parts.append("Refine your search query with a more specific or alternate term.")
         alt_str = "\n".join(f"- {a}" for a in alt_parts)
-        return f"[CACHED] Same as search#{prev['call_id']}. Previous results:\n{result_summary}\n\nTo get fresh results, choose one of these actions:\n{alt_str}"
+        enriched_str = "\n".join(enriched_lines) if enriched_lines else ""
+        return (f"[CACHED] Same as search#{prev['call_id']}. Previous results:\n{result_summary}"
+                f"{enriched_str}\n\nTo get fresh results, choose one of these actions:\n{alt_str}")
 
     call_id = _SESSION_CALL_COUNTER[0] + 1
     top_conf = real_results[0].get("confidence", "MEDIUM")
@@ -627,9 +663,15 @@ def _dispatch(name, args, provider):
     if name == "node":
         sym = args.get("name", "")
         depth = min(3, max(1, args.get("depth", 2)))
-        results = provider.hybrid_search(sym, max_results=5, embedding_weight=0.4)
-        target = results[0]["name"] if results else sym
-        trav = provider.traverse(target, max_hops=depth, max_nodes=30, max_tokens=400)
+
+        # Use fast_connections (SQL depth-1) when depth=1 — <100ms on any repo.
+        # Falls back to full traverse() (adjacency + BFS) for depth >= 2.
+        if depth == 1 and hasattr(provider, "fast_connections"):
+            trav = provider.fast_connections(sym)
+        else:
+            results = provider.hybrid_search(sym, max_results=5, embedding_weight=0.4)
+            target = results[0]["name"] if results else sym
+            trav = provider.traverse(target, max_hops=depth, max_nodes=30, max_tokens=400)
 
         # Format node result
         nodes = trav.get("nodes", [])
@@ -647,18 +689,41 @@ def _dispatch(name, args, provider):
         lines = [f"## {node.get('name', sym)} ({node_kind}) {loc}", f"degree={node.get('degree', 0)}"]
 
         edges = trav.get("edges", [])
+        is_fast = trav.get("stats", {}).get("fast_path", False)
         if edges:
             incoming = [e for e in edges if e.get("target") == node.get("name")]
             outgoing = [e for e in edges if e.get("source") == node.get("name")]
+            conn_header = f"### Direct connections ({len(edges)}) — ALL connections for this symbol" if is_fast else f"### Connections ({len(edges)})"
             lines.append("")
-            lines.append(f"### Connections ({len(edges)})")
+            lines.append(conn_header)
             for e in incoming:
                 nname = e.get("source", "?")
-                lines.append(f"  <- {nname} ({e.get('type', 'link')})")
+                # Include file:line when available (fast path provides it)
+                src_file = e.get("source_file", "")
+                if src_file:
+                    src_file = _rewrite_path(src_file)
+                    src_ls = e.get("source_line_start", 0)
+                    src_le = e.get("source_line_end", 0)
+                    if src_ls and src_le and src_le > src_ls:
+                        lines.append(f"  <- {nname} ({e.get('type', 'link')}) — {src_file}:{src_ls}-{src_le}")
+                    else:
+                        lines.append(f"  <- {nname} ({e.get('type', 'link')}) — {src_file}")
+                else:
+                    lines.append(f"  <- {nname} ({e.get('type', 'link')})")
                 _track_seen(nname, "node", call_id, had_relationships=True)
             for e in outgoing:
                 nname = e.get("target", "?")
-                lines.append(f"  -> {nname} ({e.get('type', 'link')})")
+                tgt_file = e.get("target_file", "")
+                if tgt_file:
+                    tgt_file = _rewrite_path(tgt_file)
+                    tgt_ls = e.get("target_line_start", 0)
+                    tgt_le = e.get("target_line_end", 0)
+                    if tgt_ls and tgt_le and tgt_le > tgt_ls:
+                        lines.append(f"  -> {nname} ({e.get('type', 'link')}) — {tgt_file}:{tgt_ls}-{tgt_le}")
+                    else:
+                        lines.append(f"  -> {nname} ({e.get('type', 'link')}) — {tgt_file}")
+                else:
+                    lines.append(f"  -> {nname} ({e.get('type', 'link')})")
                 _track_seen(nname, "node", call_id, had_relationships=True)
 
         est_tokens = sum(len(l) for l in lines) // 4

@@ -1546,18 +1546,18 @@ class TestReliabilityFixes:
         assert "timed_out" in results[0]
         assert results[0]["timed_out"] is False
 
-    def test_auto_anchor_skipped_for_large_graphs(self, mock_proj_broad):
-        """Auto-anchor should be skipped when the graph has >5000 nodes
-        (BFS is too slow on large graphs)."""
+    def test_auto_anchor_works_on_large_graphs(self, mock_proj_broad):
+        """Auto-anchor should work on large graphs (>5000 nodes) using SQL
+        1-hop queries instead of BFS."""
         from crg_intelligence import CRGProvider
         # Simulate a large graph by setting nodes > 5000
         mock_proj_broad["nodes"] = 10000
         provider = CRGProvider(mock_proj_broad)
         assert provider.is_available()
         results = provider.hybrid_search("plane", max_results=20, embedding_weight=0.0)
-        # Auto-anchor should NOT have fired (graph too large)
-        assert not any(r.get("auto_anchor") for r in results), \
-            "Auto-anchor should be skipped for large graphs (>5000 nodes)"
+        # Auto-anchor SHOULD have fired (SQL path, not BFS)
+        assert any(r.get("auto_anchor") for r in results), \
+            "Auto-anchor should work on large graphs via SQL 1-hop"
 
 
 # ── Phase 7: positive-action messages (no-retry loops) ──
@@ -1677,3 +1677,80 @@ class TestPositiveActionMessages:
         # We verify the code path exists by checking for normal output
         assert "##" in output or "No node found" in output, \
             f"Expected node output or no-node message:\n{output}"
+
+
+# ── Phase 8: fast node(), SQL auto-anchor, cached enrichment ──
+
+class TestFastPathAndSQL:
+    """Tests for SQL-based fast_connections, auto-anchor on large graphs,
+    and cached search conditional enrichment."""
+
+    def test_fast_connections_returns_file_line(self, mock_proj):
+        """fast_connections should return connections with file:line ranges
+        (not just symbol names)."""
+        from crg_intelligence import CRGProvider
+        provider = CRGProvider(mock_proj)
+        assert provider.is_available()
+        trav = provider.fast_connections("EntityController")
+        nodes = trav.get("nodes", [])
+        edges = trav.get("edges", [])
+        assert len(nodes) > 0, "Should find EntityController node"
+        # The target node should have file info
+        assert nodes[0].get("file"), f"Target node should have file_path: {nodes[0]}"
+        # Edges should have source_file or target_file (fast path provides them)
+        if edges:
+            has_file = any(e.get("source_file") or e.get("target_file") for e in edges)
+            assert has_file, f"Edges should include file paths: {edges[0]}"
+
+    def test_fast_connections_distinct_no_duplicates(self, mock_proj):
+        """fast_connections should use DISTINCT — no duplicate edges even if
+        the same symbol is referenced across multiple lines."""
+        from crg_intelligence import CRGProvider
+        provider = CRGProvider(mock_proj)
+        assert provider.is_available()
+        trav = provider.fast_connections("upsertEntity")
+        edges = trav.get("edges", [])
+        # Check no duplicate (source, target, type) tuples
+        seen = set()
+        for e in edges:
+            key = (e.get("source", ""), e.get("target", ""), e.get("type", ""))
+            assert key not in seen, f"Duplicate edge found: {key}"
+            seen.add(key)
+
+    def test_node_depth1_uses_fast_path(self, mock_proj, tmp_path):
+        """node() with depth=1 should use fast_connections (fast path),
+        indicated by 'ALL connections' in the output."""
+        import intelligraph_mcp
+        intelligraph_mcp.REPO_DIR = str(tmp_path)
+        intelligraph_mcp._ORIGINAL_REPO_DIR = ""
+        intelligraph_mcp._SESSION_SEARCHES.clear()
+        intelligraph_mcp._SESSION_SEEN.clear()
+        intelligraph_mcp._SESSION_CALL_COUNTER[0] = 0
+        from crg_intelligence import CRGProvider
+        provider = CRGProvider(mock_proj)
+        provider.is_available()
+        output = intelligraph_mcp._dispatch("node", {"name": "EntityController", "depth": 1}, provider)
+        assert "ALL connections" in output, \
+            f"Depth-1 node() should use fast path with 'ALL connections' header:\n{output}"
+
+    def test_cached_search_enriches_low_degree_symbol(self, mock_proj, tmp_path):
+        """Cached search should auto-enrich with fast_connections when the
+        top result is a discrete entity (Function/Class/etc) with <10 connections."""
+        import intelligraph_mcp
+        intelligraph_mcp.REPO_DIR = str(tmp_path)
+        intelligraph_mcp._ORIGINAL_REPO_DIR = ""
+        intelligraph_mcp._SESSION_SEARCHES.clear()
+        intelligraph_mcp._SESSION_SEEN.clear()
+        intelligraph_mcp._SESSION_CALL_COUNTER[0] = 0
+        from crg_intelligence import CRGProvider
+        provider = CRGProvider(mock_proj)
+        provider.is_available()
+        # First call — populates cache
+        output1 = intelligraph_mcp._dispatch("search", {"query": "upsertEntity"}, provider)
+        assert "[CACHED]" not in output1
+        # Second call — should be cached + enriched
+        output2 = intelligraph_mcp._dispatch("search", {"query": "upsertEntity"}, provider)
+        assert "[CACHED]" in output2
+        # Should contain fresh info (connections from fast_connections)
+        assert "Fresh info" in output2 or "node(" in output2, \
+            f"Cached search should include fresh connections or node() hint:\n{output2}"

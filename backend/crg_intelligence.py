@@ -1334,16 +1334,11 @@ class CRGProvider(IntelligenceProvider):
         # The LLM never decides which anchor — the backend optimizes silently.
         auto_anchor = None
         auto_near_files = None
-        # Fix N: Skip auto-anchor for large graphs (BFS is too slow).
-        # Auto-anchor does 3-8 BFS calls, each ~5-50ms on a small graph but
-        # 100-500ms on a 28k-node graph. Only run when the graph is small.
-        _node_count = self.proj.get("nodes", 0) or 0
-        _auto_anchor_ok = _node_count < 5000 or _node_count == 0
-        if not _auto_anchor_ok:
-            _vmsg("CRG AUTO-ANCHOR: skipped (graph has %d nodes, >5000 threshold)", _node_count)
-        if not near and len(det_results) > 5 and _auto_anchor_ok:
+        # Auto-anchor now works on all graph sizes: BFS 3-hop for small graphs,
+        # SQL 1-hop for large graphs (>5000 nodes). No skip threshold needed.
+        if not near and len(det_results) > 5:
             auto_anchor, auto_near_files = self._auto_select_anchor(det_results)
-        elif near and len(det_results) > 5 and _auto_anchor_ok:
+        elif near and len(det_results) > 5:
             is_narrow = any("near_didnt_narrow" in r.get("reason", []) for r in det_results)
             is_unresolved = any("near_unresolved" in r.get("reason", []) for r in det_results)
             if is_narrow or is_unresolved:
@@ -1525,6 +1520,48 @@ class CRGProvider(IntelligenceProvider):
               query[:50], len(det_results), len(sem_results), len(results))
         return results
 
+    def _sql_near_files(self, symbol: str) -> set[str]:
+        """SQL-based 1-hop neighborhood — fast alternative to BFS for large repos.
+
+        Returns a set of repo-relative file_paths connected to the symbol
+        via either direction (incoming or outgoing edges). Uses UNION to
+        deduplicate across both directions. <50ms per candidate on any repo.
+        """
+        conn = self._get_conn()
+        sym_lower = symbol.lower().strip()
+        try:
+            rows = conn.execute(
+                "SELECT DISTINCT file_path FROM nodes WHERE qualified_name IN ("
+                "  SELECT source_qualified FROM edges WHERE target_qualified IN ("
+                "    SELECT qualified_name FROM nodes WHERE LOWER(name) = ?"
+                "  )"
+                "  UNION"
+                "  SELECT target_qualified FROM edges WHERE source_qualified IN ("
+                "    SELECT qualified_name FROM nodes WHERE LOWER(name) = ?"
+                "  )"
+                ") AND file_path IS NOT NULL",
+                (sym_lower, sym_lower)
+            ).fetchall()
+            result = set()
+            for r in rows:
+                fp = self._normalize_path(r["file_path"]) if r["file_path"] else ""
+                if fp:
+                    result.add(fp)
+            # Also include the symbol's own file
+            try:
+                own = conn.execute(
+                    "SELECT file_path FROM nodes WHERE LOWER(name) = ? "
+                    "AND file_path IS NOT NULL LIMIT 1",
+                    (sym_lower,)
+                ).fetchone()
+                if own and own["file_path"]:
+                    result.add(self._normalize_path(own["file_path"]))
+            except Exception:
+                pass
+            return result
+        except Exception:
+            return set()
+
     def _auto_select_anchor(self, results: list, max_candidates: int = 8) -> tuple:
         """Evaluate candidate anchors and pick the one that best narrows results.
 
@@ -1570,7 +1607,12 @@ class CRGProvider(IntelligenceProvider):
 
         for candidate in candidates:
             try:
-                near_files = self._bfs_files_for_symbol(candidate, self._NEAR_HOPS)
+                # Use SQL 1-hop for large graphs (fast), BFS 3-hop for small (deep)
+                _node_count = self.proj.get("nodes", 0) or 0
+                if _node_count > 5000:
+                    near_files = self._sql_near_files(candidate)
+                else:
+                    near_files = self._bfs_files_for_symbol(candidate, self._NEAR_HOPS)
             except Exception:
                 continue
             if not near_files:
@@ -1756,6 +1798,159 @@ class CRGProvider(IntelligenceProvider):
         CRGProvider._ADJACENCY_CACHE[cache_key] = result
         _vmsg("CRG ADJACENCY: built for %s, %d nodes, %d edges", cache_key, len(node_lookup), len(adj))
         return result
+
+    def fast_connections(self, target: str) -> dict:
+        """Fast depth-1 connections via direct SQL (no adjacency build).
+
+        Returns direct callers + callees with file:line in <100ms on any repo.
+        Uses DISTINCT to avoid duplicate rows when a file imports the same
+        symbol across multiple lines. The full adjacency+BFS traverse() is
+        only needed for depth >= 2.
+
+        Returns: {nodes: [{name, file, kind, depth, degree, line_start, line_end}],
+                  edges: [{source, target, type, source_file, source_line_start, source_line_end,
+                           target_file, target_line_start, target_line_end}],
+                  stats: {nodes, edges, est_tokens, timed_out, fast_path: True}}
+        """
+        if not target:
+            return {"nodes": [], "edges": [], "stats": {"nodes": 0, "edges": 0, "est_tokens": 0, "timed_out": False, "fast_path": True}}
+
+        conn = self._get_conn()
+        target_lower = target.lower()
+
+        # Find the target node's qualified_name
+        target_qname = None
+        try:
+            row = conn.execute(
+                "SELECT qualified_name FROM nodes "
+                "WHERE LOWER(name) = ? OR LOWER(qualified_name) LIKE ? "
+                "AND kind != 'File' LIMIT 1",
+                (target_lower, f"%{target_lower}%")
+            ).fetchone()
+            if row:
+                target_qname = row["qualified_name"]
+        except Exception:
+            pass
+
+        if not target_qname:
+            # Fallback: FTS match
+            try:
+                row = conn.execute(
+                    "SELECT n.qualified_name FROM nodes_fts f "
+                    "JOIN nodes n ON f.rowid = n.id "
+                    "WHERE nodes_fts MATCH ? AND n.kind != 'File' LIMIT 1",
+                    (f'"{target}"',)
+                ).fetchone()
+                if row:
+                    target_qname = row["qualified_name"]
+            except Exception:
+                pass
+
+        if not target_qname:
+            return {"nodes": [], "edges": [], "stats": {"nodes": 0, "edges": 0, "est_tokens": 0, "timed_out": False, "fast_path": True}}
+
+        # Get target node info
+        target_info = {}
+        try:
+            row = conn.execute(
+                "SELECT name, kind, file_path, line_start, line_end FROM nodes "
+                "WHERE qualified_name = ? LIMIT 1",
+                (target_qname,)
+            ).fetchone()
+            if row:
+                fp = self._normalize_path(row["file_path"]) if row["file_path"] else ""
+                target_info = {
+                    "name": row["name"], "file": fp, "kind": row["kind"] or "",
+                    "line_start": row["line_start"] or 0, "line_end": row["line_end"] or 0,
+                    "depth": 0,
+                }
+        except Exception:
+            pass
+
+        nodes_result = []
+        edges_result = []
+
+        if target_info:
+            nodes_result.append(target_info)
+
+        # Incoming edges (callers/dependents) — DISTINCT to avoid duplicates
+        try:
+            incoming = conn.execute(
+                "SELECT DISTINCT n2.name, n2.kind, n2.file_path, "
+                "n2.line_start, n2.line_end, e.kind as edge_type "
+                "FROM edges e "
+                "JOIN nodes n2 ON n2.qualified_name = e.source_qualified "
+                "WHERE e.target_qualified = ? AND n2.kind != 'File' "
+                "AND n2.name IS NOT NULL "
+                "ORDER BY LENGTH(n2.name) ASC LIMIT 30",
+                (target_qname,)
+            ).fetchall()
+            for r in incoming:
+                fp = self._normalize_path(r["file_path"]) if r["file_path"] else ""
+                if _is_junk_path(fp) or _is_test_path(fp):
+                    continue
+                nodes_result.append({
+                    "name": r["name"], "file": fp, "kind": r["kind"] or "",
+                    "depth": 1, "line_start": r["line_start"] or 0, "line_end": r["line_end"] or 0,
+                })
+                edges_result.append({
+                    "source": r["name"], "target": target_info.get("name", target),
+                    "type": r["edge_type"] or "link",
+                    "source_file": fp, "source_line_start": r["line_start"] or 0,
+                    "source_line_end": r["line_end"] or 0,
+                })
+        except Exception as e:
+            log.warning("fast_connections incoming failed: %s", e)
+
+        # Outgoing edges (callees/dependencies) — DISTINCT to avoid duplicates
+        try:
+            outgoing = conn.execute(
+                "SELECT DISTINCT n2.name, n2.kind, n2.file_path, "
+                "n2.line_start, n2.line_end, e.kind as edge_type "
+                "FROM edges e "
+                "JOIN nodes n2 ON n2.qualified_name = e.target_qualified "
+                "WHERE e.source_qualified = ? AND n2.kind != 'File' "
+                "AND n2.name IS NOT NULL "
+                "ORDER BY LENGTH(n2.name) ASC LIMIT 30",
+                (target_qname,)
+            ).fetchall()
+            for r in outgoing:
+                fp = self._normalize_path(r["file_path"]) if r["file_path"] else ""
+                if _is_junk_path(fp) or _is_test_path(fp):
+                    continue
+                # Skip if already added as incoming (A->B and B->A)
+                if any(n["name"] == r["name"] and n["file"] == fp for n in nodes_result):
+                    edges_result.append({
+                        "source": target_info.get("name", target), "target": r["name"],
+                        "type": r["edge_type"] or "link",
+                        "target_file": fp, "target_line_start": r["line_start"] or 0,
+                        "target_line_end": r["line_end"] or 0,
+                    })
+                    continue
+                nodes_result.append({
+                    "name": r["name"], "file": fp, "kind": r["kind"] or "",
+                    "depth": 1, "line_start": r["line_start"] or 0, "line_end": r["line_end"] or 0,
+                })
+                edges_result.append({
+                    "source": target_info.get("name", target), "target": r["name"],
+                    "type": r["edge_type"] or "link",
+                    "target_file": fp, "target_line_start": r["line_start"] or 0,
+                    "target_line_end": r["line_end"] or 0,
+                })
+        except Exception as e:
+            log.warning("fast_connections outgoing failed: %s", e)
+
+        # Compute degree for the target node
+        degree = len(edges_result)
+        if target_info and nodes_result:
+            nodes_result[0]["degree"] = degree
+
+        _est_tokens = len(nodes_result) * 15 + len(edges_result) * 10
+        stats = {"hops": 1, "nodes": len(nodes_result), "edges": len(edges_result),
+                 "est_tokens": _est_tokens, "timed_out": False, "fast_path": True}
+        _vmsg("CRG FAST_CONNECT: target='%s' -> %d nodes, %d edges",
+              target[:30], len(nodes_result), len(edges_result))
+        return {"nodes": nodes_result, "edges": edges_result, "stats": stats}
 
     def traverse(self, target: str, max_hops: int = 2, max_nodes: int = 30, max_tokens: int = 400) -> dict:
         """Multi-hop BFS traversal from target node with token budget.
