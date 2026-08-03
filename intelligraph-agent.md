@@ -24,25 +24,26 @@ Pass change="full" ONLY for repo-wide refactors where you need every transitive 
 Skipping impact() means you WILL miss dependent files and break things.
 
 ## Tools
-- **search("query", near="SymbolName")** — Find symbols, files, or concepts. Pass a specific symbol name ('UserStatus', 'zik'), a file path ('src/types/enums'), or ONE concept word ('authentication'). Do NOT pass multi-word descriptions — search('zik') not search('plane type enum plane types'). Returns `name (kind) file:start-end [H/M/L]` for symbol matches, bare paths + graph connections for path matches. Replaces grep and glob. Use FIRST.
-  - **near="SymbolName" or "file/path.ts"** — filters results to files connected to this symbol or file (within 3 graph hops). Use near= only with an exact symbol or file returned by a previous search or node() call. Do not invent anchors from broad words such as `planes`, `filter`, or `table` — these are not graph symbols and will not resolve. The first search may omit near= to discover the subsystem; subsequent searches use near= with a symbol from a prior result.
-- **node("name")** — Get connections (callers, callees) with file:line ranges. Use after search.
+- **search("query", near="SymbolName")** — Find symbols, files, or concepts. Pass a single symbol name, a file path, or ONE concept word. Returns `name (kind) file:start-end [H/M/L]` for symbol matches, bare paths + graph connections for path matches. Replaces grep and glob. Use FIRST.
+  - **near="SymbolName" or "file/path.ts"** — filters results to files connected to this symbol or file (within 3 graph hops). Use near= only with an exact symbol or file returned by a previous search or node() call. The first search may omit near= to discover the subsystem; subsequent searches use near= with a symbol from a prior result.
+- **node("name")** — Get connections (callers, callees) with file:line ranges. depth=1 is fast (SQL, <100ms) and returns file:line for each connection. Use Read directly on the returned line ranges. Use after search.
 - **impact("name", change="add-value")** — Blast radius. Default (add-value) shows only files that BREAK: type-position users (Record<T>, switch, Object.keys, .map). ~5-30 files, ~500 tokens. Files tagged [breaks]/[safe], risk-sorted. Paginated — call impact(name, offset=N) for more. Pass change="full" for exhaustive (all depths, ~4k tokens) ONLY for repo-wide refactors. change="rename" for callers+importers. change="remove" for all dependents. Use BEFORE editing.
-- **path("from", "to")** — Trace how two symbols connect.
-- **package("name")** — Resolve an npm package to its entry point files AND symbol line ranges. Returns symbol offsets (e.g. `PlaneCategories (enum): 307-322`) so you can Read surgically: `Read(types_file, offset=307, limit=17)` instead of reading 587 lines. Use for external packages in node_modules that aren't in the codebase graph.
-- **local_files(["path"])** — Read full files. EXPENSIVE. Prefer Read with line ranges from search/node.
+- **path("from", "to")** — Trace how two symbols connect. Returns a path summary. Use node() on each symbol in the path for detailed connections.
+- **package("name")** — Resolve an npm package to its entry point files AND symbol line ranges. Returns symbol offsets so you can Read surgically instead of reading the entire .d.ts file. Use for external packages in node_modules that aren't in the codebase graph.
+- **search_in_file("query", "path")** — Search within a local file for lines matching a query. Returns matching lines with line numbers. Use this instead of reading a large file in chunks — ~100 tokens vs ~4000 for chunked reads. Works on any local file, especially .d.ts files from package(). Use Read with the returned line numbers for full context.
+- **local_files(["path"])** — Read full files. EXPENSIVE. Prefer Read with line ranges from search/node, or search_in_file for finding specific lines within a file.
 
 ## Rules
-- **DO NOT use grep or glob.** search() replaces both and provides line ranges.
-- **DO NOT spawn explore subagents.** Use search() + node() + Read with line ranges.
-- **DO NOT read a whole file when you have a line range.** Use Read with offset/limit.
-- **DO NOT edit without running impact() first.** impact() finds files grep misses.
-- **DO NOT search for the same thing twice.** search() caches results in-session.
-- **ONLY 1 SEARCH AT A TIME.** Do not fire multiple searches in parallel — each search hits the CRG DB + embedding model. Concurrent searches overload the pod and cause 504s.
-- **Use near= only with symbols returned by previous search or node() results.** Do not invent anchors from broad words (planes, filter, table) — they are not graph symbols and will not resolve. The first search may omit near= to discover the subsystem. If a near= anchor doesn't resolve, the search returns unfiltered results tagged with a hint — use a symbol from those results as near= next.
-- **Search what the user mentioned, not your abstraction of it.** If the user says "add a new plane type next to zik", search "zik" — not "plane type enum". Anchor on concrete names the user gives you. If no concrete name exists, use ONE concept word, not a multi-word description.
-- **If search returns [L] (low confidence), do NOT retry with similar terms.** Use node() on a known symbol, Read a file you already found, or ask the user.
-- **For external npm packages (node_modules), use package("name")** to find entry points, then Read the `.d.ts` file.
+- **Use search() instead of grep or glob.** search() provides line ranges and confidence levels.
+- **Use search() + node() + Read with line ranges** instead of explore subagents.
+- **Use Read with offset/limit when you have a line range** from search/node results.
+- **Run impact() before editing** any type, enum, constant, or shared function. impact() finds files that grep misses.
+- **Use a different search term when results are [CACHED].** search() caches results in-session — pivot to node()/impact() on a cached file path, or refine your query.
+- **1 SEARCH AT A TIME.** Each search hits the CRG DB + embedding model. Concurrent searches cause 504s.
+- **Use near= with symbols returned by previous search or node() results.** The first search may omit near= to discover the subsystem. If a near= anchor doesn't resolve, the search returns unfiltered results tagged with a hint — use a symbol from those results as near= next.
+- **Search what the user mentioned, not your abstraction of it.** Anchor on concrete names the user gives you. If no concrete name exists, use ONE concept word.
+- **If search returns [L] (low confidence), pivot to node() on a known symbol, Read a file you already found, or ask the user.**
+- **For external npm packages (node_modules), use package("name")** to find entry points and symbol line ranges, then Read the `.d.ts` file surgically.
 
 ### Tool Result Decision Matrix
 
@@ -53,4 +54,4 @@ When a tool returns a non-standard response, follow these positive pivot actions
 | **`[STATUS: TIMEOUT]`** from impact() or node() | Use the partial results already returned. Switch to `search_in_file()` or `Read()` on the primary files involved. |
 | **`[CACHED]`** from search() | Change your search query to a different keyword, or pivot to `node()` / `impact()` on one of the cached file paths. |
 | **All `[M]` results, no exact symbol match** | The symbol likely lives in an external package. Call `package("@scope/name")` to locate its `.d.ts` definition with line numbers. |
-| **Looking for external package symbols** (PlaneCategories, IconsNames, Platforms) | Call `package("@scope/name")` FIRST to get `.d.ts` line ranges, then `Read` surgically. |
+| **Looking for external package symbols** | Call `package("@scope/name")` FIRST to get `.d.ts` line ranges, then `Read` surgically. |

@@ -614,7 +614,7 @@ def _format_search(results, query, near="", provider=None):
         else:
             lines.append(f"\n-> '{query}' has no exact declaration in the local codebase graph.")
             lines.append(f"   This symbol likely originates from an external npm package.")
-            lines.append(f"   Action: Call package(\"@scope/name\") to retrieve its .d.ts entrypoint and exact line numbers.")
+            lines.append(f"   Call package(\"@scope/name\") to retrieve its .d.ts entrypoint and exact line numbers.")
 
     # ── Transparency block: expose retrieval decisions when fallback occurred ──
     # Uses the consolidated `found_via` field from the router when available,
@@ -1156,15 +1156,12 @@ def main():
             types.Tool(
                 name="search",
                 description=(
-                    "Search the codebase graph. Pass a specific symbol name ('UserStatus', 'zik'), "
-                    "a file path ('src/types/enums'), or ONE concept word ('authentication'). "
-                    "Do NOT pass multi-word descriptions - "
-                    "search('zik') not search('plane type enum plane types'). "
-                    "Returns name, kind, file path with line ranges (file:start-end), and confidence [H/M/L]. "
+                    "Search the codebase graph. Pass a single symbol name, a file path, "
+                    "or ONE concept word. Returns name, kind, file path with line ranges "
+                    "(file:start-end), and confidence [H/M/L]. "
                     "Use built-in Read with offset=line_start, limit=line_end-line_start to get source. "
                     "Use this FIRST - replaces grep and glob. "
                     "Pass near= with a symbol or file returned by a previous search or node() result. "
-                    "Do not invent anchors from broad words (planes, filter, table) - they will not resolve. "
                     "The first search may omit near= to discover the subsystem. "
                     "If output yields only medium [M] confidence matches with no exact symbol, "
                     "pivot to package('@scope/name') to locate external package definitions."
@@ -1179,8 +1176,8 @@ def main():
                 description=(
                     "Get a symbol's connections (callers, callees) with file:line ranges. "
                     "Use AFTER search. Then use built-in Read with those line ranges to get implementation details. "
-                    "If traversal times out on large repos, inspect the returned top-level connections "
-                    "directly via search_in_file() or Read()."
+                    "depth=1 (default for speed) uses fast SQL queries and returns file:line for each connection. "
+                    "Use Read directly on the returned line ranges to inspect connected code."
                 ),
                 inputSchema={"type": "object", "properties": {
                     "name": {"type": "string"}, "depth": {"type": "integer", "default": 2}
@@ -1212,7 +1209,7 @@ def main():
             ),
             types.Tool(
                 name="path",
-                description="Trace the shortest path between two symbols in the codebase graph.",
+                description="Trace the shortest path between two symbols in the codebase graph. Returns a path summary. Use node() on each symbol in the path for detailed connections.",
                 inputSchema={"type": "object", "properties": {
                     "from": {"type": "string"}, "to": {"type": "string"}
                 }, "required": ["from", "to"]},
@@ -1221,8 +1218,8 @@ def main():
                 name="local_files",
                 description=(
                     "Read full source files from disk. EXPENSIVE. "
-                    "Prefer built-in Read with line ranges from search/node results instead. "
-                    "Warns if line ranges are already known from earlier search/node calls."
+                    "Prefer Read with line ranges from search/node results instead. "
+                    "For searching within a file, use search_in_file() instead - it returns matching lines with line numbers."
                 ),
                 inputSchema={"type": "object", "properties": {
                     "paths": {"type": "array", "items": {"type": "string"}},
@@ -1234,13 +1231,12 @@ def main():
                 description=(
                     "Resolve an npm package to its entry point files (main, types, exports) "
                     "AND symbol offsets from the .d.ts index. Returns symbol names with line ranges "
-                    "so you can Read surgically (e.g. Read(types, offset=307, limit=17)) instead of "
-                    "reading the entire .d.ts file. "
+                    "so you can Read surgically instead of reading the entire .d.ts file. "
                     "Use this when you need to find symbols in external npm packages "
                     "that aren't in the codebase graph."
                 ),
                 inputSchema={"type": "object", "properties": {
-                    "name": {"type": "string", "description": "npm package name (e.g. @romach/enums, lodash)"}
+                    "name": {"type": "string", "description": "npm package name (e.g. @scope/name)"}
                 }, "required": ["name"]},
             ),
             types.Tool(

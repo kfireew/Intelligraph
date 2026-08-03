@@ -973,10 +973,8 @@ class TestLexicalRetrieval:
     def test_blocker_message_no_near_placeholder(self):
         """The JS enforcement plugin should convert glob patterns to search
         hints without a near='<placeholder>' that teaches the model to invent
-        anchors. The message should say 'search first' then 'use near= only
-        with an exact symbol returned'."""
-        import json
-        # Read the JS file and verify the message structure
+        anchors. The message should mention search_in_file and package as
+        positive alternatives."""
         js_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                "intelligraph-enforce.js")
         with open(js_path, "r") as f:
@@ -984,9 +982,13 @@ class TestLexicalRetrieval:
         # Should NOT contain the old "Pass near= on every search" message
         assert "Pass near= on every search" not in js_content, \
             "Old 'pass near= on every search' message should be removed"
-        # Should contain the new guidance
-        assert "Use near= only with an exact symbol returned" in js_content, \
-            "New 'use near= only with exact symbol returned' guidance should be present"
+        # Should contain positive-action guidance
+        assert "search_in_file" in js_content, \
+            "Blocker should mention search_in_file as an alternative"
+        assert "package(" in js_content, \
+            "Blocker should mention package() as an alternative"
+        assert "pass a returned symbol as near=" in js_content, \
+            "Blocker should give positive near= guidance"
         # Should NOT have a near="<placeholder>" in search hints
         assert 'near="<subsystem symbol>"' not in js_content, \
             "Should not have near= placeholder that teaches model to invent anchors"
