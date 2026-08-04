@@ -3621,6 +3621,105 @@ def _stream_completions(pid, proj, data, prompt, uk="", auto_weight=0.4, conn=No
                                             break
                                 if matched_node:
                                     break
+
+                            # CRG direct fallback: hybrid_search found results
+                            # in CRG but they're not in graphify (post-processed
+                            # nodes: type aliases, const objects, etc.). Build
+                            # context directly from CRG instead of falling to
+                            # the heavy pipeline.
+                            if not matched_node and sem_results:
+                                crg_best = sem_results[0]
+                                crg_name = crg_best.get("name", target)
+                                crg_file = crg_best.get("file_path", "")
+                                crg_kind = crg_best.get("kind", "Symbol")
+
+                                neighbors_raw = []
+                                try:
+                                    fc = provider.fast_connections(crg_name)
+                                    for e in fc.get("edges", []):
+                                        if e.get("target") == crg_name:
+                                            neighbors_raw.append(
+                                                f"  <- {e.get('source','?')} ({e.get('type','link')}) -- {e.get('source_file','')}")
+                                        elif e.get("source") == crg_name:
+                                            neighbors_raw.append(
+                                                f"  -> {e.get('target','?')} ({e.get('type','link')}) -- {e.get('target_file','')}")
+                                except Exception:
+                                    pass
+
+                                snippet_count = 0
+                                context_parts = [
+                                    f"Symbol: {crg_name}",
+                                    f"Kind: {crg_kind}",
+                                    f"File: {crg_file}",
+                                    f"Connections ({len(neighbors_raw)}):",
+                                    "\n".join(neighbors_raw[:20]),
+                                ]
+                                if snippet_chars > 0:
+                                    try:
+                                        snip_names = [crg_name] + [
+                                            n.split("(")[0].strip().replace("-> ", "").replace("<- ", "")
+                                            for n in neighbors_raw[:3]
+                                        ]
+                                        snippets = provider.get_snippets(snip_names, max_chars=snippet_chars // 3)
+                                        if snippets:
+                                            snip_lines = ["Source:"]
+                                            chars_used = 0
+                                            for sn, sd in snippets.items():
+                                                s = sd.get("snippet", "")
+                                                if s and chars_used + len(s) < snippet_chars:
+                                                    snip_lines.append(f"  {sn} ({sd.get('file_path','')}:{sd.get('line_start',0)}):")
+                                                    snip_lines.append(f"    {s[:snippet_chars // 3]}")
+                                                    chars_used += len(s)
+                                                    snippet_count += 1
+                                            if snippet_count > 0:
+                                                context_parts.append("\n".join(snip_lines))
+                                    except Exception:
+                                        pass
+
+                                retrieved_files = [crg_file] if crg_file else []
+                                retrieved = "\n".join(context_parts)
+                                context_stats = {
+                                    "mode": "lightweight+crg", "intent": intent,
+                                    "neighbors": len(neighbors_raw),
+                                    "snippets": snippet_count,
+                                    "rationale": 0,
+                                }
+                                matched_nodes = [{"id": crg_name, "label": crg_name}]
+
+                            # nm_index fallback: external package symbols (.d.ts)
+                            if not matched_node:
+                                nm_path = proj.get("nm_index_path")
+                                if nm_path and os.path.isfile(nm_path):
+                                    try:
+                                        import sqlite3 as _nmc
+                                        _nm_conn = _nmc.connect(f"file:{nm_path}?mode=ro", uri=True)
+                                        _nm_conn.row_factory = _nmc.Row
+                                        _nm_rows = _nm_conn.execute(
+                                            "SELECT name, kind, file_path, line_start, line_end, signature "
+                                            "FROM nm_symbols WHERE LOWER(name) = ? LIMIT 3",
+                                            (target_lower,)
+                                        ).fetchall()
+                                        if _nm_rows:
+                                            _r = _nm_rows[0]
+                                            _nm_name = _r["name"]
+                                            _nm_file = _r["file_path"]
+                                            _nm_kind = _r["kind"] or "External"
+                                            context_parts = [
+                                                f"Symbol: {_nm_name}",
+                                                f"Kind: {_nm_kind} (external package)",
+                                                f"File: {_nm_file}",
+                                                f"Signature: {_r['signature'] or 'N/A'}",
+                                            ]
+                                            retrieved_files = [_nm_file]
+                                            retrieved = "\n".join(context_parts)
+                                            context_stats = {
+                                                "mode": "lightweight+nm", "intent": intent,
+                                                "neighbors": 0, "snippets": 0, "rationale": 0,
+                                            }
+                                            matched_nodes = [{"id": _nm_name, "label": _nm_name}]
+                                        _nm_conn.close()
+                                    except Exception:
+                                        pass
                     except Exception:
                         pass
 
@@ -3729,7 +3828,7 @@ def _stream_completions(pid, proj, data, prompt, uk="", auto_weight=0.4, conn=No
                         "rationale": rationale_count,
                     }
                     matched_nodes = [{"id": node_id, "label": matched_node.get("label", node_id)}]
-                else:
+                elif not retrieved:
                     retrieval_strategy = "planner"
                     raise RuntimeError("node not found, falling back to heavy pipeline")
 
