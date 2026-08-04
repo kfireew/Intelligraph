@@ -1,10 +1,10 @@
 ﻿<#
 .SYNOPSIS
-    Intelligraph setup - installs agent, grep blockers, and local MCP for opencode or Claude Code.
+    Intelligraph setup - installs agent guide, local MCP server, and syncs graph data.
 .DESCRIPTION
     This script:
     1. Downloads the agent guide (intelligraph-agent.md)
-    2. Downloads the enforcement plugin (grep/glob blocker)
+    2. Updates the opencode plugin (no-op — grep/glob are allowed; guidance is in agent.md)
     3. Downloads the local MCP server script
     4. Syncs graph data from the pod (graph.db + graph.json)
     5. Configures opencode.json or Claude Code MCP settings
@@ -104,34 +104,32 @@ try {
     Write-Err "Failed to download agent: $_"
 }
 
-# -- Download enforcement plugin --
-Write-Step "Downloading enforcement plugin (grep/glob blocker)..."
+# -- Download opencode plugin (no-op: grep/glob allowed) --
+Write-Step "Updating opencode plugin..."
 if ($Harness -eq "opencode") {
     $enforceUrl = "$PodUrl/download/enforce-plugin"
     $enforcePath = Join-Path $PluginsDir "intelligraph-enforce.js"
     try {
         if ($SslVerify) { curl.exe -s -o "$enforcePath" "$enforceUrl" } else { curl.exe -k -s -o "$enforcePath" "$enforceUrl" }
-        Write-Ok "intelligraph-enforce.js saved to .opencode/plugins/"
+        Write-Ok "intelligraph-enforce.js saved (no-op: grep/glob allowed, guidance in agent.md)"
     } catch {
-        Write-Err "Failed to download enforcement plugin: $_"
+        Write-Warn "Failed to update plugin: $_"
     }
 } else {
     $hooksUrl = "$PodUrl/download/claude-hooks"
     $hooksDir = Join-Path $RepoDir ".claude"
     New-Item -ItemType Directory -Force -Path $hooksDir | Out-Null
     $hooksDest = Join-Path $hooksDir "settings.json"
-    # Merge with existing settings if present (don't overwrite other config)
     $hooksContent = $null
     try {
         if ($SslVerify) { curl.exe -s -o "$env:TEMP\claude-hooks.json" "$hooksUrl" } else { curl.exe -k -s -o "$env:TEMP\claude-hooks.json" "$hooksUrl" }
         $hooksContent = Get-Content "$env:TEMP\claude-hooks.json" -Raw | ConvertFrom-Json
         Remove-Item "$env:TEMP\claude-hooks.json" -Force -ErrorAction SilentlyContinue
     } catch {
-        Write-Err "Failed to download hooks: $_"
+        Write-Warn "Failed to download hooks: $_"
     }
     if ($hooksContent) {
         if (Test-Path $hooksDest) {
-            # Merge hooks into existing settings
             $existing = Get-Content $hooksDest -Raw | ConvertFrom-Json
             if (-not $existing.PSObject.Properties["hooks"]) {
                 $existing | Add-Member -MemberType NoteProperty -Name "hooks" -Value $hooksContent.hooks
@@ -142,7 +140,7 @@ if ($Harness -eq "opencode") {
         } else {
             $hooksContent | ConvertTo-Json -Depth 10 | Set-Content $hooksDest -Encoding UTF8
         }
-        Write-Ok "Claude Code hooks saved to .claude/settings.json"
+        Write-Ok "Claude Code hooks updated (no-op: grep/glob allowed)"
     }
 }
 
@@ -247,15 +245,14 @@ if ($Harness -eq "opencode") {
         $config.mcp | Add-Member -MemberType NoteProperty -Name "intelligraph" -Value $mcpEntry
     }
     
-    # NOTE: The enforcement plugin at .opencode/plugins/intelligraph-enforce.js
-    # is AUTO-LOADED by opencode at startup. Do NOT add it to the "plugin" key —
-    # that key is for npm package names only, and adding a file path there makes
-    # opencode try to install it as an npm package (fails, breaks plugin loading).
-    # See https://opencode.ai/docs/plugins
+    # NOTE: The plugin at .opencode/plugins/intelligraph-enforce.js
+    # is AUTO-LOADED by opencode at startup. It is a NO-OP — grep/glob
+    # are allowed. Agent guidance is in intelligraph-agent.md.
+    # Do NOT add it to the "plugin" key — that key is for npm package names
+    # only. See https://opencode.ai/docs/plugins
     
     $config | ConvertTo-Json -Depth 10 | Set-Content $opencodePath -Encoding UTF8
     Write-Ok "opencode.json configured with intelligraph MCP"
-    Write-Ok "enforcement plugin auto-loaded from .opencode/plugins/"
 } else {
     # Claude Code — uses .mcp.json at project root
     $mcpConfigPath = Join-Path $RepoDir ".mcp.json"
@@ -377,7 +374,7 @@ Write-Host "`n========================================" -ForegroundColor Green
 Write-Host "  Setup Complete!" -ForegroundColor Green
 Write-Host "========================================" -ForegroundColor Green
 Write-Host "  Agent guide:     $RepoDir\intelligraph-agent.md"
-Write-Host "  Enforcement:     $(if ($Harness -eq 'opencode') { $PluginsDir + '\intelligraph-enforce.js' } else { $RepoDir + '\.claude\settings.json' })"
+Write-Host "  Plugin:          $(if ($Harness -eq 'opencode') { $PluginsDir + '\intelligraph-enforce.js (no-op)' } else { $RepoDir + '\.claude\settings.json (no-op)' })"
 Write-Host "  Intelligraph MCP: $localMcpPath"
 Write-Host "  Graph cache:     $CacheDir"
 Write-Host "  MCP update:      mcp-update (re-syncs graph from pod)"

@@ -38,7 +38,7 @@ def mock_crg_db(tmp_path):
     conn.execute("CREATE TABLE communities (id INTEGER PRIMARY KEY, name TEXT, size INTEGER, dominant_language TEXT, description TEXT, cohesion REAL, level INTEGER)")
     conn.execute("CREATE TABLE community_summaries (community_id INTEGER, purpose TEXT, key_symbols TEXT, risk TEXT)")
     conn.execute("CREATE TABLE flows (name TEXT, criticality REAL, path_json TEXT, entry_point_id INTEGER, node_count INTEGER, file_count INTEGER)")
-    conn.execute("CREATE TABLE node_snippets (node_name TEXT PRIMARY KEY, snippet TEXT)")
+    conn.execute("CREATE TABLE node_snippets (qualified_name TEXT PRIMARY KEY, node_name TEXT, file_path TEXT, line_start INTEGER, line_end INTEGER, snippet TEXT)")
 
     nodes_data = [
         (1, "upsertEntity", "Function", "app.services.entity.upsertEntity", "src/services/entity.py", "def upsertEntity(data):", 1, 10, 30, 0),
@@ -69,11 +69,11 @@ def mock_crg_db(tmp_path):
         conn.execute("INSERT INTO communities VALUES(?, ?, ?, ?, ?, ?, ?)", cd)
 
     snippets_data = [
-        ("upsertEntity", "def upsertEntity(data):\n    validateEntity(data)\n    db.save(data)\n    return data"),
-        ("validateEntity", "def validateEntity(data):\n    if not data.get('id'):\n        raise ValueError('id required')"),
+        ("app.services.entity.upsertEntity", "upsertEntity", "src/services/entity.py", 10, 30, "def upsertEntity(data):\n    validateEntity(data)\n    db.save(data)\n    return data"),
+        ("app.services.entity.validateEntity", "validateEntity", "src/services/entity.py", 35, 45, "def validateEntity(data):\n    if not data.get('id'):\n        raise ValueError('id required')"),
     ]
-    for sn, st in snippets_data:
-        conn.execute("INSERT INTO node_snippets VALUES(?, ?)", (sn, st))
+    for sq, sn, sf, sls, sle, st in snippets_data:
+        conn.execute("INSERT INTO node_snippets VALUES(?, ?, ?, ?, ?, ?)", (sq, sn, sf, sls, sle, st))
 
     conn.commit()
     conn.close()
@@ -359,7 +359,7 @@ def mock_crg_db_ts(tmp_path):
     conn.execute("CREATE TABLE nodes (id INTEGER PRIMARY KEY, name TEXT, kind TEXT, qualified_name TEXT, file_path TEXT, signature TEXT, community_id INTEGER, line_start INTEGER, line_end INTEGER, is_test INTEGER)")
     conn.execute("CREATE VIRTUAL TABLE nodes_fts USING fts5(name, signature, file_path, content='nodes', content_rowid='id')")
     conn.execute("CREATE TABLE edges (source_qualified TEXT, target_qualified TEXT, kind TEXT)")
-    conn.execute("CREATE TABLE node_snippets (node_name TEXT PRIMARY KEY, snippet TEXT)")
+    conn.execute("CREATE TABLE node_snippets (qualified_name TEXT PRIMARY KEY, node_name TEXT, file_path TEXT, line_start INTEGER, line_end INTEGER, snippet TEXT)")
 
     # PlaneCategories enum is imported by many files:
     #   - icon-resolver.ts (Record<PlaneCategory, string> — breaks on add-value)
@@ -378,32 +378,26 @@ def mock_crg_db_ts(tmp_path):
         conn.execute("INSERT INTO nodes_fts(rowid, name, signature, file_path) VALUES(?, ?, ?, ?)", (nd[0], nd[1], nd[5], nd[4]))
 
     edges_data = [
-        # icon-resolver REFERENCES PlaneCategories (type-position use → breaks on add-value)
         ("utils.iconResolver", "types.categories.PlaneCategories", "REFERENCES"),
-        # icon-resolver IMPORTS_FROM PlaneCategories
         ("utils.iconResolver", "types.categories.PlaneCategories", "IMPORTS_FROM"),
-        # display.ts REFERENCES + IMPORTS_FROM
         ("utils.displayLabel", "types.categories.PlaneCategories", "REFERENCES"),
         ("utils.displayLabel", "types.categories.PlaneCategories", "IMPORTS_FROM"),
-        # plane service CALLS a function that uses PlaneCategories (calls — safe on add-value)
         ("services.planeService", "utils.iconResolver", "CALLS"),
         ("services.planeService", "types.categories.PlaneCategories", "IMPORTS_FROM"),
-        # test file
         ("tests.testPlane", "types.categories.PlaneCategories", "IMPORTS_FROM"),
         ("tests.testPlane", "utils.iconResolver", "CALLS"),
     ]
     for ed in edges_data:
         conn.execute("INSERT INTO edges VALUES(?, ?, ?)", ed)
 
-    # Snippets with exhaustive patterns (actual source code ≤500 chars)
     snippets = [
-        ("iconResolver", "const iconResolver = (cat: PlaneCategory): string => {\n  const map: Record<PlaneCategory, string> = {\n    ZIK: '/zik.svg',\n  };\n  return map[cat];\n};"),
-        ("displayLabel", "function displayLabel(cat: PlaneCategory) {\n  switch (cat) {\n    case ZIK: return 'Zik';\n  }\n}"),
-        ("planeService", "function planeService() {\n  return iconResolver('ZIK');\n}"),
-        ("testPlane", "test('plane', () => {\n  expect(iconResolver('ZIK')).toBe('/zik.svg');\n});"),
+        ("utils.iconResolver", "iconResolver", "src/utils/icon-resolver.ts", 5, 30, "const iconResolver = (cat: PlaneCategory): string => {\n  const map: Record<PlaneCategory, string> = {\n    ZIK: '/zik.svg',\n  };\n  return map[cat];\n};"),
+        ("utils.displayLabel", "displayLabel", "src/utils/display.ts", 10, 40, "function displayLabel(cat: PlaneCategory) {\n  switch (cat) {\n    case ZIK: return 'Zik';\n  }\n}"),
+        ("services.planeService", "planeService", "src/services/plane.ts", 1, 50, "function planeService() {\n  return iconResolver('ZIK');\n}"),
+        ("tests.testPlane", "testPlane", "tests/test_plane.ts", 1, 20, "test('plane', () => {\n  expect(iconResolver('ZIK')).toBe('/zik.svg');\n});"),
     ]
-    for sn, st in snippets:
-        conn.execute("INSERT INTO node_snippets VALUES(?, ?)", (sn, st))
+    for sq, sn, sf, sls, sle, st in snippets:
+        conn.execute("INSERT INTO node_snippets VALUES(?, ?, ?, ?, ?, ?)", (sq, sn, sf, sls, sle, st))
 
     conn.commit()
     conn.close()
@@ -587,7 +581,7 @@ def mock_crg_db_huge(tmp_path):
     conn.execute("CREATE TABLE nodes (id INTEGER PRIMARY KEY, name TEXT, kind TEXT, qualified_name TEXT, file_path TEXT, signature TEXT, community_id INTEGER, line_start INTEGER, line_end INTEGER, is_test INTEGER)")
     conn.execute("CREATE VIRTUAL TABLE nodes_fts USING fts5(name, signature, file_path, content='nodes', content_rowid='id')")
     conn.execute("CREATE TABLE edges (source_qualified TEXT, target_qualified TEXT, kind TEXT)")
-    conn.execute("CREATE TABLE node_snippets (node_name TEXT PRIMARY KEY, snippet TEXT)")
+    conn.execute("CREATE TABLE node_snippets (qualified_name TEXT PRIMARY KEY, node_name TEXT, file_path TEXT, line_start INTEGER, line_end INTEGER, snippet TEXT)")
 
     # Target enum
     conn.execute("INSERT INTO nodes VALUES(1, 'PlaneCategories', 'Enum', 'types.PlaneCategories', 'src/types/categories.ts', 'enum PlaneCategories', 1, 1, 20, 0)")
@@ -608,7 +602,7 @@ def mock_crg_db_huge(tmp_path):
         conn.execute("INSERT INTO nodes VALUES(?, ?, 'Function', ?, ?, ?, 2, 1, 30, 0)", (i, sym_name, qname, fp, f"def {sym_name}()"))
         conn.execute("INSERT INTO nodes_fts(rowid, name, signature, file_path) VALUES(?, ?, ?, ?)", (i, sym_name, f"def {sym_name}()", fp))
         conn.execute("INSERT INTO edges VALUES(?, 'types.PlaneCategories', 'IMPORTS_FROM')", (qname,))
-        conn.execute("INSERT INTO node_snippets VALUES(?, ?)", (sym_name, snip))
+        conn.execute("INSERT INTO node_snippets VALUES(?, ?, ?, ?, ?, ?)", (qname, sym_name, fp, 1, 30, snip))
 
     # 3466 files with plain imports (safe — no exhaustive pattern)
     for i in range(8, 3474):
@@ -861,14 +855,12 @@ class TestNearResilience:
         assert "[stale]" not in output, \
             f"Stale tags should be skipped when >50% stale (Fix L), got:\n{output}"
 
-    def test_snippet_schema_v2_join_on_qualified_name(self, mock_proj_snippets):
-        """get_snippets should find snippets using qualified_name (v2 schema),
-        even when node_name would collide."""
+    def test_snippet_lookup_by_qualified_name(self, mock_proj_snippets):
+        """get_snippets should find snippets using qualified_name."""
         from crg_intelligence import CRGProvider
         provider = CRGProvider(mock_proj_snippets)
         assert provider.is_available()
-        provider._get_conn()  # trigger schema probe
-        assert provider._snippet_schema == "v2"
+        provider._get_conn()
         result = provider.get_snippets(["IconsNames"], max_chars=500)
         assert "IconsNames" in result
         assert "TRACK_ZIK" in result["IconsNames"]["snippet"]
@@ -970,30 +962,19 @@ class TestLexicalRetrieval:
         output = intelligraph_mcp._dispatch("search", {"query": "TRACK_KARISH"}, provider)
         assert "Found via:" in output, f"Expected 'Found via:' transparency block:\n{output}"
 
-    def test_blocker_message_no_near_placeholder(self):
-        """The JS enforcement plugin should convert glob patterns to search
-        hints without a near='<placeholder>' that teaches the model to invent
-        anchors. The message should mention search_in_file and package as
-        positive alternatives."""
+    def test_enforcement_plugin_allows_grep(self):
+        """The JS enforcement plugin should NOT block grep/glob — they're
+        complementary tools. The plugin is now a no-op."""
         js_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                "intelligraph-enforce.js")
         with open(js_path, "r") as f:
             js_content = f.read()
-        # Should NOT contain the old "Pass near= on every search" message
-        assert "Pass near= on every search" not in js_content, \
-            "Old 'pass near= on every search' message should be removed"
-        # Should contain positive-action guidance
-        assert "search_in_file" in js_content, \
-            "Blocker should mention search_in_file as an alternative"
-        assert "package(" in js_content, \
-            "Blocker should mention package() as an alternative"
-        assert "pass a returned symbol as near=" in js_content, \
-            "Blocker should give positive near= guidance"
-        # Should NOT have a near="<placeholder>" in search hints
-        assert 'near="<subsystem symbol>"' not in js_content, \
-            "Should not have near= placeholder that teaches model to invent anchors"
-        # Should have searchHint function
-        assert "function searchHint" in js_content or "searchHint" in js_content
+        # Should NOT contain any throw new Error (no blocking)
+        assert "throw new Error" not in js_content, \
+            "Enforcement plugin should not block any tools"
+        # Should mention it's a no-op
+        assert "No-op" in js_content or "no-op" in js_content, \
+            "Plugin should declare itself a no-op"
 
 
 # ── Phase 3: internal retrieval router, stage trace, found_via ───

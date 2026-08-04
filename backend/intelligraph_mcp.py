@@ -251,6 +251,68 @@ def _read_local_file(repo_relative_path: str, max_bytes: int = 15000) -> str:
         return f"ERROR reading {repo_relative_path}: {e}"
 
 
+def _scan_source_files(query, max_results=5):
+    """Scan source files in REPO_DIR for a query term. Last-resort fallback
+    when graph + node_snippets miss the symbol (e.g., private consts, type
+    aliases not in the graph). Returns list of result dicts with [L] confidence.
+    """
+    if not REPO_DIR or not query:
+        return []
+
+    import re as _re
+    import time as _time
+
+    _SRC_EXTS = ('.ts', '.tsx', '.js', '.jsx')
+    _SKIP_DIRS = frozenset({
+        'node_modules', '.git', 'dist', 'build', 'out',
+        '.code-review-graph', '.nuxt', '.cache', '.vite',
+        'webpack', '__generated__', 'generated', 'codegen',
+    })
+
+    try:
+        pattern = _re.compile(_re.escape(query), _re.IGNORECASE)
+    except Exception:
+        return []
+
+    hits = []
+    start = _time.monotonic()
+
+    for root, dirs, files in os.walk(REPO_DIR):
+        dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
+        if _time.monotonic() - start > 3.0:
+            break
+        for f in files:
+            if not f.endswith(_SRC_EXTS):
+                continue
+            full_path = os.path.join(root, f)
+            rel_path = os.path.relpath(full_path, REPO_DIR).replace("\\", "/")
+            try:
+                with open(full_path, "r", encoding="utf-8", errors="replace") as src_f:
+                    for line_num, line in enumerate(src_f, 1):
+                        if pattern.search(line):
+                            stripped = line.rstrip("\n\r")
+                            if len(stripped) > 100:
+                                stripped = stripped[:97] + "..."
+                            hits.append({
+                                "name": stripped[:60],
+                                "kind": "lexical",
+                                "file_path": rel_path,
+                                "line_start": line_num,
+                                "line_end": line_num,
+                                "confidence": "LOW",
+                                "reason": ["source_scan"],
+                            })
+                            if len(hits) >= max_results:
+                                return hits
+                            break
+            except Exception:
+                continue
+            if _time.monotonic() - start > 3.0:
+                break
+
+    return hits
+
+
 def _format_search(results, query, near="", provider=None):
     guidance = [r for r in results if "low_confidence_guidance" in r.get("reason", []) or "no_match" in r.get("reason", [])]
     real_results = [r for r in results if r not in guidance]
@@ -264,48 +326,22 @@ def _format_search(results, query, near="", provider=None):
             try:
                 conn = provider._get_conn()
                 ql = f"%{query.lower()}%"
-                # Try node_snippets first (actual source code, up to 500 chars).
-                # v2 schema: node_snippets has file_path + line ranges directly,
-                # so we can join without a second query. v1: fall back to name lookup.
                 try:
-                    if provider._snippet_schema == "v2":
-                        snip_rows = conn.execute(
-                            "SELECT node_name, file_path, line_start, line_end, snippet "
-                            "FROM node_snippets WHERE LOWER(snippet) LIKE ? LIMIT 5",
-                            (ql,)
-                        ).fetchall()
-                        for sr in snip_rows:
-                            fallback_hits.append({
-                                "name": sr["node_name"] or "?",
-                                "kind": "Value",
-                                "file_path": sr["file_path"] or "?",
-                                "line_start": sr["line_start"] or 0,
-                                "line_end": sr["line_end"] or 0,
-                                "confidence": "MEDIUM",
-                                "reason": ["snippet_fallback"],
-                            })
-                    else:
-                        snip_rows = conn.execute(
-                            "SELECT node_name, snippet FROM node_snippets "
-                            "WHERE LOWER(snippet) LIKE ? LIMIT 5",
-                            (ql,)
-                        ).fetchall()
-                        for sr in snip_rows:
-                            node_row = conn.execute(
-                                "SELECT name, kind, file_path, line_start, line_end "
-                                "FROM nodes WHERE LOWER(name) = LOWER(?) LIMIT 1",
-                                (sr["node_name"],)
-                            ).fetchone()
-                            if node_row:
-                                fallback_hits.append({
-                                    "name": node_row["name"],
-                                    "kind": node_row["kind"] or "?",
-                                    "file_path": node_row["file_path"] or "?",
-                                    "line_start": node_row["line_start"] or 0,
-                                    "line_end": node_row["line_end"] or 0,
-                                    "confidence": "MEDIUM",
-                                    "reason": ["snippet_fallback"],
-                                })
+                    snip_rows = conn.execute(
+                        "SELECT node_name, file_path, line_start, line_end, snippet "
+                        "FROM node_snippets WHERE LOWER(snippet) LIKE ? LIMIT 5",
+                        (ql,)
+                    ).fetchall()
+                    for sr in snip_rows:
+                        fallback_hits.append({
+                            "name": sr["node_name"] or "?",
+                            "kind": "Value",
+                            "file_path": sr["file_path"] or "?",
+                            "line_start": sr["line_start"] or 0,
+                            "line_end": sr["line_end"] or 0,
+                            "confidence": "MEDIUM",
+                            "reason": ["snippet_fallback"],
+                        })
                 except Exception:
                     pass
                 # Also scan previously-seen files from this session
@@ -331,6 +367,8 @@ def _format_search(results, query, near="", provider=None):
                         })
             except Exception:
                 pass
+        if not fallback_hits:
+            fallback_hits = _scan_source_files(query)
         if fallback_hits:
             real_results = fallback_hits
         else:

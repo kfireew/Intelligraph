@@ -187,7 +187,6 @@ class CRGProvider(IntelligenceProvider):
         self._db_path = None
         self._conn = None
         self._repo_prefix = None
-        self._snippet_schema = None  # "v2" (qualified_name) or "v1" (node_name only)
         self._valid_paths = None    # repo-relative path set (path validation cache)
 
     def is_available(self) -> bool:
@@ -224,36 +223,11 @@ class CRGProvider(IntelligenceProvider):
             self._conn = sqlite3.connect(f"file:{self._db_path}?mode=ro", uri=True)
             self._conn.row_factory = sqlite3.Row
             self._repo_prefix = self._extract_repo_prefix()
-            self._probe_snippet_schema()
         return self._conn
 
-    def _probe_snippet_schema(self):
-        """Cache node_snippets schema version once at provider startup.
-
-        v2: has qualified_name column (unambiguous joins).
-        v1: only node_name (legacy — joins on (node_name, file_path) or bare node_name).
-        """
-        try:
-            cols = self._conn.execute("PRAGMA table_info(node_snippets)").fetchall()
-            names = {r[1] for r in cols}
-            if "qualified_name" in names:
-                self._snippet_schema = "v2"
-            else:
-                self._snippet_schema = "v1"
-        except Exception:
-            self._snippet_schema = "v1"
-        _vmsg("CRG SNIPPET schema: %s", self._snippet_schema)
-
     def _snippet_join_clause(self, alias: str = "n", salias: str = "s") -> str:
-        """Return the SQL JOIN clause to match snippets to nodes.
-
-        v2: join on qualified_name (unambiguous).
-        v1: join on (node_name, file_path) pair (best effort, may collide for
-             duplicate names — but v1 is legacy and gradually replaced by re-sync).
-        """
-        if self._snippet_schema == "v2":
-            return f"JOIN nodes {alias} ON {alias}.qualified_name = {salias}.qualified_name"
-        return f"JOIN nodes {alias} ON {alias}.name = {salias}.node_name AND {alias}.file_path = {salias}.file_path"
+        """Return the SQL JOIN clause to match snippets to nodes."""
+        return f"JOIN nodes {alias} ON {alias}.qualified_name = {salias}.qualified_name"
 
     def _extract_repo_prefix(self) -> str:
         """Extract the repo root prefix for path normalization.
@@ -785,19 +759,11 @@ class CRGProvider(IntelligenceProvider):
             # in source snippets. Returns the containing files directly —
             # no BFS needed (the snippets define/use the value).
             try:
-                if self._snippet_schema == "v2":
-                    snip_rows = conn.execute(
-                        "SELECT DISTINCT file_path FROM node_snippets "
-                        "WHERE LOWER(snippet) LIKE ? LIMIT 50",
-                        (f"%{sym_lower}%",)
-                    ).fetchall()
-                else:
-                    snip_rows = conn.execute(
-                        "SELECT DISTINCT s.node_name, n.file_path FROM node_snippets s "
-                        "LEFT JOIN nodes n ON n.name = s.node_name "
-                        "WHERE LOWER(s.snippet) LIKE ? LIMIT 50",
-                        (f"%{sym_lower}%",)
-                    ).fetchall()
+                snip_rows = conn.execute(
+                    "SELECT DISTINCT file_path FROM node_snippets "
+                    "WHERE LOWER(snippet) LIKE ? LIMIT 50",
+                    (f"%{sym_lower}%",)
+                ).fetchall()
                 if snip_rows:
                     result_files = set()
                     for r in snip_rows:
@@ -1067,22 +1033,13 @@ class CRGProvider(IntelligenceProvider):
                 if len(term) < 3:
                     continue
                 try:
-                    if self._snippet_schema == "v2":
-                        snip_rows = conn.execute(
-                            f"SELECT s.node_name, n.file_path, n.kind, "
-                            f"n.line_start, n.line_end, n.qualified_name "
-                            f"FROM node_snippets s {join_clause} "
-                            f"WHERE LOWER(s.snippet) LIKE ? LIMIT 15",
-                            (f"%{term.lower()}%",)
-                        ).fetchall()
-                    else:
-                        snip_rows = conn.execute(
-                            f"SELECT s.node_name, n.file_path, n.kind, "
-                            f"n.line_start, n.line_end, '' as qualified_name "
-                            f"FROM node_snippets s LEFT JOIN nodes n ON n.name = s.node_name "
-                            f"WHERE LOWER(s.snippet) LIKE ? LIMIT 15",
-                            (f"%{term.lower()}%",)
-                        ).fetchall()
+                    snip_rows = conn.execute(
+                        f"SELECT s.node_name, n.file_path, n.kind, "
+                        f"n.line_start, n.line_end, n.qualified_name "
+                        f"FROM node_snippets s {join_clause} "
+                        f"WHERE LOWER(s.snippet) LIKE ? LIMIT 15",
+                        (f"%{term.lower()}%",)
+                    ).fetchall()
                 except Exception:
                     continue
                 for r in snip_rows:
@@ -2098,19 +2055,11 @@ class CRGProvider(IntelligenceProvider):
                     continue
                 snippet = ""
                 try:
-                    if self._snippet_schema == "v2":
-                        qname = r["qualified_name"] or f"{name}|{r['file_path']}"
-                        snip_row = conn.execute(
-                            "SELECT snippet FROM node_snippets WHERE qualified_name = ?",
-                            (qname,)
-                        ).fetchone()
-                    else:
-                        # v1 schema: node_snippets only has (node_name, snippet).
-                        # No file_path column — use bare node_name lookup.
-                        snip_row = conn.execute(
-                            "SELECT snippet FROM node_snippets WHERE node_name = ?",
-                            (name,)
-                        ).fetchone()
+                    qname = r["qualified_name"] or f"{name}|{r['file_path']}"
+                    snip_row = conn.execute(
+                        "SELECT snippet FROM node_snippets WHERE qualified_name = ?",
+                        (qname,)
+                    ).fetchone()
                     if snip_row and snip_row["snippet"]:
                         snippet = snip_row["snippet"][:max_chars]
                 except Exception:
@@ -2298,18 +2247,17 @@ class CRGProvider(IntelligenceProvider):
         change = change or "add-value"
         allowed_kinds = self._CHANGE_EDGE_FILTERS.get(change, self._CHANGE_EDGE_FILTERS["add-value"])
 
-        # ── Dynamic depth limit based on repo size ──────────────────
+        # ── Dynamic depth limit based on repo size + change type ───
         if change == "full":
             depth_max = 0  # unlimited
+        elif change == "add-value":
+            depth_max = 3  # type-alias chains need 2-3 hops; REFERENCES edges are sparse
         else:
             try:
                 node_count = conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
             except Exception:
                 node_count = 0
-            if node_count < 2000:
-                depth_max = 2
-            else:
-                depth_max = 1
+            depth_max = 2 if node_count < 2000 else 1
             _vmsg("CRG IMPACT: node_count=%d -> depth_max=%d (change=%s)", node_count, depth_max, change)
 
         # ── Find target nodes ────────────────────────────────────────
@@ -2528,22 +2476,19 @@ class CRGProvider(IntelligenceProvider):
                 entry["sources"].add("crg")
                 entry["is_test"] = _is_test_path(fp)
 
-        # ── breaks/safe tagging via node_snippets (depth-1 only) ────
-        # Fetch snippets for symbols in depth-1 files and scan for exhaustive patterns.
-        # Depth-2+ files are not scanned (too expensive) — they sort lower.
-        depth1_files = {fp for fp, d in file_data.items() if d["depth"] == 1}
-        if depth1_files:
-            # Collect all symbol names from depth-1 files for batch snippet lookup
-            depth1_symbols = set()
-            for fp in depth1_files:
-                depth1_symbols.update(file_data[fp]["symbols"])
+        # ── breaks/safe tagging via node_snippets (all depths) ──────
+        # Fetch snippets for symbols in ALL result files and scan for exhaustive
+        # patterns. Depth-2+ files are just as likely to break — excluding them
+        # pushes breaking files below safe files in the sort order.
+        scannable_files = {fp for fp, d in file_data.items() if d["depth"] >= 1}
+        if scannable_files:
+            all_symbols = set()
+            for fp in scannable_files:
+                all_symbols.update(file_data[fp]["symbols"])
             snippet_map = {}
-            if depth1_symbols:
+            if all_symbols:
                 try:
-                    # Batch in chunks of 500 to avoid SQLite MAX_VARIABLE_NUMBER
-                    # limit (999 on older SQLite, 32766 on newer). Silent failure
-                    # here means breaks/safe tagging is lost — not acceptable.
-                    sym_list = sorted(depth1_symbols)
+                    sym_list = sorted(all_symbols)
                     for i in range(0, len(sym_list), 500):
                         batch = sym_list[i:i + 500]
                         placeholders = ",".join("?" * len(batch))
@@ -2557,7 +2502,7 @@ class CRGProvider(IntelligenceProvider):
                 except Exception as e:
                     log.warning("CRG impact snippet batch query failed: %s", e)
 
-            for fp in depth1_files:
+            for fp in scannable_files:
                 entry = file_data[fp]
                 found_pattern = ""
                 for sym in entry["symbols"]:
@@ -2572,6 +2517,68 @@ class CRGProvider(IntelligenceProvider):
                         break
                 entry["breaks"] = bool(found_pattern)
                 entry["pattern"] = found_pattern
+
+        # ── Lexical fallback: scan node_snippets for type-position patterns ──
+        # Always runs for add-value. Resolves type aliases (e.g.,
+        # PlaneCategory = typeof PlaneCategories) to catch indirect type-level
+        # dependencies. Decouples pattern detection from name matching so
+        # `switch (cat as VehicleType)` and `.map((v: VehicleType) =>` are caught.
+        if change == "add-value":
+            search_names = {target_lower}
+            try:
+                for alias_pat in (f"%type % = typeof {target}%",
+                                  f"%type % = {target}%"):
+                    alias_rows = conn.execute(
+                        "SELECT DISTINCT snippet FROM node_snippets "
+                        "WHERE snippet LIKE ? LIMIT 10",
+                        (alias_pat,)
+                    ).fetchall()
+                    for r in alias_rows:
+                        snip = r["snippet"] or ""
+                        m = re.search(
+                            r'type\s+(\w+)\s*=\s*(?:typeof\s+)?' +
+                            re.escape(target),
+                            snip, re.IGNORECASE)
+                        if m:
+                            search_names.add(m.group(1).lower())
+            except Exception as e:
+                log.warning("CRG impact alias resolution failed: %s", e)
+
+            for name in search_names:
+                try:
+                    lex_rows = conn.execute(
+                        "SELECT DISTINCT node_name, file_path, snippet "
+                        "FROM node_snippets "
+                        "WHERE LOWER(snippet) LIKE ? LIMIT 50",
+                        (f"%{name}%",)
+                    ).fetchall()
+                    for r in lex_rows:
+                        fp = (self._normalize_path(r["file_path"])
+                              if r["file_path"] else "")
+                        if not fp or _is_junk_path(fp):
+                            continue
+                        snip = r["snippet"] or ""
+                        found_pattern = ""
+                        for pat in self._BREAKS_PATTERNS:
+                            if pat in snip:
+                                found_pattern = pat.strip()
+                                break
+                        if not found_pattern:
+                            continue
+                        if fp not in file_data:
+                            entry = file_data[fp]
+                            entry["depth"] = 1
+                            entry["edge_types"].add("REFERENCES")
+                            entry["sources"].add("lexical")
+                            entry["is_test"] = _is_test_path(fp)
+                        else:
+                            entry = file_data[fp]
+                        if r["node_name"]:
+                            entry["symbols"].add(r["node_name"])
+                        entry["breaks"] = True
+                        entry["pattern"] = found_pattern
+                except Exception as e:
+                    log.warning("CRG impact lexical scan failed: %s", e)
 
         # Set defaults for unscanned files
         for fp, data in file_data.items():

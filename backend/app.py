@@ -1369,6 +1369,286 @@ def _build_nm_index(repo_dir, index_path):
     _vmsg("NM INDEX - %d symbols from %d .d.ts files", total_symbols, len(dts_files))
 
 
+def _post_process_ts_symbols(conn, repo_dir, pid):
+    """Add TypeScript symbols missed by CRG builder: type aliases, interfaces,
+    enums, const object literals, const arrays. Creates REFERENCES edges for
+    type-position usage so impact() can trace type-level dependencies.
+
+    CRG builder only indexes File/Class/Function/Test for TypeScript. This
+    fills the gap by scanning source files for additional symbol types.
+    """
+    import re as _re
+    import time as _time
+    import os as _os
+    import bisect as _bisect
+
+    _TS_EXTS = ('.ts', '.tsx')
+    _SKIP_DIRS = frozenset({
+        'node_modules', '.git', 'dist', 'build', 'out',
+        '.code-review-graph', '.nuxt', '.cache', '.vite',
+        'webpack', '__generated__', 'generated', 'codegen',
+    })
+
+    _TYPE_ALIAS_RE = _re.compile(
+        r'^[ \t]*(?:export\s+)?type\s+(\w+)\s*=\s*(.+?)(?:;|\n|$)', _re.MULTILINE)
+    _INTERFACE_RE = _re.compile(
+        r'^[ \t]*(?:export\s+)?interface\s+(\w+)', _re.MULTILINE)
+    _ENUM_RE = _re.compile(
+        r'^[ \t]*(?:export\s+)?(?:const\s+)?enum\s+(\w+)', _re.MULTILINE)
+    _CONST_RECORD_RE = _re.compile(
+        r'^[ \t]*(?:export\s+)?const\s+(\w+)\s*:\s*Record\s*<\s*(\w+)', _re.MULTILINE)
+    _CONST_TYPED_OBJ_RE = _re.compile(
+        r'^[ \t]*(?:export\s+)?const\s+(\w+)\s*:\s*([A-Z]\w+)\s*=\s*\{', _re.MULTILINE)
+    _CONST_ARRAY_RE = _re.compile(
+        r'^[ \t]*(?:export\s+)?const\s+(\w+)\s*=\s*\[', _re.MULTILINE)
+    _TYPE_NAME_RE = _re.compile(r'\b([A-Z]\w+)\b')
+
+    _BUILTIN_TYPES = frozenset({
+        "Array", "Record", "Partial", "Pick", "Omit", "Readonly",
+        "Promise", "Map", "Set", "WeakMap", "WeakSet", "Function",
+        "Object", "String", "Number", "Boolean", "Symbol", "BigInt",
+        "Date", "RegExp", "Error", "JSON", "Math", "Console",
+    })
+
+    ts_files = []
+    for root, dirs, files in _os.walk(repo_dir):
+        dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
+        for f in files:
+            if f.endswith(_TS_EXTS) and not f.endswith('.d.ts'):
+                ts_files.append(_os.path.join(root, f))
+
+    if not ts_files:
+        return
+
+    _vmsg("POST-PROCESS TS pid=%d - scanning %d .ts/.tsx files", pid, len(ts_files))
+
+    new_symbols = []
+    type_refs = []
+
+    for full_path in ts_files:
+        try:
+            with open(full_path, "r", errors="replace") as f:
+                content = f.read()
+        except Exception:
+            continue
+
+        rel_path = full_path.replace("\\", "/")
+        if repo_dir:
+            repo_norm = repo_dir.replace("\\", "/")
+            if rel_path.startswith(repo_norm + "/"):
+                rel_path = rel_path[len(repo_norm) + 1:]
+            elif rel_path.startswith(repo_norm):
+                rel_path = rel_path[len(repo_norm):].lstrip("/")
+
+        lines = content.split('\n')
+        line_starts = [0]
+        for i, c in enumerate(content):
+            if c == '\n':
+                line_starts.append(i + 1)
+
+        def _line_num(pos):
+            return _bisect.bisect_right(line_starts, pos)
+
+        def _find_end(start_line, max_lines=60):
+            depth = 0
+            started = False
+            for i in range(start_line - 1, min(start_line + max_lines, len(lines))):
+                ln = lines[i]
+                depth += ln.count('{') + ln.count('[') - ln.count('}') - ln.count(']')
+                if '{' in ln or '[' in ln:
+                    started = True
+                if started and depth <= 0:
+                    return i + 1
+                if not started and ';' in ln:
+                    return i + 1
+            return min(start_line + 20, len(lines))
+
+        seen_in_file = set()
+
+        for m in _TYPE_ALIAS_RE.finditer(content):
+            name = m.group(1)
+            if (name, rel_path) in seen_in_file:
+                continue
+            seen_in_file.add((name, rel_path))
+            line_start = _line_num(m.start())
+            line_end = _find_end(line_start)
+            new_symbols.append((name, "Type", rel_path, line_start, line_end))
+            rhs = "".join(lines[line_start - 1:line_end])
+            for ref_m in _TYPE_NAME_RE.finditer(rhs):
+                ref = ref_m.group(1)
+                if ref != name and ref not in _BUILTIN_TYPES:
+                    type_refs.append((name, f"{rel_path}::{name}", ref, rel_path, line_start))
+
+        for m in _INTERFACE_RE.finditer(content):
+            name = m.group(1)
+            if (name, rel_path) in seen_in_file:
+                continue
+            seen_in_file.add((name, rel_path))
+            line_start = _line_num(m.start())
+            line_end = _find_end(line_start)
+            new_symbols.append((name, "Type", rel_path, line_start, line_end))
+
+        for m in _ENUM_RE.finditer(content):
+            name = m.group(1)
+            if (name, rel_path) in seen_in_file:
+                continue
+            seen_in_file.add((name, rel_path))
+            line_start = _line_num(m.start())
+            line_end = _find_end(line_start)
+            new_symbols.append((name, "Type", rel_path, line_start, line_end))
+
+        for m in _CONST_RECORD_RE.finditer(content):
+            name = m.group(1)
+            type_ref = m.group(2)
+            if (name, rel_path) in seen_in_file:
+                continue
+            seen_in_file.add((name, rel_path))
+            line_start = _line_num(m.start())
+            line_end = _find_end(line_start)
+            new_symbols.append((name, "Variable", rel_path, line_start, line_end))
+            type_refs.append((name, f"{rel_path}::{name}", type_ref, rel_path, line_start))
+
+        for m in _CONST_TYPED_OBJ_RE.finditer(content):
+            name = m.group(1)
+            type_ref = m.group(2)
+            if (name, rel_path) in seen_in_file:
+                continue
+            seen_in_file.add((name, rel_path))
+            line_start = _line_num(m.start())
+            line_end = _find_end(line_start)
+            new_symbols.append((name, "Variable", rel_path, line_start, line_end))
+            if type_ref not in _BUILTIN_TYPES:
+                type_refs.append((name, f"{rel_path}::{name}", type_ref, rel_path, line_start))
+
+        for m in _CONST_ARRAY_RE.finditer(content):
+            name = m.group(1)
+            if (name, rel_path) in seen_in_file:
+                continue
+            seen_in_file.add((name, rel_path))
+            line_start = _line_num(m.start())
+            line_end = _find_end(line_start)
+            new_symbols.append((name, "Variable", rel_path, line_start, line_end))
+
+    if not new_symbols:
+        _vmsg("POST-PROCESS TS pid=%d - no new symbols found", pid)
+        return
+
+    now = _time.time()
+    inserted = 0
+    for name, kind, rel_path, line_start, line_end in new_symbols:
+        existing = conn.execute(
+            "SELECT 1 FROM nodes WHERE LOWER(name) = LOWER(?) AND file_path = ? LIMIT 1",
+            (name, rel_path)
+        ).fetchone()
+        if existing:
+            continue
+        qname = f"{rel_path}::{name}"
+        try:
+            conn.execute(
+                "INSERT OR IGNORE INTO nodes "
+                "(kind, name, qualified_name, file_path, line_start, line_end, "
+                "language, parent_name, params, return_type, modifiers, is_test, "
+                "file_hash, extra, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, 'typescript', NULL, NULL, NULL, NULL, 0, NULL, '{}', ?)",
+                (kind, name, qname, rel_path, line_start, line_end, now)
+            )
+            inserted += 1
+        except Exception:
+            pass
+
+    if inserted > 0:
+        try:
+            conn.execute("INSERT INTO nodes_fts(nodes_fts) VALUES('rebuild')")
+        except Exception:
+            pass
+
+    name_to_qnames = {}
+    for row in conn.execute(
+        "SELECT name, qualified_name FROM nodes WHERE name IS NOT NULL"
+    ).fetchall():
+        key = (row[0] or "").lower()
+        if key not in name_to_qnames:
+            name_to_qnames[key] = []
+        name_to_qnames[key].append(row[1])
+
+    # Build set of post-processed type names for signature scanning
+    pp_type_names = set()
+    for name, kind, rel_path, line_start, line_end in new_symbols:
+        if kind in ("Type", "Variable"):
+            pp_type_names.add(name.lower())
+    pp_type_names = sorted(pp_type_names)
+
+    # Scan CRG-built function/class signatures for references to post-processed types.
+    # CRG doesn't create REFERENCES edges for type annotations — this connects
+    # functions that use a type in their params/return type to that type node.
+    sig_edges = 0
+    if pp_type_names:
+        try:
+            sig_rows = conn.execute(
+                "SELECT name, qualified_name, file_path, signature, return_type, line_start "
+                "FROM nodes WHERE kind IN ('Function', 'Class', 'Test') "
+                "AND signature IS NOT NULL"
+            ).fetchall()
+            for sr in sig_rows:
+                sig_text = (sr[3] or "") + " " + (sr[4] or "")
+                if not sig_text.strip():
+                    continue
+                sig_lower = sig_text.lower()
+                for tn in pp_type_names:
+                    if tn in sig_lower:
+                        source_qname = sr[1]
+                        target_qnames = name_to_qnames.get(tn, [])
+                        for tq in target_qnames[:3]:
+                            existing_edge = conn.execute(
+                                "SELECT 1 FROM edges WHERE source_qualified = ? "
+                                "AND target_qualified = ? AND kind = 'REFERENCES' LIMIT 1",
+                                (source_qname, tq)
+                            ).fetchone()
+                            if not existing_edge:
+                                try:
+                                    conn.execute(
+                                        "INSERT INTO edges "
+                                        "(source_qualified, target_qualified, kind, "
+                                        "file_path, line, extra, confidence, "
+                                        "confidence_tier, updated_at) "
+                                        "VALUES (?, ?, 'REFERENCES', ?, ?, '{}', 1.0, 'high', ?)",
+                                        (source_qname, tq, sr[2], sr[5] or 0, now)
+                                    )
+                                    sig_edges += 1
+                                except Exception:
+                                    pass
+        except Exception as e:
+            _vmsg("POST-PROCESS TS pid=%d - signature scan failed: %s", pid, str(e)[:200])
+
+    edges_inserted = 0
+    for source_name, source_qname, target_name, file_path, line_num in type_refs:
+        target_qnames = name_to_qnames.get(target_name.lower(), [])
+        if not target_qnames:
+            continue
+        for target_qname in target_qnames[:3]:
+            existing_edge = conn.execute(
+                "SELECT 1 FROM edges WHERE source_qualified = ? AND target_qualified = ? AND kind = 'REFERENCES' LIMIT 1",
+                (source_qname, target_qname)
+            ).fetchone()
+            if existing_edge:
+                continue
+            try:
+                conn.execute(
+                    "INSERT INTO edges "
+                    "(source_qualified, target_qualified, kind, file_path, line, "
+                    "extra, confidence, confidence_tier, updated_at) "
+                    "VALUES (?, ?, 'REFERENCES', ?, ?, '{}', 1.0, 'high', ?)",
+                    (source_qname, target_qname, file_path, line_num, now)
+                )
+                edges_inserted += 1
+            except Exception:
+                pass
+
+    conn.commit()
+    _vmsg("POST-PROCESS TS pid=%d - %d nodes, %d edges, %d sig edges inserted",
+          pid, inserted, edges_inserted, sig_edges)
+
+
 def _build_graphs(pid, proj, repo_dir, user_key=None):
     """Run graphify + CRG build, parse results, generate HTML - shared by clone and pull.
     
@@ -1482,6 +1762,7 @@ def _build_graphs(pid, proj, repo_dir, user_key=None):
             )
             snip_conn.execute("CREATE INDEX idx_snippet_name ON node_snippets(node_name)")
             snip_conn.execute("CREATE INDEX idx_snippet_file ON node_snippets(file_path)")
+            _post_process_ts_symbols(snip_conn, repo_dir, pid)
             nodes_with_lines = snip_conn.execute(
                 "SELECT name, qualified_name, file_path, line_start, line_end FROM nodes "
                 "WHERE line_start IS NOT NULL AND file_path IS NOT NULL AND name IS NOT NULL"
