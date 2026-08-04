@@ -104,6 +104,21 @@ try {
     Write-Err "Failed to download agent: $_"
 }
 
+# -- Download scout subagent (opencode only) --
+if ($Harness -eq "opencode") {
+    Write-Step "Downloading scout subagent..."
+    $scoutUrl = "$PodUrl/download/scout-agent"
+    $agentsDir = Join-Path (Join-Path $RepoDir ".opencode") "agents"
+    New-Item -ItemType Directory -Force -Path $agentsDir | Out-Null
+    $scoutPath = Join-Path $agentsDir "intelligraph-scout.md"
+    try {
+        if ($SslVerify) { curl.exe -s -o "$scoutPath" "$scoutUrl" } else { curl.exe -k -s -o "$scoutPath" "$scoutUrl" }
+        Write-Ok "intelligraph-scout.md saved to .opencode/agents/"
+    } catch {
+        Write-Warn "Failed to download scout subagent: $_"
+    }
+}
+
 # -- Download opencode plugin (no-op: grep/glob allowed) --
 Write-Step "Updating opencode plugin..."
 if ($Harness -eq "opencode") {
@@ -374,6 +389,7 @@ Write-Host "`n========================================" -ForegroundColor Green
 Write-Host "  Setup Complete!" -ForegroundColor Green
 Write-Host "========================================" -ForegroundColor Green
 Write-Host "  Agent guide:     $RepoDir\intelligraph-agent.md"
+Write-Host "  Scout subagent:  $(if ($Harness -eq 'opencode') { $RepoDir + '\.opencode\agents\intelligraph-scout.md' } else { 'N/A (opencode only)' })"
 Write-Host "  Plugin:          $(if ($Harness -eq 'opencode') { $PluginsDir + '\intelligraph-enforce.js (no-op)' } else { $RepoDir + '\.claude\settings.json (no-op)' })"
 Write-Host "  Intelligraph MCP: $localMcpPath"
 Write-Host "  Graph cache:     $CacheDir"

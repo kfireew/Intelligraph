@@ -931,6 +931,15 @@ def download_setup_ps1():
                      mimetype="text/plain")
 
 
+@app.route("/download/scout-agent")
+def download_scout_agent():
+    """Download the intelligraph-scout subagent markdown."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "intelligraph-scout.md")
+    return send_file(path, as_attachment=True,
+                     download_name="intelligraph-scout.md",
+                     mimetype="text/markdown")
+
+
 @app.route("/projects/<int:pid>/sync")
 def project_sync(pid):
     """Download graph.db + graph.json + metadata as a zip for local MCP sync.
@@ -4096,7 +4105,8 @@ def status():
                      "agent": "/download/agent",
                      "test_mcp": "/download/test-mcp",
                      "intelligraph_mcp": "/download/intelligraph-mcp",
-                     "setup_ps1": "/download/setup-ps1"},
+                     "setup_ps1": "/download/setup-ps1",
+                      "scout_agent": "/download/scout-agent"},
         "project": proj,
         "projects": list(_projects().keys()),
         "build_queue_depth": build_queue.depth,

@@ -46,6 +46,18 @@ MCP tools are primary — start with them. grep and glob fill gaps that structur
 
 MCP gives you line ranges, confidence, and dependency edges. grep gives you raw text matches. Use MCP first, grep second.
 
+## Delegation to subagents
+
+For tasks requiring 3+ MCP tool calls (exploration + impact analysis before editing), delegate to `@intelligraph-scout`:
+1. Delegate the exploration to `@intelligraph-scout` — it runs impact/search/node/Read in an isolated context
+2. The subagent returns a compact brief (~100 tokens): file paths, line ranges, and one-sentence descriptions
+3. Use the brief to plan and edit in the main window
+
+When NOT to delegate:
+- Single search() or impact() call — do it directly
+- Quick question ("where is X defined?") — search directly
+- User asked for explanation, not editing — search directly
+
 ## Rules
 - **Start with search().** It provides line ranges, confidence levels, and graph connections. Reach for grep when MCP returns gaps.
 - **Use search() + node() + Read with line ranges** instead of explore subagents.
@@ -70,3 +82,4 @@ When a tool returns a non-standard response, follow these positive pivot actions
 | **Looking for external package symbols** | Call `package("@scope/name")` FIRST to get `.d.ts` line ranges, then `Read` surgically. |
 | **search() returns `[L]` or no results** | grep for the symbol name to find all usage sites. Use `search_in_file()` on matching files for line-level detail. |
 | **impact() misses expected files** | grep for `Record<TypeName` or `switch(TypeName` to find type-position usage the graph might miss. |
+| **Task needs 3+ MCP tool calls** | Delegate to `@intelligraph-scout` for exploration, then plan + edit in the main window. |
