@@ -48,15 +48,16 @@ MCP gives you line ranges, confidence, and dependency edges. grep gives you raw 
 
 ## Delegation to subagents
 
-For tasks requiring 3+ MCP tool calls (exploration + impact analysis before editing), delegate to `@intelligraph-scout`:
-1. Delegate the exploration to `@intelligraph-scout` — it runs impact/search/node/Read in an isolated context
-2. The subagent returns a compact brief (~100 tokens): file paths, line ranges, and one-sentence descriptions
-3. Use the brief to plan and edit in the main window
+Delegate to `@intelligraph-scout` before these tasks:
+- **Editing any type, enum, const, or shared function** — the scout runs impact/search/node and returns findings with line ranges and evidence. Then edit using the scout's line ranges.
+- **"What files need to change" or "what breaks if I change X"** — the scout finds all affected files and returns them with code patterns and confidence.
 
 When NOT to delegate:
 - Single search() or impact() call — do it directly
 - Quick question ("where is X defined?") — search directly
 - User asked for explanation, not editing — search directly
+
+**Trust the scout's findings.** They include line ranges, code patterns, and how each was verified. Use those line ranges directly for editing. Re-read only if confidence is LOW or the edit doesn't match the described pattern.
 
 ## Rules
 - **Start with search().** It provides line ranges, confidence levels, and graph connections. Reach for grep when MCP returns gaps.
@@ -82,4 +83,4 @@ When a tool returns a non-standard response, follow these positive pivot actions
 | **Looking for external package symbols** | Call `package("@scope/name")` FIRST to get `.d.ts` line ranges, then `Read` surgically. |
 | **search() returns `[L]` or no results** | grep for the symbol name to find all usage sites. Use `search_in_file()` on matching files for line-level detail. |
 | **impact() misses expected files** | grep for `Record<TypeName` or `switch(TypeName` to find type-position usage the graph might miss. |
-| **Task needs 3+ MCP tool calls** | Delegate to `@intelligraph-scout` for exploration, then plan + edit in the main window. |
+| **Editing a type, enum, const, or shared function** | Delegate to `@intelligraph-scout` for blast radius + file discovery, then edit using the scout's line ranges. |

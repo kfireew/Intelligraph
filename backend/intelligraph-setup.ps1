@@ -266,8 +266,19 @@ if ($Harness -eq "opencode") {
     # Do NOT add it to the "plugin" key — that key is for npm package names
     # only. See https://opencode.ai/docs/plugins
     
+    # Add intelligraph-agent.md to instructions so all agents (main + subagents)
+    # see the MCP tool guidance in their system prompt.
+    if (-not $config.PSObject.Properties["instructions"]) {
+        $config | Add-Member -MemberType NoteProperty -Name "instructions" -Value @()
+    }
+    $instrArray = @($config.instructions)
+    if ($instrArray -notcontains "intelligraph-agent.md") {
+        $instrArray += "intelligraph-agent.md"
+        $config.instructions = $instrArray
+    }
+    
     $config | ConvertTo-Json -Depth 10 | Set-Content $opencodePath -Encoding UTF8
-    Write-Ok "opencode.json configured with intelligraph MCP"
+    Write-Ok "opencode.json configured with intelligraph MCP + instructions"
 } else {
     # Claude Code — uses .mcp.json at project root
     $mcpConfigPath = Join-Path $RepoDir ".mcp.json"
@@ -287,6 +298,22 @@ if ($Harness -eq "opencode") {
     }
     $mcpConfig | ConvertTo-Json -Depth 10 | Set-Content $mcpConfigPath -Encoding UTF8
     Write-Ok ".mcp.json saved to project root (Claude Code)"
+    
+    # Claude Code loads CLAUDE.md into all agents' context.
+    # Reference intelligraph-agent.md so MCP tool guidance is visible
+    # to the main agent and all subagents.
+    $claudeMdPath = Join-Path $RepoDir "CLAUDE.md"
+    $refLine = "@intelligraph-agent.md"
+    if (Test-Path $claudeMdPath) {
+        $existing = Get-Content $claudeMdPath -Raw -ErrorAction SilentlyContinue
+        if ($existing -and $existing -notmatch "intelligraph-agent\.md") {
+            Add-Content $claudeMdPath "`n$refLine" -Encoding UTF8
+            Write-Ok "CLAUDE.md updated with @intelligraph-agent.md reference"
+        }
+    } else {
+        $refLine | Set-Content $claudeMdPath -Encoding UTF8
+        Write-Ok "CLAUDE.md created with @intelligraph-agent.md reference"
+    }
 }
 
 # -- Create mcp-update command --

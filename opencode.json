@@ -18,5 +18,6 @@
                                      "enabled":  true,
                                      "timeout":  120000
                                  }
-            }
+            },
+    "instructions": ["intelligraph-agent.md"]
 }
