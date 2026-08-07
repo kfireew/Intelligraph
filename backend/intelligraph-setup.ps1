@@ -104,6 +104,46 @@ try {
     Write-Err "Failed to download agent: $_"
 }
 
+# -- Create AGENTS.md (opencode) or CLAUDE.md (Claude Code) --
+# These are the primary rules files loaded into ALL agents' context,
+# including subagents. The instructions array in opencode.json only
+# reaches the primary agent — AGENTS.md reaches subagents too.
+Write-Step "Creating rules file for agent visibility..."
+if ($Harness -eq "opencode") {
+    $agentsMdPath = Join-Path $RepoDir "AGENTS.md"
+    if (Test-Path $agentsMdPath) {
+        $existing = Get-Content $agentsMdPath -Raw -ErrorAction SilentlyContinue
+        if ($existing -and $existing -notmatch "Intelligraph Code Intelligence") {
+            $agentContent = Get-Content $agentDest -Raw
+            $merged = $existing.TrimEnd() + "`n`n" + $agentContent
+            $merged | Set-Content $agentsMdPath -Encoding UTF8
+            Write-Ok "AGENTS.md merged with intelligraph-agent.md content"
+        } else {
+            $agentContent = Get-Content $agentDest -Raw
+            $agentContent | Set-Content $agentsMdPath -Encoding UTF8
+            Write-Ok "AGENTS.md updated with intelligraph-agent.md content"
+        }
+    } else {
+        $agentContent = Get-Content $agentDest -Raw
+        $agentContent | Set-Content $agentsMdPath -Encoding UTF8
+        Write-Ok "AGENTS.md created with intelligraph-agent.md content"
+    }
+} else {
+    # Claude Code: CLAUDE.md supports @file references
+    $claudeMdPath = Join-Path $RepoDir "CLAUDE.md"
+    $refLine = "@intelligraph-agent.md"
+    if (Test-Path $claudeMdPath) {
+        $existing = Get-Content $claudeMdPath -Raw -ErrorAction SilentlyContinue
+        if ($existing -and $existing -notmatch "intelligraph-agent\.md") {
+            Add-Content $claudeMdPath "`n$refLine" -Encoding UTF8
+            Write-Ok "CLAUDE.md updated with @intelligraph-agent.md reference"
+        }
+    } else {
+        $refLine | Set-Content $claudeMdPath -Encoding UTF8
+        Write-Ok "CLAUDE.md created with @intelligraph-agent.md reference"
+    }
+}
+
 # -- Download scout subagent (opencode only) --
 if ($Harness -eq "opencode") {
     Write-Step "Downloading scout subagent..."
