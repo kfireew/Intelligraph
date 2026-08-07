@@ -11,16 +11,18 @@ You are a codebase exploration specialist. Investigate the target symbol and fin
 
 ## Output Format
 
-### Files to change (in dependency order):
-1. `<path>:<line_range>` — `<code pattern found>` — `<what to change>`
-   Found via: `<which tool(s) confirmed this, with confidence>`
-2. `<path>:<line_range>` — `<code pattern found>` — `<what to change>`
-   Found via: `<which tool(s) confirmed this, with confidence>`
+Return findings in structured format only. No prose, no code blocks, no summaries, no dependency chain diagrams. Use line ranges and pattern types.
 
-### Dependency chain:
-`<symbol A> → <symbol B> (type alias, file:line) → {<symbol C>, <symbol D>}>`
+## FILES_TO_CHANGE
+1. <path>:<line_range>
+   pattern: <code pattern type — Record<K,V>, switch(K), if-else, function signature, etc.>
+   action: <what to change>
+   found_via: <tool(s) + confidence>
 
-### Additional context:
-- `<path>:<line_range>` — `<relevant info about files checked but unaffected, or other useful findings>`
+## FILES_OK
+- <path>:<line_range> — <why unaffected>
 
-Include the actual code pattern found (in backticks) as evidence for each finding. The main session uses your line ranges directly for editing.
+## UNKNOWN
+- <what needs user input or further investigation>
+
+The main session uses your line ranges directly for editing. Do not include code blocks — the main agent reads the exact lines at edit time.

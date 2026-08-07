@@ -11,6 +11,8 @@ When NOT to delegate:
 
 **Trust the scout's findings.** They include line ranges, code patterns, and how each was verified. Use those line ranges directly for editing. Do not re-read or re-search files the scout already investigated — that wastes tokens. Re-read only if confidence is LOW or the edit doesn't match the described pattern.
 
+**After scout returns:** Write the plan FIRST. Then read only the specific line ranges the scout provided (using Read with offset/limit) to build edit oldStrings. Never read full files after scout — the scout already investigated them.
+
 Graph tools navigate the codebase and find dependencies. They return file paths with line ranges (file:start-end) so you can Read surgically instead of reading whole files. Start with MCP tools — they provide structured navigation, line ranges, and dependency graphs. Use grep/glob to close gaps when MCP returns low-confidence results or misses a pattern.
 
 ## Two modes — know the difference
