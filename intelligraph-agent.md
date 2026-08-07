@@ -1,5 +1,16 @@
 # Intelligraph Code Intelligence
 
+## Before you plan
+
+Delegate to `@intelligraph-scout` first. The scout investigates the codebase, finds affected files, dependencies, and line ranges. Use the scout's findings to build your plan.
+
+When NOT to delegate:
+- Single search() or impact() call — do it directly
+- Quick question ("where is X defined?") — search directly
+- User asked for explanation, not editing — search directly
+
+**Trust the scout's findings.** They include line ranges, code patterns, and how each was verified. Use those line ranges directly for editing. Do not re-read or re-search files the scout already investigated — that wastes tokens. Re-read only if confidence is LOW or the edit doesn't match the described pattern.
+
 Graph tools navigate the codebase and find dependencies. They return file paths with line ranges (file:start-end) so you can Read surgically instead of reading whole files. Start with MCP tools — they provide structured navigation, line ranges, and dependency graphs. Use grep/glob to close gaps when MCP returns low-confidence results or misses a pattern.
 
 ## Two modes — know the difference
@@ -46,19 +57,6 @@ MCP tools are primary — start with them. grep and glob fill gaps that structur
 
 MCP gives you line ranges, confidence, and dependency edges. grep gives you raw text matches. Use MCP first, grep second.
 
-## Delegation to subagents
-
-Delegate to `@intelligraph-scout` before these tasks:
-- **Editing any type, enum, const, or shared function** — the scout runs impact/search/node and returns findings with line ranges and evidence. Then edit using the scout's line ranges.
-- **"What files need to change" or "what breaks if I change X"** — the scout finds all affected files and returns them with code patterns and confidence.
-
-When NOT to delegate:
-- Single search() or impact() call — do it directly
-- Quick question ("where is X defined?") — search directly
-- User asked for explanation, not editing — search directly
-
-**Trust the scout's findings.** They include line ranges, code patterns, and how each was verified. Use those line ranges directly for editing. Re-read only if confidence is LOW or the edit doesn't match the described pattern.
-
 ## Rules
 - **Start with search().** It provides line ranges, confidence levels, and graph connections. Reach for grep when MCP returns gaps.
 - **Use search() + node() + Read with line ranges** instead of explore subagents.
@@ -83,4 +81,3 @@ When a tool returns a non-standard response, follow these positive pivot actions
 | **Looking for external package symbols** | Call `package("@scope/name")` FIRST to get `.d.ts` line ranges, then `Read` surgically. |
 | **search() returns `[L]` or no results** | grep for the symbol name to find all usage sites. Use `search_in_file()` on matching files for line-level detail. |
 | **impact() misses expected files** | grep for `Record<TypeName` or `switch(TypeName` to find type-position usage the graph might miss. |
-| **Editing a type, enum, const, or shared function** | Delegate to `@intelligraph-scout` for blast radius + file discovery, then edit using the scout's line ranges. |

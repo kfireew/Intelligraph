@@ -1,5 +1,5 @@
 ---
-description: Explores codebase before editing — finds all files that need changes and their line ranges. Use before editing types, enums, or shared functions. Returns findings with evidence.
+description: Investigates the codebase before planning a change. Finds all affected files, dependencies, and line ranges. Use as the first step before planning or editing.
 mode: subagent
 permission:
   edit: deny
